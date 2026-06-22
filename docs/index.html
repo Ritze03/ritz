@@ -54,8 +54,16 @@
 
 <section id="quickstart">
   <h2>Quickstart</h2>
+  <p>You need <strong>Rust</strong> (the <code>cargo</code> build tool) and <strong>git</strong>.
+  On most distros: <code>sudo pacman -S rust git</code> (Arch),
+  <code>sudo apt install cargo git</code> (Debian/Ubuntu), or install Rust via
+  <a href="https://rustup.rs/">rustup.rs</a>.</p>
   <ol class="steps">
-    <li><strong>Build it</strong> (Linux only):
+    <li><strong>Get the code</strong>:
+      <pre><code>git clone https://github.com/Ritze03/ritz.git
+cd ritz</code></pre>
+    </li>
+    <li><strong>Build it</strong> (Linux only) — takes a few minutes the first time:
       <pre><code>cargo build --release</code></pre>
     </li>
     <li><strong>Put the binary on your <code>PATH</code></strong>:
@@ -70,6 +78,10 @@
       profile, then starts the game. After that you get a splash with
       <kbd>W</kbd> launch · <kbd>E</kbd> edit · <kbd>Q</kbd> cancel.</li>
   </ol>
+
+  <div class="note"><strong>Not on your <code>PATH</code>?</strong> If <code>ritz</code> isn't
+  found after step 3, add <code>export PATH="$HOME/.local/bin:$PATH"</code> to your
+  <code>~/.bashrc</code> (or <code>~/.zshrc</code>) and reopen the terminal.</div>
 
   <div class="note"><strong>Settings window:</strong> run <code>ritz</code> with no arguments
   any time to open the full GUI. <strong>Dry run:</strong> <code>ritz --print %command%</code>

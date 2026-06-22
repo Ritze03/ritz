@@ -20,16 +20,28 @@ and driven by simple JSON modules you can edit or extend.
 
 ## Quickstart
 
+You need **Rust** (the `cargo` build tool) and **git**. On most distros:
+`sudo pacman -S rust git` (Arch) · `sudo apt install cargo git` (Debian/Ubuntu) · or install
+Rust via [rustup.rs](https://rustup.rs/).
+
 ```sh
-# 1. Build (Linux only)
+# 1. Get the code
+git clone https://github.com/Ritze03/ritz.git
+cd ritz
+
+# 2. Build it (Linux only) — this takes a few minutes the first time
 cargo build --release
 
-# 2. Put the binary on your PATH
+# 3. Put the binary on your PATH
 install -Dm755 target/release/ritz ~/.local/bin/ritz   # ensure ~/.local/bin is in $PATH
 
-# 3. In Steam: right-click the game → Properties → Launch Options:
+# 4. In Steam: right-click the game → Properties → Launch Options:
 ritz %command%
 ```
+
+> If `ritz` isn't found after step 3, your `~/.local/bin` isn't on `$PATH`. Add
+> `export PATH="$HOME/.local/bin:$PATH"` to your `~/.bashrc` (or `~/.zshrc`) and reopen the
+> terminal.
 
 Launch the game. The first time Ritz sees it, a short wizard asks for a **name** and an
 optional **profile**, then the game starts. From then on you get a splash screen on every
