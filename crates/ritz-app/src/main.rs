@@ -193,10 +193,9 @@ fn cmd_splash(args: &[String]) -> Result<i32> {
         .splash_timeout_secs
         .unwrap_or(ctx.general.splash_timeout_secs);
     let profile = resolved.game_config.config.modules.preset.as_deref();
-    let name = steam
-        .game_name
-        .clone()
-        .unwrap_or_else(|| resolved.appid.clone());
+    // The game is already configured — show its saved name, not the name derived
+    // from the Steam command (which can be the install-folder/"proton").
+    let name = resolved.game_config.game.name.clone();
 
     Ok(match splash::show(&name, &resolved.appid, timeout, profile) {
         splash::SplashAction::Launch => SPLASH_LAUNCH,
