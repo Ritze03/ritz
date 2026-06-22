@@ -32,16 +32,12 @@ cd ritz
 # 2. Build it (Linux only) — this takes a few minutes the first time
 cargo build --release
 
-# 3. Put the binary on your PATH
-install -Dm755 target/release/ritz ~/.local/bin/ritz   # ensure ~/.local/bin is in $PATH
+# 3. Install the binary system-wide
+sudo install -Dm755 target/release/ritz /usr/bin/ritz
 
 # 4. In Steam: right-click the game → Properties → Launch Options:
 ritz %command%
 ```
-
-> If `ritz` isn't found after step 3, your `~/.local/bin` isn't on `$PATH`. Add
-> `export PATH="$HOME/.local/bin:$PATH"` to your `~/.bashrc` (or `~/.zshrc`) and reopen the
-> terminal.
 
 Launch the game. The first time Ritz sees it, a short wizard asks for a **name** and an
 optional **profile**, then the game starts. From then on you get a splash screen on every

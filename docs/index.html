@@ -66,9 +66,8 @@ cd ritz</code></pre>
     <li><strong>Build it</strong> (Linux only) — takes a few minutes the first time:
       <pre><code>cargo build --release</code></pre>
     </li>
-    <li><strong>Put the binary on your <code>PATH</code></strong>:
-      <pre><code>install -Dm755 target/release/ritz ~/.local/bin/ritz</code></pre>
-      (make sure <code>~/.local/bin</code> is in your <code>$PATH</code>)
+    <li><strong>Install the binary system-wide</strong>:
+      <pre><code>sudo install -Dm755 target/release/ritz /usr/bin/ritz</code></pre>
     </li>
     <li><strong>Set the Steam launch option</strong> — right-click the game →
       <em>Properties</em> → <em>Launch Options</em>:
@@ -78,10 +77,6 @@ cd ritz</code></pre>
       profile, then starts the game. After that you get a splash with
       <kbd>W</kbd> launch · <kbd>E</kbd> edit · <kbd>Q</kbd> cancel.</li>
   </ol>
-
-  <div class="note"><strong>Not on your <code>PATH</code>?</strong> If <code>ritz</code> isn't
-  found after step 3, add <code>export PATH="$HOME/.local/bin:$PATH"</code> to your
-  <code>~/.bashrc</code> (or <code>~/.zshrc</code>) and reopen the terminal.</div>
 
   <div class="note"><strong>Settings window:</strong> run <code>ritz</code> with no arguments
   any time to open the full GUI. <strong>Dry run:</strong> <code>ritz --print %command%</code>
