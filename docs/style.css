@@ -154,6 +154,15 @@ ol.steps > li::before {
   display: grid; place-items: center; font-weight: 600; font-size: 14px;
 }
 
+/* ---- screenshots ---- */
+figure.shot { margin: 18px 0; text-align: center; }
+figure.shot img {
+  max-width: 100%; height: auto; border: 1px solid var(--border);
+  border-radius: 12px; box-shadow: 0 10px 34px rgba(0,0,0,.45);
+}
+figure.shot.splash img { max-width: 420px; }
+figure.shot figcaption { color: var(--faint); font-size: 13px; margin-top: 8px; }
+
 kbd {
   font-family: var(--mono); font-size: .85em; background: var(--btn);
   border: 1px solid var(--btnbd); border-bottom-width: 2px;
