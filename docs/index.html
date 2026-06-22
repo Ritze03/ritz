@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ritz — a Linux Steam launch wrapper</title>
+<meta name="description" content="Ritz transparently injects env vars, gamescope/gamemode wrappers, and launch args around your Steam games — configured from a GUI, layered across global/profile/game scopes, driven by simple JSON modules.">
+<link rel="icon" type="image/png" href="assets/favicon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="nav">
+  <div class="nav-inner">
+    <a class="nav-brand" href="index.html"><img src="assets/favicon.png" alt=""><span>Ritz</span></a>
+    <nav class="nav-links">
+      <a href="index.html" class="active">Home</a>
+      <a href="usage.html">Usage</a>
+      <a href="extensions.html">Extensions</a>
+      <a href="https://github.com/Ritze03/ritz">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<div class="hero">
+  <img src="assets/logo.png" alt="Ritz logo">
+  <h1>Ritz</h1>
+  <p class="tag">A Linux Steam launch wrapper. Set one launch option, and Ritz handles the
+  env vars, gamescope/gamemode wrappers, and launch args for you — from a GUI, per game.</p>
+  <div class="cta">
+    <a class="btn" href="#quickstart">Quickstart</a>
+    <a class="btn secondary" href="usage.html">Usage guide</a>
+    <a class="btn secondary" href="extensions.html">Write a module</a>
+  </div>
+</div>
+
+<main>
+
+<section id="what">
+  <h2>What it solves</h2>
+  <p>Linux gaming means juggling <code>RADV_PERFTEST</code>, <code>gamescope</code> flags,
+  <code>VKD3D_CONFIG</code>, Proton sync backends, frame-gen quirks, and a wall of
+  <code>VAR=value %command%</code> launch options — per game, by hand. Ritz replaces all of
+  that with a single launch option and a settings window. You toggle what you want; Ritz
+  assembles the exact command at launch and stays out of the way.</p>
+
+  <div class="grid">
+    <div class="card"><h3>One launch option</h3><p>Set <code>ritz %command%</code> once. Everything else is configured in the GUI.</p></div>
+    <div class="card"><h3>Layered scopes</h3><p>Settings cascade <span class="chip global">global</span> → <span class="chip profile">profile</span> → <span class="chip game">game</span>, each overriding the last.</p></div>
+    <div class="card"><h3>JSON modules</h3><p>Every feature is a small JSON file. Edit the bundled ones or drop in your own.</p></div>
+    <div class="card"><h3>Live preview</h3><p>The GUI shows the exact assembled launch command as you toggle options.</p></div>
+  </div>
+</section>
+
+<section id="quickstart">
+  <h2>Quickstart</h2>
+  <ol class="steps">
+    <li><strong>Build it</strong> (Linux only):
+      <pre><code>cargo build --release</code></pre>
+    </li>
+    <li><strong>Put the binary on your <code>PATH</code></strong>:
+      <pre><code>install -Dm755 target/release/ritz ~/.local/bin/ritz</code></pre>
+      (make sure <code>~/.local/bin</code> is in your <code>$PATH</code>)
+    </li>
+    <li><strong>Set the Steam launch option</strong> — right-click the game →
+      <em>Properties</em> → <em>Launch Options</em>:
+      <pre><code>ritz %command%</code></pre>
+    </li>
+    <li><strong>Launch.</strong> The first time, a wizard asks for a name and an optional
+      profile, then starts the game. After that you get a splash with
+      <kbd>W</kbd> launch · <kbd>E</kbd> edit · <kbd>Q</kbd> cancel.</li>
+  </ol>
+
+  <div class="note"><strong>Settings window:</strong> run <code>ritz</code> with no arguments
+  any time to open the full GUI. <strong>Dry run:</strong> <code>ritz --print %command%</code>
+  prints the assembled command without launching.</div>
+
+  <h3>Non-Steam games</h3>
+  <p>For non-Steam shortcuts (or anything Ritz can't identify from Steam), give it a stable
+  id:</p>
+  <pre><code>RITZ_APPID=my-game ritz %command%</code></pre>
+  <p>Running <code>ritz %command%</code> on an unknown game walks you through setting this up
+  and shows the exact launch option to paste.</p>
+</section>
+
+<section id="next">
+  <h2>Where to next</h2>
+  <div class="grid">
+    <div class="card"><h3><a href="usage.html">Usage guide →</a></h3><p>The splash, the settings GUI, scopes &amp; colors, profiles, and maintenance actions.</p></div>
+    <div class="card"><h3><a href="extensions.html">Extension reference →</a></h3><p>Write your own modules: the full JSON schema with example snippets for every block.</p></div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  Ritz · Linux only · <a href="https://github.com/Ritze03/ritz">github.com/Ritze03/ritz</a>
+</footer>
+
+</body>
+</html>

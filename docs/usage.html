@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ritz — Usage Guide</title>
+<meta name="description" content="How to use Ritz: the launch splash, the settings GUI, global/profile/game scopes, profiles, and maintenance actions.">
+<link rel="icon" type="image/png" href="assets/favicon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="nav">
+  <div class="nav-inner">
+    <a class="nav-brand" href="index.html"><img src="assets/favicon.png" alt=""><span>Ritz</span></a>
+    <nav class="nav-links">
+      <a href="index.html">Home</a>
+      <a href="usage.html" class="active">Usage</a>
+      <a href="extensions.html">Extensions</a>
+      <a href="https://github.com/Ritze03/ritz">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+<section>
+  <h1 style="margin-top:36px">Usage guide</h1>
+  <p class="tag" style="color:var(--dim)">Everything you do day-to-day: the launch splash,
+  the settings window, scopes, and profiles.</p>
+</section>
+
+<section id="invocation">
+  <h2>The four ways to invoke Ritz</h2>
+  <table>
+    <tr><th>Command</th><th>What happens</th></tr>
+    <tr><td><code>ritz %command%</code></td><td>Steam launch path: shows the splash, then launches (or opens the editor).</td></tr>
+    <tr><td><code>ritz</code></td><td>Opens the settings GUI with no game launch.</td></tr>
+    <tr><td><code>ritz --print %command%</code></td><td>Prints the assembled launch command and exits — never launches.</td></tr>
+    <tr><td><code>RITZ_APPID=&lt;id&gt; ritz %command%</code></td><td>Gives a non-Steam game a stable identity.</td></tr>
+  </table>
+</section>
+
+<section id="splash">
+  <h2>The launch splash</h2>
+  <p>When you launch a configured game, a small splash appears and counts down:</p>
+  <table>
+    <tr><th>Key</th><th>Action</th></tr>
+    <tr><td><kbd>W</kbd> / <kbd>Enter</kbd></td><td>Launch immediately.</td></tr>
+    <tr><td><kbd>E</kbd></td><td>Open this game's config in the editor; closing it then continues (or cancels) the launch.</td></tr>
+    <tr><td><kbd>Q</kbd> / <kbd>Esc</kbd></td><td>Cancel the launch.</td></tr>
+    <tr><td><em>timeout</em></td><td>Launches automatically after the splash timeout.</td></tr>
+  </table>
+  <p>The splash shows the game name, its assigned profile, and the countdown. No mouse
+  needed — it's keyboard-driven so it works inside gamescope/Big-Picture flows.</p>
+
+  <h3>First launch: the new-game wizard</h3>
+  <p>The first time Ritz sees a game it has no config for, it runs a short wizard instead of
+  the splash:</p>
+  <ol class="steps">
+    <li><strong>Name</strong> — confirm/edit the game's display name (pre-filled from Steam where possible).</li>
+    <li><strong>Profile</strong> — pick a pinned profile with one key, or use the default.</li>
+    <li><strong>Confirm</strong> — review and launch (or jump into the editor first).</li>
+  </ol>
+</section>
+
+<section id="gui">
+  <h2>The settings window</h2>
+  <p>Run <code>ritz</code> (or press <kbd>E</kbd> on the splash). The window has three columns:</p>
+  <ul>
+    <li><strong>Navigator (left).</strong> Lists <em>General Settings</em>,
+      <em>Global Settings</em>, your <em>Profiles</em>, and your <em>Games</em>. Selecting
+      one chooses the <em>scope</em> you're editing.</li>
+    <li><strong>Modules (middle-left).</strong> The module tree for the selected scope —
+      grouped by author or folder, with built-ins under their own node.</li>
+    <li><strong>Options (center).</strong> The selected module's fields. The bottom band
+      previews the exact assembled launch command (for a game scope) or project info.</li>
+  </ul>
+</section>
+
+<section id="scopes">
+  <h2>Scopes &amp; colors</h2>
+  <p>Every option resolves through four layers, lowest to highest priority:</p>
+  <p style="font-size:18px">
+    extension default →
+    <span class="chip global">global</span> →
+    <span class="chip profile">profile</span> →
+    <span class="chip game">game</span>
+  </p>
+  <table>
+    <tr><th>Color</th><th>Scope</th><th>Meaning</th></tr>
+    <tr><td><span class="chip default">gray</span></td><td>Default</td><td>No override anywhere — the module's built-in default.</td></tr>
+    <tr><td><span class="chip global">red</span></td><td>Global</td><td>Set in <code>global.json</code>; applies to every game.</td></tr>
+    <tr><td><span class="chip profile">green</span></td><td>Profile</td><td>Set in a profile; applies to games using that profile.</td></tr>
+    <tr><td><span class="chip game">blue</span></td><td>Game</td><td>Set for this specific game; wins over everything.</td></tr>
+  </table>
+  <p>A value's color tells you where it currently comes from. While editing a given scope,
+  values you set there show in that scope's color; inherited values show in the color of the
+  scope they came from, and an inherited control is shown read-only.</p>
+  <div class="note"><strong>Setting and resetting:</strong> left-click a checkbox to set the
+  value at the current scope; right-click to reset it to inherited. Sliders, dropdowns, and
+  text boxes have an enable toggle that works the same way.</div>
+</section>
+
+<section id="profiles">
+  <h2>Profiles</h2>
+  <p>A <strong>profile</strong> is a reusable bundle of settings — e.g. <em>Competitive
+  FPS</em> (gamescope fullscreen + low latency) or <em>Controller Couch</em> (4K + FSR).</p>
+  <ul>
+    <li><strong>Assign</strong> a profile to a game from the game's settings; that game then
+      inherits the profile's values (which a game-scope override can still beat).</li>
+    <li><strong>Default profile</strong> — set one in General Settings to apply to every new
+      game automatically.</li>
+    <li><strong>Pin</strong> up to 10 profiles (slots 1–10). Pinned profiles appear in the
+      new-game wizard for one-key selection and sort to the top of the navigator.</li>
+  </ul>
+</section>
+
+<section id="general">
+  <h2>General Settings &amp; maintenance</h2>
+  <table>
+    <tr><th>Setting</th><th>Effect</th></tr>
+    <tr><td>Splash timeout</td><td>Seconds the launch splash counts down before launching.</td></tr>
+    <tr><td>Default profile</td><td>Profile applied to games that don't pick their own.</td></tr>
+    <tr><td>Editor closing action</td><td>Whether closing the launch-mode editor window launches the game or cancels.</td></tr>
+    <tr><td>Monospace UI font</td><td>Render the UI in Geist Mono (techy) vs proportional Geist.</td></tr>
+    <tr><td>Touch Mode</td><td>Drag content to scroll (handy on touchscreens).</td></tr>
+    <tr><td>Use full UI width</td><td>Let setting rows fill the pane instead of capping their width.</td></tr>
+  </table>
+  <h3>Maintenance actions</h3>
+  <ul>
+    <li><strong>Reload Extensions / Reload Configs</strong> (<kbd>Ctrl</kbd>+<kbd>R</kbd>) —
+      re-read modules and config from disk without restarting.</li>
+    <li><strong>Re-Export Modules and Plugins</strong> — restore the bundled modules,
+      overwriting on-disk copies (use after upgrading Ritz).</li>
+    <li><strong>Config Cleanup</strong> — remove stored values for variables that no longer
+      exist in any module (e.g. after a module rename or update), across all scopes.</li>
+  </ul>
+</section>
+
+<section id="files">
+  <h2>Where things live</h2>
+  <pre><code>~/.config/ritz/
+├─ general.json          app settings
+├─ global.json           the global scope
+├─ profiles/&lt;name&gt;.json   profiles
+├─ games/&lt;appid&gt;.json     per-game overrides
+├─ extensions/           modules (bundled + your drop-ins)
+└─ plugins/              bundled plugins</code></pre>
+  <p>Override the location with <code>$RITZ_CONFIG_DIR</code>. Only explicitly-set values are
+  stored, so files stay small. Ready to write your own module? Head to the
+  <a href="extensions.html">extension reference →</a></p>
+</section>
+
+</main>
+
+<footer>
+  Ritz · Linux only · <a href="https://github.com/Ritze03/ritz">github.com/Ritze03/ritz</a>
+</footer>
+
+</body>
+</html>

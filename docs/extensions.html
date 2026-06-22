@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ritz — Extension Reference</title>
+<meta name="description" content="The full JSON schema for Ritz modules (extensions): UI fields, the Requires grammar, ENV_VARS / WRAPPERS / GAME_ENV_VARS / GAME_LAUNCH_ARGS builders, hooks, backends, and config file examples.">
+<link rel="icon" type="image/png" href="assets/favicon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="nav">
+  <div class="nav-inner">
+    <a class="nav-brand" href="index.html"><img src="assets/favicon.png" alt=""><span>Ritz</span></a>
+    <nav class="nav-links">
+      <a href="index.html">Home</a>
+      <a href="usage.html">Usage</a>
+      <a href="extensions.html" class="active">Extensions</a>
+      <a href="https://github.com/Ritze03/ritz">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+<section>
+  <h1 style="margin-top:36px">Extension reference</h1>
+  <p class="tag" style="color:var(--dim)">A module is a single JSON file that declares a UI
+  and what it contributes to the launch command. This is the complete schema, with examples.</p>
+
+  <div class="note">
+    <strong>On this page:</strong>
+    <a href="#anatomy">Anatomy</a> ·
+    <a href="#meta">Metadata</a> ·
+    <a href="#ui">UI &amp; fields</a> ·
+    <a href="#variables">Variables</a> ·
+    <a href="#requires">Requires grammar</a> ·
+    <a href="#env">Env vars</a> ·
+    <a href="#wrappers">Wrappers</a> ·
+    <a href="#args">Launch args</a> ·
+    <a href="#hooks">Hooks &amp; scripts</a> ·
+    <a href="#backends">Backends</a> ·
+    <a href="#example">Full example</a> ·
+    <a href="#config">Config files</a>
+  </div>
+</section>
+
+<section id="anatomy">
+  <h2>Anatomy of a module</h2>
+  <p>Drop modules into <code>~/.config/ritz/extensions/</code>. A module is either a single
+  file or a folder with exactly one manifest plus any scripts it references:</p>
+  <pre><code>extensions/
+├─ my-tweaks.json              # single-file module
+└─ my-scripts/                 # folder module
+   ├─ my-scripts.json          # exactly one manifest
+   ├─ pre.sh                   # scripts referenced by the manifest
+   └─ post.sh</code></pre>
+  <p>Each module assembles into up to four launch blocks plus optional lifecycle hooks. The
+  final command is:</p>
+  <pre><code>[ENV_VARS]  [WRAPPERS]  [GAME_ENV_VARS]  %command%  [GAME_LAUNCH_ARGS]</code></pre>
+  <p>A skeleton with every top-level key:</p>
+  <pre><code>{
+  "Extension": { "Name": "...", "Author": "...", "Version": "1.0", "Description": "..." },
+
+  "AppIds": ["730"],            // optional: restrict to these Steam AppIds (omit = all games)
+  "Backend": "custom-env",      // optional: route to a built-in runtime handler
+  "RequiresDesktop": "Hyprland",// optional: only load on this $XDG_CURRENT_DESKTOP
+
+  "UI": { "Section": [ /* fields */ ] },
+
+  "ENV_VARS":        [ /* whole-chain environment */ ],
+  "GAME_ENV_VARS":   [ /* game-only environment */ ],
+  "WRAPPERS":        [ /* gamescope-style wrappers */ ],
+  "GAME_LAUNCH_ARGS":[ /* args appended after %command% */ ],
+
+  "Hooks": { /* lifecycle scripts */ },
+  "ScriptBuilders": [ /* advanced: scripts that emit block content */ ]
+}</code></pre>
+</section>
+
+<section id="meta">
+  <h2>Metadata</h2>
+  <pre><code>"Extension": {
+  "Name": "AMD",
+  "Author": "Ritze",
+  "Version": "1.0",
+  "Description": "RADV driver tuning."
+}</code></pre>
+  <p>A module's identity is <code>&lt;Author&gt;::&lt;Name&gt;::&lt;Version&gt;</code> — this
+  is also how stored values are keyed, so renaming a module orphans its old saved values
+  (clear them with <em>Config Cleanup</em>).</p>
+  <table>
+    <tr><th>Key</th><th>Meaning</th></tr>
+    <tr><td><code>AppIds</code></td><td>Array of Steam AppIds this module applies to. Omit for a global module (all games).</td></tr>
+    <tr><td><code>Backend</code></td><td>Routes the module's values to a built-in handler instead of (or alongside) the command builder. See <a href="#backends">Backends</a>.</td></tr>
+    <tr><td><code>RequiresDesktop</code></td><td>Only load when <code>$XDG_CURRENT_DESKTOP</code> matches (e.g. <code>"Hyprland"</code>). Otherwise the module is hidden and never applied.</td></tr>
+  </table>
+</section>
+
+<section id="ui">
+  <h2>UI &amp; fields</h2>
+  <p><code>UI</code> is an ordered map of <em>section name → list of fields</em>. Sections
+  render in declared order. Each field binds a <code>Variable</code> the builders reference.</p>
+  <pre><code>"UI": {
+  "RADV Perftest": [
+    { "Name": "Enable RADV Perftest", "Description": "Enable RADV_PERFTEST tuning.",
+      "Type": "toggle", "Variable": "enabled", "Default": false },
+
+    { "Name": "ACO Compiler", "Description": "Enable the ACO shader compiler.",
+      "Type": "toggle", "Variable": "aco", "Requires": "enabled" }
+  ]
+}</code></pre>
+
+  <h3>Field types</h3>
+  <table>
+    <tr><th>Type</th><th>Renders as</th><th>Notes</th></tr>
+    <tr><td><code>toggle</code></td><td>Checkbox</td><td>Boolean. <code>Default</code> is <code>true</code>/<code>false</code>.</td></tr>
+    <tr><td><code>string</code></td><td>Text box</td><td>Free-form value.</td></tr>
+    <tr><td><code>integer</code></td><td>Slider + spinner</td><td>Needs <code>Options: { min, max, step }</code>.</td></tr>
+    <tr><td><code>float</code></td><td>Slider + spinner</td><td>Same <code>Options</code> range; decimals allowed.</td></tr>
+    <tr><td><code>selection</code></td><td>Dropdown</td><td><code>Options</code> is the list of stored values; optional <code>DisplayOptions</code> gives parallel labels.</td></tr>
+  </table>
+
+  <h3>Common field keys</h3>
+  <table>
+    <tr><th>Key</th><th>Meaning</th></tr>
+    <tr><td><code>Name</code> / <code>Description</code></td><td>Label and tooltip (optional).</td></tr>
+    <tr><td><code>Variable</code></td><td>The variable name builders reference. Required.</td></tr>
+    <tr><td><code>Default</code></td><td>Value used when nothing is set at any scope (optional).</td></tr>
+    <tr><td><code>Options</code></td><td>Selection list (<code>["a","b"]</code>) or numeric range (<code>{ "min":0, "max":16, "step":1 }</code>).</td></tr>
+    <tr><td><code>DisplayOptions</code></td><td>Pretty labels parallel to a selection's <code>Options</code>.</td></tr>
+    <tr><td><code>Requires</code></td><td>Boolean expression gating this field's visibility — see below.</td></tr>
+  </table>
+
+  <h3>A selection with labels</h3>
+  <pre><code>{ "Name": "Backend", "Type": "selection", "Variable": "backend", "Requires": "enabled",
+  "DisplayOptions": ["Auto", "DRM", "SDL", "Wayland"],
+  "Options":        ["auto", "drm", "sdl", "wayland"] }</code></pre>
+  <p>The user sees the <code>DisplayOptions</code> label; the matching <code>Options</code>
+  value is stored and interpolated.</p>
+</section>
+
+<section id="variables">
+  <h2>Variables &amp; scoping</h2>
+  <p>Variable names are <strong>auto-scoped per module</strong> — short names like
+  <code>enabled</code> or <code>backend</code> never collide with another module's. A field
+  is "truthy" when set: a <code>toggle</code> that's on, or any non-empty
+  <code>string</code>/<code>selection</code>/number.</p>
+  <p>To share a value with <em>other</em> modules' builders, name it
+  <code>global:&lt;name&gt;</code>. Such a variable is published to the build-phase scope and
+  can be referenced by other modules (only allowed in builders, not in UI
+  <code>Requires</code>).</p>
+</section>
+
+<section id="requires">
+  <h2>The <code>Requires</code> grammar</h2>
+  <p><code>Requires</code> gates both UI visibility and whether a builder entry fires. It's a
+  boolean expression of variable names:</p>
+  <pre><code>expr  := and ( "OR"  and )*
+and   := atom ( "AND" atom )*
+atom  := "!" atom | IDENT          // NOT also written "!"</code></pre>
+  <p>Precedence is <code>! &gt; AND &gt; OR</code>; there are <strong>no parentheses</strong>.
+  An empty/omitted expression is always true.</p>
+  <pre><code>"Requires": "enabled"
+"Requires": "enabled AND fsr_enabled"
+"Requires": "gamescope AND !native_res"
+"Requires": "descriptor_heap OR raw_config"   // fires if either is set</code></pre>
+</section>
+
+<section id="env">
+  <h2>Environment variables</h2>
+  <p><code>ENV_VARS</code> apply to the whole launch chain (the child process environment);
+  <code>GAME_ENV_VARS</code> apply only to the game (via an <code>env</code> shim after the
+  wrapper). Both use the same shape: a named variable whose value is assembled by an ordered
+  <code>Builder</code>.</p>
+  <pre><code>"ENV_VARS": [
+  {
+    "Name": "RADV_PERFTEST",
+    "Requires": "enabled",                 // skip the whole var unless this holds
+    "Builder": [
+      { "Requires": "clear", "Type": "set",    "Value": "" },
+      { "Requires": "aco",   "Type": "append", "Separator": ",", "Value": "aco" },
+      { "Requires": "nggc",  "Type": "append", "Separator": ",", "Value": "nggc" }
+    ]
+  }
+]</code></pre>
+  <table>
+    <tr><th>Builder <code>Type</code></th><th>Effect</th></tr>
+    <tr><td><code>set</code></td><td>Replace the accumulated value with <code>Value</code>.</td></tr>
+    <tr><td><code>append</code></td><td>Append <code>Value</code>, joined with <code>Separator</code> (default <code>,</code>).</td></tr>
+    <tr><td><code>unset</code></td><td>Mark the variable unset (emitted via <code>env -u</code>).</td></tr>
+  </table>
+  <p>Builder entries evaluate in declaration order, each gated by its own
+  <code>Requires</code>. <code>{var}</code> in any <code>Value</code> (or even in
+  <code>Name</code>) interpolates that variable's current value. So the snippet above yields
+  <code>RADV_PERFTEST=aco,nggc</code> when <code>aco</code> and <code>nggc</code> are on.</p>
+  <div class="note">When the same variable name is produced by multiple modules, their
+  builders accumulate together (in module load order). Use <code>append</code> for additive
+  values like <code>VK_INSTANCE_LAYERS</code>.</div>
+</section>
+
+<section id="wrappers">
+  <h2>Wrappers</h2>
+  <p>Wrappers are programs prepended left of <code>%command%</code> — the
+  <code>gamescope … -- %command%</code> idiom. <code>CommandSyntax</code> is a template with
+  a <code>{OPTIONS}</code> placeholder filled from the <code>Builder</code> (each entry's
+  <code>Value</code>, space-joined, gated by <code>Requires</code>).</p>
+  <pre><code>"WRAPPERS": [
+  {
+    "CommandSyntax": "gamescope {OPTIONS} --",
+    "Requires": "enabled",
+    "Priority": 100,                       // lower = further left in the chain
+    "Builder": [
+      { "Requires": "output_width",  "Value": "-W {output_width}" },
+      { "Requires": "fsr_enabled",   "Value": "--filter fsr" },
+      { "Requires": "fullscreen",    "Value": "-f" }
+    ]
+  }
+]</code></pre>
+  <p>Multiple wrappers (across modules) are ordered by <code>Priority</code> ascending, then
+  by module order. The rendered template is shell-split into argv.</p>
+</section>
+
+<section id="args">
+  <h2>Game launch arguments</h2>
+  <p><code>GAME_LAUNCH_ARGS</code> are appended <em>after</em> the game command. Each entry is
+  a gated value; the value is shell-split, so one entry may contain multiple tokens.</p>
+  <pre><code>"GAME_LAUNCH_ARGS": [
+  { "Requires": "condebug", "Value": "-condebug" },
+  { "Requires": "extra",    "Value": "{extra}" }   // e.g. extra = "-nojoy +fps_max 0"
+]</code></pre>
+</section>
+
+<section id="hooks">
+  <h2>Hooks &amp; scripts</h2>
+  <p>Lifecycle hooks run scripts (paths relative to the module folder) at four points. A hook
+  is either a bare path (runs blocking) or an object that can opt into background execution.</p>
+  <pre><code>"Hooks": {
+  "PreLaunch":   "pre.sh",                              // before launch (blocking)
+  "PostSpawn":   { "Script": "notify.sh", "Background": true },
+  "OnGameReady": "ready.sh",                            // when the real game process appears
+  "PostExit":    "cleanup.sh"                           // after the game exits
+}</code></pre>
+  <p><code>ScriptBuilders</code> are an advanced escape hatch: a script emits content for a
+  launch block (<code>ENV_VARS</code>, <code>WRAPPERS</code>, <code>GAME_ENV_VARS</code>, or
+  <code>GAME_LAUNCH_ARGS</code>) at build time.</p>
+  <pre><code>"ScriptBuilders": [ { "Block": "ENV_VARS", "Script": "build-env.sh" } ]</code></pre>
+</section>
+
+<section id="backends">
+  <h2>Backends</h2>
+  <p>A module with a <code>Backend</code> routes its values to a built-in handler — either a
+  special GUI (dynamic slot lists) or a runtime process handler — rather than (or in addition
+  to) the plain command builder. Bundled backends:</p>
+  <table>
+    <tr><th>Backend</th><th>Module</th><th>What it does</th></tr>
+    <tr><td><code>custom-env</code></td><td>Custom Env</td><td>Slot UI for free-form env vars (chain-wide and game-only).</td></tr>
+    <tr><td><code>custom-args</code></td><td>Game Launch Args</td><td>Slot UI for free-form launch arguments.</td></tr>
+    <tr><td><code>lsfg-vk</code></td><td>LSFG-VK</td><td>Writes <code>~/.config/lsfg-vk/conf.toml</code>, sets <code>LSFG_PROCESS</code>, supports an activation delay; live-reloadable.</td></tr>
+    <tr><td><code>hypr-monctl</code></td><td>Hypr-Monctl</td><td>Per-game display vibrance via a Hyprland plugin (<code>RequiresDesktop: "Hyprland"</code>).</td></tr>
+  </table>
+</section>
+
+<section id="example">
+  <h2>Full example module</h2>
+  <p>A complete single-file module exercising fields, <code>Requires</code>, env builders, a
+  wrapper, and launch args:</p>
+  <pre><code>{
+  "Extension": {
+    "Name": "Example", "Author": "You", "Version": "1.0",
+    "Description": "Demonstrates every block."
+  },
+  "UI": {
+    "Basic": [
+      { "Name": "Enable", "Type": "toggle", "Variable": "enabled", "Default": false },
+      { "Name": "FPS Limit", "Type": "integer", "Variable": "fps",
+        "Options": { "min": 0, "max": 360, "step": 1 }, "Requires": "enabled" },
+      { "Name": "Renderer", "Type": "selection", "Variable": "renderer", "Requires": "enabled",
+        "DisplayOptions": ["Vulkan", "OpenGL"], "Options": ["vk", "gl"] }
+    ],
+    "Advanced": [
+      { "Name": "Extra args", "Type": "string", "Variable": "extra", "Requires": "enabled" }
+    ]
+  },
+  "ENV_VARS": [
+    { "Name": "MY_FPS_CAP", "Requires": "fps",
+      "Builder": [ { "Requires": "fps", "Type": "set", "Value": "{fps}" } ] }
+  ],
+  "GAME_ENV_VARS": [
+    { "Name": "MY_RENDERER", "Requires": "renderer",
+      "Builder": [ { "Requires": "renderer", "Type": "set", "Value": "{renderer}" } ] }
+  ],
+  "WRAPPERS": [
+    { "CommandSyntax": "mangohud {OPTIONS}", "Requires": "enabled", "Priority": 50,
+      "Builder": [ { "Requires": "fps", "Value": "--fps-limit {fps}" } ] }
+  ],
+  "GAME_LAUNCH_ARGS": [
+    { "Requires": "extra", "Value": "{extra}" }
+  ]
+}</code></pre>
+  <p>Preview any config with <code>ritz --print %command%</code> to see exactly how it
+  assembles.</p>
+</section>
+
+<section id="config">
+  <h2>Config files</h2>
+  <p>You normally never edit these by hand — the GUI writes them — but here's the shape.
+  Values are keyed by <code>Author → Name → variable</code>, and only explicitly-set values
+  are stored.</p>
+
+  <h3><span class="chip global">global.json</span> — applies to every game</h3>
+  <pre><code>{
+  "Name": "",
+  "Modules": {
+    "Ritze": {
+      "Misc": { "kbd_layout": "de" }
+    }
+  }
+}</code></pre>
+
+  <h3><span class="chip profile">profiles/Competitive.json</span></h3>
+  <pre><code>{
+  "Name": "Competitive",
+  "Pin": 1,
+  "Modules": {
+    "Ritze": {
+      "Gamescope": { "enabled": true, "fullscreen": true },
+      "AMD":       { "enabled": true, "aco": true }
+    }
+  }
+}</code></pre>
+
+  <h3><span class="chip game">games/730.json</span> — keyed by SteamAppId</h3>
+  <pre><code>{
+  "Game": { "Name": "Counter-Strike 2", "AppId": "730" },
+  "Config": {
+    "General": { },
+    "Modules": {
+      "Preset": "Competitive",          // the assigned profile
+      "Ritze": {
+        "DXVK": { "fps_limit": 240 }    // a game-scope override
+      }
+    }
+  }
+}</code></pre>
+</section>
+
+</main>
+
+<footer>
+  Ritz · Linux only · <a href="https://github.com/Ritze03/ritz">github.com/Ritze03/ritz</a>
+</footer>
+
+</body>
+</html>
