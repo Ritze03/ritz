@@ -1,0 +1,80 @@
+{
+  "Extension": {
+    "Name": "Misc",
+    "Author": "Ritze",
+    "Version": "1.0",
+    "Description": "Miscellaneous environment, compatibility, and GameMode options."
+  },
+  "UI": {
+    "Steam Environment": [
+      {
+        "Name": "Clear LD_PRELOAD",
+        "Description": "Clear LD_PRELOAD.",
+        "Type": "toggle",
+        "Variable": "clear_ld_preload",
+        "Default": false
+      },
+      {
+        "Name": "Clear VK_INSTANCE_LAYERS",
+        "Description": "Clear VK_INSTANCE_LAYERS.",
+        "Type": "toggle",
+        "Variable": "clear_vk_layers",
+        "Default": false
+      }
+    ],
+    "Compatibility": [
+      {
+        "Name": "Force X11 SDL Backend",
+        "Description": "Set SDL_VIDEODRIVER=x11.",
+        "Type": "toggle",
+        "Variable": "sdl_force_x11",
+        "Default": false
+      },
+      {
+        "Name": "Force Keyboard Layout",
+        "Description": "Set XKB_DEFAULT_LAYOUT to this layout (e.g. de, us, fr).",
+        "Type": "string",
+        "Variable": "kbd_layout"
+      }
+    ],
+    "GameMode": [
+      {
+        "Name": "Enable GameMode",
+        "Description": "Run the game under feral gamemoderun.",
+        "Type": "toggle",
+        "Variable": "gamemode",
+        "Default": false
+      }
+    ]
+  },
+  "ENV_VARS": [
+    {
+      "Name": "LD_PRELOAD",
+      "Requires": "clear_ld_preload",
+      "Builder": [{ "Requires": "clear_ld_preload", "Type": "set", "Value": "" }]
+    },
+    {
+      "Name": "VK_INSTANCE_LAYERS",
+      "Requires": "clear_vk_layers",
+      "Builder": [{ "Requires": "clear_vk_layers", "Type": "set", "Value": "" }]
+    },
+    {
+      "Name": "SDL_VIDEODRIVER",
+      "Requires": "sdl_force_x11",
+      "Builder": [{ "Requires": "sdl_force_x11", "Type": "set", "Value": "x11" }]
+    },
+    {
+      "Name": "XKB_DEFAULT_LAYOUT",
+      "Requires": "kbd_layout",
+      "Builder": [{ "Requires": "kbd_layout", "Type": "set", "Value": "{kbd_layout}" }]
+    }
+  ],
+  "WRAPPERS": [
+    {
+      "CommandSyntax": "gamemoderun",
+      "Requires": "gamemode",
+      "Priority": 200,
+      "Builder": []
+    }
+  ]
+}

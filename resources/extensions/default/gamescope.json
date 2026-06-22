@@ -1,0 +1,165 @@
+{
+  "Extension": {
+    "Name": "Gamescope",
+    "Author": "Ritze",
+    "Version": "1.0",
+    "Description": "Run the game inside Gamescope."
+  },
+  "UI": {
+    "General": [
+      {
+        "Name": "Gamescope Enabled",
+        "Description": "Enable Gamescope.",
+        "Type": "toggle",
+        "Variable": "enabled",
+        "Default": false
+      },
+      {
+        "Name": "Fullscreen",
+        "Description": "Run Gamescope fullscreen.",
+        "Type": "toggle",
+        "Variable": "fullscreen",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Backend",
+        "Description": "Gamescope backend.",
+        "Type": "selection",
+        "DisplayOptions": ["Auto", "DRM", "SDL", "Wayland", "Headless", "OpenVR"],
+        "Options": ["auto", "drm", "sdl", "wayland", "headless", "openvr"],
+        "Variable": "backend",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Scaler",
+        "Description": "Output scaling mode.",
+        "Type": "selection",
+        "DisplayOptions": ["Auto", "Integer", "Fit", "Fill", "Stretch"],
+        "Options": ["auto", "integer", "fit", "fill", "stretch"],
+        "Variable": "scaler",
+        "Requires": "enabled"
+      }
+    ],
+    "Resolution": [
+      {
+        "Name": "Output Width (-W)",
+        "Description": "Output window width.",
+        "Type": "integer",
+        "Options": { "min": 0, "max": 7680, "step": 1 },
+        "Variable": "output_width",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Output Height (-H)",
+        "Description": "Output window height.",
+        "Type": "integer",
+        "Options": { "min": 0, "max": 4320, "step": 1 },
+        "Variable": "output_height",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Game Width (-w)",
+        "Description": "Internal render width.",
+        "Type": "integer",
+        "Options": { "min": 0, "max": 7680, "step": 1 },
+        "Variable": "game_width",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Game Height (-h)",
+        "Description": "Internal render height.",
+        "Type": "integer",
+        "Options": { "min": 0, "max": 4320, "step": 1 },
+        "Variable": "game_height",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Refresh Rate (-r)",
+        "Description": "Output refresh rate in Hz.",
+        "Type": "integer",
+        "Options": { "min": 0, "max": 540, "step": 1 },
+        "Variable": "refresh",
+        "Requires": "enabled"
+      }
+    ],
+    "Sync & Input": [
+      {
+        "Name": "Adaptive Sync",
+        "Description": "Enable adaptive sync.",
+        "Type": "toggle",
+        "Variable": "adaptive_sync",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Immediate Flips",
+        "Description": "Allow screen tearing.",
+        "Type": "toggle",
+        "Variable": "immediate_flips",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Force Grab Cursor",
+        "Description": "Force-grab the cursor.",
+        "Type": "toggle",
+        "Variable": "force_grab_cursor",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Expose Wayland",
+        "Description": "Expose a Wayland socket to the game.",
+        "Type": "toggle",
+        "Variable": "expose_wayland",
+        "Requires": "enabled"
+      }
+    ],
+    "FSR": [
+      {
+        "Name": "Enable FSR",
+        "Description": "Enable FSR upscaling.",
+        "Type": "toggle",
+        "Variable": "fsr_enabled",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "FSR Sharpness",
+        "Description": "FSR sharpness, 0 is sharpest.",
+        "Type": "integer",
+        "Options": { "min": 0, "max": 20, "step": 1 },
+        "Variable": "fsr_sharpness",
+        "Requires": "enabled AND fsr_enabled"
+      },
+      {
+        "Name": "Mouse Sensitivity Multiplier",
+        "Description": "Scale mouse sensitivity to the upscale ratio.",
+        "Type": "float",
+        "Options": { "min": 0.1, "max": 2.0, "step": 0.05 },
+        "Variable": "mouse_sensitivity",
+        "Requires": "enabled"
+      }
+    ]
+  },
+  "WRAPPERS": [
+    {
+      "CommandSyntax": "gamescope {OPTIONS} --",
+      "Requires": "enabled",
+      "Priority": 100,
+      "Builder": [
+        { "Requires": "output_width", "Value": "-W {output_width}" },
+        { "Requires": "output_height", "Value": "-H {output_height}" },
+        { "Requires": "game_width", "Value": "-w {game_width}" },
+        { "Requires": "game_height", "Value": "-h {game_height}" },
+        { "Requires": "refresh", "Value": "-r {refresh}" },
+        { "Requires": "scaler", "Value": "-S {scaler}" },
+        { "Requires": "backend", "Value": "--backend {backend}" },
+        { "Requires": "adaptive_sync", "Value": "--adaptive-sync" },
+        { "Requires": "immediate_flips", "Value": "--immediate-flips" },
+        { "Requires": "force_grab_cursor", "Value": "--force-grab-cursor" },
+        { "Requires": "expose_wayland", "Value": "--expose-wayland" },
+        { "Requires": "fsr_enabled", "Value": "--filter fsr" },
+        { "Requires": "fsr_sharpness", "Value": "--sharpness {fsr_sharpness}" },
+        { "Requires": "mouse_sensitivity", "Value": "--mouse-sensitivity {mouse_sensitivity}" },
+        { "Requires": "fullscreen", "Value": "-f" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,83 @@
+{
+  "Extension": {
+    "Name": "Custom Env",
+    "Author": "Ritze",
+    "Version": "1.0",
+    "Description": "Set custom environment variables for the launch command."
+  },
+  "Backend": "custom-env",
+  "UI": {
+    "ENV Vars": [
+      {"Type": "string", "Variable": "env_1_name"},  {"Type": "string", "Variable": "env_1_value"},
+      {"Type": "string", "Variable": "env_2_name"},  {"Type": "string", "Variable": "env_2_value"},
+      {"Type": "string", "Variable": "env_3_name"},  {"Type": "string", "Variable": "env_3_value"},
+      {"Type": "string", "Variable": "env_4_name"},  {"Type": "string", "Variable": "env_4_value"},
+      {"Type": "string", "Variable": "env_5_name"},  {"Type": "string", "Variable": "env_5_value"},
+      {"Type": "string", "Variable": "env_6_name"},  {"Type": "string", "Variable": "env_6_value"},
+      {"Type": "string", "Variable": "env_7_name"},  {"Type": "string", "Variable": "env_7_value"},
+      {"Type": "string", "Variable": "env_8_name"},  {"Type": "string", "Variable": "env_8_value"},
+      {"Type": "string", "Variable": "env_9_name"},  {"Type": "string", "Variable": "env_9_value"},
+      {"Type": "string", "Variable": "env_10_name"}, {"Type": "string", "Variable": "env_10_value"},
+      {"Type": "string", "Variable": "env_11_name"}, {"Type": "string", "Variable": "env_11_value"},
+      {"Type": "string", "Variable": "env_12_name"}, {"Type": "string", "Variable": "env_12_value"},
+      {"Type": "string", "Variable": "env_13_name"}, {"Type": "string", "Variable": "env_13_value"},
+      {"Type": "string", "Variable": "env_14_name"}, {"Type": "string", "Variable": "env_14_value"},
+      {"Type": "string", "Variable": "env_15_name"}, {"Type": "string", "Variable": "env_15_value"},
+      {"Type": "string", "Variable": "env_16_name"}, {"Type": "string", "Variable": "env_16_value"}
+    ],
+    "GAME ENV Vars": [
+      {"Type": "string", "Variable": "game_env_1_name"},  {"Type": "string", "Variable": "game_env_1_value"},
+      {"Type": "string", "Variable": "game_env_2_name"},  {"Type": "string", "Variable": "game_env_2_value"},
+      {"Type": "string", "Variable": "game_env_3_name"},  {"Type": "string", "Variable": "game_env_3_value"},
+      {"Type": "string", "Variable": "game_env_4_name"},  {"Type": "string", "Variable": "game_env_4_value"},
+      {"Type": "string", "Variable": "game_env_5_name"},  {"Type": "string", "Variable": "game_env_5_value"},
+      {"Type": "string", "Variable": "game_env_6_name"},  {"Type": "string", "Variable": "game_env_6_value"},
+      {"Type": "string", "Variable": "game_env_7_name"},  {"Type": "string", "Variable": "game_env_7_value"},
+      {"Type": "string", "Variable": "game_env_8_name"},  {"Type": "string", "Variable": "game_env_8_value"},
+      {"Type": "string", "Variable": "game_env_9_name"},  {"Type": "string", "Variable": "game_env_9_value"},
+      {"Type": "string", "Variable": "game_env_10_name"}, {"Type": "string", "Variable": "game_env_10_value"},
+      {"Type": "string", "Variable": "game_env_11_name"}, {"Type": "string", "Variable": "game_env_11_value"},
+      {"Type": "string", "Variable": "game_env_12_name"}, {"Type": "string", "Variable": "game_env_12_value"},
+      {"Type": "string", "Variable": "game_env_13_name"}, {"Type": "string", "Variable": "game_env_13_value"},
+      {"Type": "string", "Variable": "game_env_14_name"}, {"Type": "string", "Variable": "game_env_14_value"},
+      {"Type": "string", "Variable": "game_env_15_name"}, {"Type": "string", "Variable": "game_env_15_value"},
+      {"Type": "string", "Variable": "game_env_16_name"}, {"Type": "string", "Variable": "game_env_16_value"}
+    ]
+  },
+  "ENV_VARS": [
+    {"Name": "{env_1_name}",  "Requires": "env_1_name",  "Builder": [{"Type": "set", "Value": "{env_1_value}"}]},
+    {"Name": "{env_2_name}",  "Requires": "env_2_name",  "Builder": [{"Type": "set", "Value": "{env_2_value}"}]},
+    {"Name": "{env_3_name}",  "Requires": "env_3_name",  "Builder": [{"Type": "set", "Value": "{env_3_value}"}]},
+    {"Name": "{env_4_name}",  "Requires": "env_4_name",  "Builder": [{"Type": "set", "Value": "{env_4_value}"}]},
+    {"Name": "{env_5_name}",  "Requires": "env_5_name",  "Builder": [{"Type": "set", "Value": "{env_5_value}"}]},
+    {"Name": "{env_6_name}",  "Requires": "env_6_name",  "Builder": [{"Type": "set", "Value": "{env_6_value}"}]},
+    {"Name": "{env_7_name}",  "Requires": "env_7_name",  "Builder": [{"Type": "set", "Value": "{env_7_value}"}]},
+    {"Name": "{env_8_name}",  "Requires": "env_8_name",  "Builder": [{"Type": "set", "Value": "{env_8_value}"}]},
+    {"Name": "{env_9_name}",  "Requires": "env_9_name",  "Builder": [{"Type": "set", "Value": "{env_9_value}"}]},
+    {"Name": "{env_10_name}", "Requires": "env_10_name", "Builder": [{"Type": "set", "Value": "{env_10_value}"}]},
+    {"Name": "{env_11_name}", "Requires": "env_11_name", "Builder": [{"Type": "set", "Value": "{env_11_value}"}]},
+    {"Name": "{env_12_name}", "Requires": "env_12_name", "Builder": [{"Type": "set", "Value": "{env_12_value}"}]},
+    {"Name": "{env_13_name}", "Requires": "env_13_name", "Builder": [{"Type": "set", "Value": "{env_13_value}"}]},
+    {"Name": "{env_14_name}", "Requires": "env_14_name", "Builder": [{"Type": "set", "Value": "{env_14_value}"}]},
+    {"Name": "{env_15_name}", "Requires": "env_15_name", "Builder": [{"Type": "set", "Value": "{env_15_value}"}]},
+    {"Name": "{env_16_name}", "Requires": "env_16_name", "Builder": [{"Type": "set", "Value": "{env_16_value}"}]}
+  ],
+  "GAME_ENV_VARS": [
+    {"Name": "{game_env_1_name}",  "Requires": "game_env_1_name",  "Builder": [{"Type": "set", "Value": "{game_env_1_value}"}]},
+    {"Name": "{game_env_2_name}",  "Requires": "game_env_2_name",  "Builder": [{"Type": "set", "Value": "{game_env_2_value}"}]},
+    {"Name": "{game_env_3_name}",  "Requires": "game_env_3_name",  "Builder": [{"Type": "set", "Value": "{game_env_3_value}"}]},
+    {"Name": "{game_env_4_name}",  "Requires": "game_env_4_name",  "Builder": [{"Type": "set", "Value": "{game_env_4_value}"}]},
+    {"Name": "{game_env_5_name}",  "Requires": "game_env_5_name",  "Builder": [{"Type": "set", "Value": "{game_env_5_value}"}]},
+    {"Name": "{game_env_6_name}",  "Requires": "game_env_6_name",  "Builder": [{"Type": "set", "Value": "{game_env_6_value}"}]},
+    {"Name": "{game_env_7_name}",  "Requires": "game_env_7_name",  "Builder": [{"Type": "set", "Value": "{game_env_7_value}"}]},
+    {"Name": "{game_env_8_name}",  "Requires": "game_env_8_name",  "Builder": [{"Type": "set", "Value": "{game_env_8_value}"}]},
+    {"Name": "{game_env_9_name}",  "Requires": "game_env_9_name",  "Builder": [{"Type": "set", "Value": "{game_env_9_value}"}]},
+    {"Name": "{game_env_10_name}", "Requires": "game_env_10_name", "Builder": [{"Type": "set", "Value": "{game_env_10_value}"}]},
+    {"Name": "{game_env_11_name}", "Requires": "game_env_11_name", "Builder": [{"Type": "set", "Value": "{game_env_11_value}"}]},
+    {"Name": "{game_env_12_name}", "Requires": "game_env_12_name", "Builder": [{"Type": "set", "Value": "{game_env_12_value}"}]},
+    {"Name": "{game_env_13_name}", "Requires": "game_env_13_name", "Builder": [{"Type": "set", "Value": "{game_env_13_value}"}]},
+    {"Name": "{game_env_14_name}", "Requires": "game_env_14_name", "Builder": [{"Type": "set", "Value": "{game_env_14_value}"}]},
+    {"Name": "{game_env_15_name}", "Requires": "game_env_15_name", "Builder": [{"Type": "set", "Value": "{game_env_15_value}"}]},
+    {"Name": "{game_env_16_name}", "Requires": "game_env_16_name", "Builder": [{"Type": "set", "Value": "{game_env_16_value}"}]}
+  ]
+}

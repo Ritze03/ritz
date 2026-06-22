@@ -1,0 +1,91 @@
+{
+  "Extension": {
+    "Name": "DXVK",
+    "Author": "Ritze",
+    "Version": "1.0",
+    "Description": "Tuning for DXVK (Direct3D 8/9/10/11 to Vulkan)."
+  },
+  "UI": {
+    "Basic": [
+      {
+        "Name": "FPS Limit",
+        "Description": "Limit the frame rate (DXVK_FRAME_RATE). 0 = uncapped.",
+        "Type": "integer",
+        "Variable": "fps_limit",
+        "Options": { "min": 0, "max": 360, "step": 1 }
+      }
+    ],
+    "HUD": [
+      {
+        "Name": "HUD Elements",
+        "Description": "DXVK_HUD overlay — comma-separated keys, e.g. fps,gpuload,devinfo,memory,version (or 'full').",
+        "Type": "string",
+        "Variable": "hud"
+      }
+    ],
+    "Performance": [
+      {
+        "Name": "Graphics Pipeline Library",
+        "Description": "DXVK_ENABLE_GRAPHICS_PIPELINE_LIBRARY — compile pipelines in the background to reduce shader stutter.",
+        "Type": "selection",
+        "Variable": "gpl",
+        "Options": ["Auto", "True", "False"]
+      },
+      {
+        "Name": "Max Frame Latency",
+        "Description": "DXVK_MAX_FRAME_LATENCY — number of queued frames (0 = driver default). Lower can reduce input latency.",
+        "Type": "integer",
+        "Variable": "max_frame_latency",
+        "Options": { "min": 0, "max": 16, "step": 1 }
+      }
+    ],
+    "Display": [
+      {
+        "Name": "Tear-Free",
+        "Description": "DXVK_TEAR_FREE — force tearing off (vsync/mailbox) or allow it (relaxed fifo).",
+        "Type": "selection",
+        "Variable": "tear_free",
+        "Options": ["Auto", "True", "False"]
+      },
+      {
+        "Name": "HDR",
+        "Description": "DXVK_HDR — expose HDR10 colorspace (needs a compatible game and display).",
+        "Type": "toggle",
+        "Variable": "hdr",
+        "Default": false
+      }
+    ]
+  },
+  "ENV_VARS": [
+    {
+      "Name": "DXVK_FRAME_RATE",
+      "Requires": "fps_limit",
+      "Builder": [{ "Requires": "fps_limit", "Type": "set", "Value": "{fps_limit}" }]
+    },
+    {
+      "Name": "DXVK_HUD",
+      "Requires": "hud",
+      "Builder": [{ "Requires": "hud", "Type": "set", "Value": "{hud}" }]
+    },
+    {
+      "Name": "DXVK_ENABLE_GRAPHICS_PIPELINE_LIBRARY",
+      "Requires": "gpl",
+      "Builder": [{ "Requires": "gpl", "Type": "set", "Value": "{gpl}" }]
+    },
+    {
+      "Name": "DXVK_MAX_FRAME_LATENCY",
+      "Requires": "max_frame_latency",
+      "Builder": [{ "Requires": "max_frame_latency", "Type": "set", "Value": "{max_frame_latency}" }]
+    },
+    {
+      "Name": "DXVK_TEAR_FREE",
+      "Requires": "tear_free",
+      "Builder": [{ "Requires": "tear_free", "Type": "set", "Value": "{tear_free}" }]
+    },
+    {
+      "Name": "DXVK_HDR",
+      "Requires": "hdr",
+      "Builder": [{ "Requires": "hdr", "Type": "set", "Value": "1" }]
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "Extension": {
+    "Name": "Game Launch Args",
+    "Author": "Ritze",
+    "Version": "1.0",
+    "Description": "Add custom game launch arguments (appended after the game command)."
+  },
+  "Backend": "custom-args",
+  "UI": {
+    "Launch Arguments": [
+      {"Type": "string", "Variable": "arg_1"},
+      {"Type": "string", "Variable": "arg_2"},
+      {"Type": "string", "Variable": "arg_3"},
+      {"Type": "string", "Variable": "arg_4"},
+      {"Type": "string", "Variable": "arg_5"},
+      {"Type": "string", "Variable": "arg_6"},
+      {"Type": "string", "Variable": "arg_7"},
+      {"Type": "string", "Variable": "arg_8"},
+      {"Type": "string", "Variable": "arg_9"},
+      {"Type": "string", "Variable": "arg_10"},
+      {"Type": "string", "Variable": "arg_11"},
+      {"Type": "string", "Variable": "arg_12"},
+      {"Type": "string", "Variable": "arg_13"},
+      {"Type": "string", "Variable": "arg_14"},
+      {"Type": "string", "Variable": "arg_15"},
+      {"Type": "string", "Variable": "arg_16"}
+    ]
+  },
+  "GAME_LAUNCH_ARGS": [
+    {"Requires": "arg_1",  "Value": "{arg_1}"},
+    {"Requires": "arg_2",  "Value": "{arg_2}"},
+    {"Requires": "arg_3",  "Value": "{arg_3}"},
+    {"Requires": "arg_4",  "Value": "{arg_4}"},
+    {"Requires": "arg_5",  "Value": "{arg_5}"},
+    {"Requires": "arg_6",  "Value": "{arg_6}"},
+    {"Requires": "arg_7",  "Value": "{arg_7}"},
+    {"Requires": "arg_8",  "Value": "{arg_8}"},
+    {"Requires": "arg_9",  "Value": "{arg_9}"},
+    {"Requires": "arg_10", "Value": "{arg_10}"},
+    {"Requires": "arg_11", "Value": "{arg_11}"},
+    {"Requires": "arg_12", "Value": "{arg_12}"},
+    {"Requires": "arg_13", "Value": "{arg_13}"},
+    {"Requires": "arg_14", "Value": "{arg_14}"},
+    {"Requires": "arg_15", "Value": "{arg_15}"},
+    {"Requires": "arg_16", "Value": "{arg_16}"}
+  ]
+}

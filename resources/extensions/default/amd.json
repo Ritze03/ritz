@@ -1,0 +1,118 @@
+{
+  "Extension": {
+    "Name": "AMD",
+    "Author": "Ritze",
+    "Version": "1.0",
+    "Description": "Tuning options for the AMD RADV Vulkan driver."
+  },
+  "UI": {
+    "RADV Perftest": [
+      {
+        "Name": "Enable RADV Perftest",
+        "Description": "Enable RADV_PERFTEST tuning.",
+        "Type": "toggle",
+        "Variable": "enabled",
+        "Default": false
+      },
+      {
+        "Name": "Clear Default Perftest",
+        "Description": "Clear RADV_PERFTEST before applying options.",
+        "Type": "toggle",
+        "Variable": "clear",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "ACO Compiler",
+        "Description": "Enable the ACO shader compiler.",
+        "Type": "toggle",
+        "Variable": "aco",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "GPL (Graphics Pipeline Library)",
+        "Description": "Enable the GPL pipeline.",
+        "Type": "toggle",
+        "Variable": "gpl",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "NGGC (NGG Culling)",
+        "Description": "Enable NGG culling.",
+        "Type": "toggle",
+        "Variable": "nggc",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "SAM (Smart Access Memory)",
+        "Description": "Enable Smart Access Memory.",
+        "Type": "toggle",
+        "Variable": "sam",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "RT (Ray Tracing)",
+        "Description": "Enable the RADV ray-tracing path.",
+        "Type": "toggle",
+        "Variable": "rt",
+        "Requires": "enabled"
+      }
+    ],
+    "Vulkan": [
+      {
+        "Name": "Mesa Anti-Lag",
+        "Description": "Enable the VK_LAYER_MESA_anti_lag implicit layer to reduce input latency.",
+        "Type": "toggle",
+        "Variable": "anti_lag",
+        "Default": false
+      }
+    ],
+    "Experimental": [
+      {
+        "Name": "AMD User Queue",
+        "Description": "Experimental user-mode submission queue (RADV_PERFTEST=userq + AMD_USERQ=1).",
+        "Type": "toggle",
+        "Variable": "userq",
+        "Default": false
+      },
+      {
+        "Name": "AMD Hardware Scheduling",
+        "Description": "Experimental hardware scheduling debug flag (AMD_DEBUG=hws).",
+        "Type": "toggle",
+        "Variable": "hws",
+        "Default": false
+      }
+    ]
+  },
+  "ENV_VARS": [
+    {
+      "Name": "RADV_PERFTEST",
+      "Requires": "enabled OR userq",
+      "Builder": [
+        { "Requires": "clear", "Type": "set", "Value": "" },
+        { "Requires": "aco", "Type": "append", "Separator": ",", "Value": "aco" },
+        { "Requires": "gpl", "Type": "append", "Separator": ",", "Value": "gpl" },
+        { "Requires": "nggc", "Type": "append", "Separator": ",", "Value": "nggc" },
+        { "Requires": "sam", "Type": "append", "Separator": ",", "Value": "sam" },
+        { "Requires": "rt", "Type": "append", "Separator": ",", "Value": "rt" },
+        { "Requires": "userq", "Type": "append", "Separator": ",", "Value": "userq" }
+      ]
+    },
+    {
+      "Name": "AMD_USERQ",
+      "Requires": "userq",
+      "Builder": [{ "Requires": "userq", "Type": "set", "Value": "1" }]
+    },
+    {
+      "Name": "AMD_DEBUG",
+      "Requires": "hws",
+      "Builder": [{ "Requires": "hws", "Type": "set", "Value": "hws" }]
+    },
+    {
+      "Name": "VK_INSTANCE_LAYERS",
+      "Requires": "anti_lag",
+      "Builder": [
+        { "Requires": "anti_lag", "Type": "append", "Separator": ":", "Value": "VK_LAYER_MESA_anti_lag" }
+      ]
+    }
+  ]
+}

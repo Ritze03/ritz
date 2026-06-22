@@ -1,0 +1,68 @@
+{
+  "Extension": {
+    "Name": "LSFG-VK",
+    "Author": "Ritze",
+    "Version": "1.0",
+    "Description": "Lossless Scaling frame generation."
+  },
+  "Backend": "lsfg-vk",
+  "UI": {
+    "Frame Generation": [
+      {
+        "Name": "Enable LSFG",
+        "Description": "Enable frame generation for this game.",
+        "Type": "toggle",
+        "Variable": "enabled",
+        "Default": false
+      },
+      {
+        "Name": "Multiplier",
+        "Description": "Frame generation multiplier.",
+        "Type": "selection",
+        "DisplayOptions": ["2x", "3x", "4x"],
+        "Options": ["2", "3", "4"],
+        "Variable": "multiplier",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Flow Scale",
+        "Description": "Optical flow resolution scale.",
+        "Type": "float",
+        "Options": { "min": 0.25, "max": 1.0, "step": 0.05 },
+        "Variable": "flow_scale",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Performance Mode",
+        "Description": "Use the lighter-weight model.",
+        "Type": "toggle",
+        "Variable": "performance_mode",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "HDR Mode",
+        "Description": "Enable HDR-aware frame generation.",
+        "Type": "toggle",
+        "Variable": "hdr_mode",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Experimental Present Mode",
+        "Description": "Override the Vulkan present mode.",
+        "Type": "selection",
+        "DisplayOptions": ["Default", "FIFO", "Mailbox", "Immediate"],
+        "Options": ["default", "fifo", "mailbox", "immediate"],
+        "Variable": "present_mode",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Activation Delay (s)",
+        "Description": "Seconds to wait before enabling the multiplier. 0 = immediate.",
+        "Type": "integer",
+        "Options": { "min": 0, "max": 120, "step": 1 },
+        "Variable": "activation_delay",
+        "Requires": "enabled"
+      }
+    ]
+  }
+}

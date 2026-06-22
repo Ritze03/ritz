@@ -1,0 +1,25 @@
+[package]
+name = "ritz-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "ritz"
+path = "src/main.rs"
+
+[dependencies]
+ritz-core = { path = "../ritz-core" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+shlex.workspace = true
+dirs.workspace = true
+nix.workspace = true
+signal-hook.workspace = true
+eframe = "0.29"
+egui = "0.29"
+include_dir = "0.7"
+png = "0.18"

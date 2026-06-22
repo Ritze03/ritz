@@ -1,0 +1,330 @@
+{
+  "Extension": {
+    "Name": "Proton",
+    "Author": "Ritze",
+    "Version": "1.0",
+    "Description": "Common Proton environment toggles."
+  },
+  "UI": {
+    "Sync": [
+      {
+        "Name": "Disable NTSync",
+        "Description": "Set PROTON_NO_NTSYNC=1. NTSync is the default sync backend in Proton 11; disable for troubleshooting.",
+        "Type": "toggle",
+        "Variable": "no_ntsync",
+        "Default": false
+      },
+      {
+        "Name": "Disable FSYNC",
+        "Description": "Set PROTON_NO_FSYNC=1 (disables the futex-based fsync fallback).",
+        "Type": "toggle",
+        "Variable": "no_fsync",
+        "Default": false
+      },
+      {
+        "Name": "Disable ESYNC",
+        "Description": "Set PROTON_NO_ESYNC=1 (disables the eventfd-based esync fallback).",
+        "Type": "toggle",
+        "Variable": "no_esync",
+        "Default": false
+      }
+    ],
+    "Renderer": [
+      {
+        "Name": "Use WineD3D",
+        "Description": "Set PROTON_USE_WINED3D=1 (OpenGL wined3d instead of Vulkan DXVK).",
+        "Type": "toggle",
+        "Variable": "use_wined3d",
+        "Default": false
+      },
+      {
+        "Name": "Enable D3D8 (DXVK)",
+        "Description": "Set PROTON_DXVK_D3D8=1 (route Direct3D 8 through DXVK).",
+        "Type": "toggle",
+        "Variable": "dxvk_d3d8",
+        "Default": false
+      },
+      {
+        "Name": "Disable D3D11",
+        "Description": "Set PROTON_NO_D3D11=1 (hide d3d11.dll so games fall back to d3d9).",
+        "Type": "toggle",
+        "Variable": "no_d3d11",
+        "Default": false
+      },
+      {
+        "Name": "Disable D3D10",
+        "Description": "Set PROTON_NO_D3D10=1 (disable d3d10.dll and dxgi.dll).",
+        "Type": "toggle",
+        "Variable": "no_d3d10",
+        "Default": false
+      }
+    ],
+    "Display": [
+      {
+        "Name": "Enable Wayland",
+        "Description": "Set PROTON_ENABLE_WAYLAND=1 (native Wayland for Proton; experimental).",
+        "Type": "toggle",
+        "Variable": "enable_wayland",
+        "Default": false
+      },
+      {
+        "Name": "HDR",
+        "Description": "Set PROTON_ENABLE_HDR=1 (needs a compatible game, display, and Wayland).",
+        "Type": "toggle",
+        "Variable": "hdr",
+        "Default": false
+      },
+      {
+        "Name": "Fullscreen Integer Scaling",
+        "Description": "Set WINE_FULLSCREEN_INTEGER_SCALING=1 (sharp pixel-perfect upscaling).",
+        "Type": "toggle",
+        "Variable": "integer_scaling",
+        "Default": false
+      }
+    ],
+    "GPU": [
+      {
+        "Name": "Disable NVAPI",
+        "Description": "Set PROTON_DISABLE_NVAPI=1 (turn off NVIDIA NVAPI; fixes some games).",
+        "Type": "toggle",
+        "Variable": "disable_nvapi",
+        "Default": false
+      },
+      {
+        "Name": "Hide NVIDIA GPU",
+        "Description": "Set PROTON_HIDE_NVIDIA_GPU=1 (report Nvidia GPUs as AMD).",
+        "Type": "toggle",
+        "Variable": "hide_nvidia_gpu",
+        "Default": false
+      }
+    ],
+    "Compatibility": [
+      {
+        "Name": "Set Game Drive (S:)",
+        "Description": "Set PROTON_SET_GAME_DRIVE=1 (map an S: drive to the game's Steam library).",
+        "Type": "toggle",
+        "Variable": "set_game_drive",
+        "Default": false
+      },
+      {
+        "Name": "Disable XIM",
+        "Description": "Set PROTON_NO_XIM=1 (disable X Input Methods; fixes some input issues).",
+        "Type": "toggle",
+        "Variable": "no_xim",
+        "Default": false
+      },
+      {
+        "Name": "Old GL String",
+        "Description": "Set PROTON_OLD_GL_STRING=1 (shorten the GL extension string for old games).",
+        "Type": "toggle",
+        "Variable": "old_gl_string",
+        "Default": false
+      },
+      {
+        "Name": "Heap Delay Free",
+        "Description": "Set PROTON_HEAP_DELAY_FREE=1 (delay freeing memory to work around use-after-free crashes).",
+        "Type": "toggle",
+        "Variable": "heap_delay_free",
+        "Default": false
+      }
+    ],
+    "Debug": [
+      {
+        "Name": "Log",
+        "Description": "Set PROTON_LOG=1 (dumps a debug log to $PROTON_LOG_DIR).",
+        "Type": "toggle",
+        "Variable": "log",
+        "Default": false
+      }
+    ]
+  },
+  "ENV_VARS": [
+    {
+      "Name": "PROTON_NO_ESYNC",
+      "Requires": "no_esync",
+      "Builder": [
+        {
+          "Requires": "no_esync",
+          "Type": "set",
+          "Value": "1"
+        }
+      ]
+    },
+    {
+      "Name": "PROTON_NO_FSYNC",
+      "Requires": "no_fsync",
+      "Builder": [
+        {
+          "Requires": "no_fsync",
+          "Type": "set",
+          "Value": "1"
+        }
+      ]
+    },
+    {
+      "Name": "PROTON_NO_NTSYNC",
+      "Requires": "no_ntsync",
+      "Builder": [
+        {
+          "Requires": "no_ntsync",
+          "Type": "set",
+          "Value": "1"
+        }
+      ]
+    },
+    {
+      "Name": "PROTON_USE_WINED3D",
+      "Requires": "use_wined3d",
+      "Builder": [
+        {
+          "Requires": "use_wined3d",
+          "Type": "set",
+          "Value": "1"
+        }
+      ]
+    },
+    {
+      "Name": "PROTON_DXVK_D3D8",
+      "Requires": "dxvk_d3d8",
+      "Builder": [
+        {
+          "Requires": "dxvk_d3d8",
+          "Type": "set",
+          "Value": "1"
+        }
+      ]
+    },
+    {
+      "Name": "PROTON_NO_D3D11",
+      "Requires": "no_d3d11",
+      "Builder": [
+        {
+          "Requires": "no_d3d11",
+          "Type": "set",
+          "Value": "1"
+        }
+      ]
+    },
+    {
+      "Name": "PROTON_NO_D3D10",
+      "Requires": "no_d3d10",
+      "Builder": [
+        {
+          "Requires": "no_d3d10",
+          "Type": "set",
+          "Value": "1"
+        }
+      ]
+    },
+    {
+      "Name": "PROTON_ENABLE_WAYLAND",
+      "Requires": "enable_wayland",
+      "Builder": [
+        {
+          "Requires": "enable_wayland",
+          "Type": "set",
+          "Value": "1"
+        }
+      ]
+    },
+    {
+      "Name": "PROTON_ENABLE_HDR",
+      "Requires": "hdr",
+      "Builder": [
+        {
+          "Requires": "hdr",
+          "Type": "set",
+          "Value": "1"
+        }
+      ]
+    },
+    {
+      "Name": "WINE_FULLSCREEN_INTEGER_SCALING",
+      "Requires": "integer_scaling",
+      "Builder": [
+        {
+          "Requires": "integer_scaling",
+          "Type": "set",
+          "Value": "1"
+        }
+      ]
+    },
+    {
+      "Name": "PROTON_DISABLE_NVAPI",
+      "Requires": "disable_nvapi",
+      "Builder": [
+        {
+          "Requires": "disable_nvapi",
+          "Type": "set",
+          "Value": "1"
+        }
+      ]
+    },
+    {
+      "Name": "PROTON_HIDE_NVIDIA_GPU",
+      "Requires": "hide_nvidia_gpu",
+      "Builder": [
+        {
+          "Requires": "hide_nvidia_gpu",
+          "Type": "set",
+          "Value": "1"
+        }
+      ]
+    },
+    {
+      "Name": "PROTON_SET_GAME_DRIVE",
+      "Requires": "set_game_drive",
+      "Builder": [
+        {
+          "Requires": "set_game_drive",
+          "Type": "set",
+          "Value": "1"
+        }
+      ]
+    },
+    {
+      "Name": "PROTON_NO_XIM",
+      "Requires": "no_xim",
+      "Builder": [
+        {
+          "Requires": "no_xim",
+          "Type": "set",
+          "Value": "1"
+        }
+      ]
+    },
+    {
+      "Name": "PROTON_OLD_GL_STRING",
+      "Requires": "old_gl_string",
+      "Builder": [
+        {
+          "Requires": "old_gl_string",
+          "Type": "set",
+          "Value": "1"
+        }
+      ]
+    },
+    {
+      "Name": "PROTON_HEAP_DELAY_FREE",
+      "Requires": "heap_delay_free",
+      "Builder": [
+        {
+          "Requires": "heap_delay_free",
+          "Type": "set",
+          "Value": "1"
+        }
+      ]
+    },
+    {
+      "Name": "PROTON_LOG",
+      "Requires": "log",
+      "Builder": [
+        {
+          "Requires": "log",
+          "Type": "set",
+          "Value": "1"
+        }
+      ]
+    }
+  ]
+}

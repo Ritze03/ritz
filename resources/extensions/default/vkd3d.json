@@ -1,0 +1,119 @@
+{
+  "Extension": {
+    "Name": "VKD3D",
+    "Author": "Ritze",
+    "Version": "1.0",
+    "Description": "Tuning for VKD3D-Proton (Direct3D 12 to Vulkan)."
+  },
+  "UI": {
+    "Basic": [
+      {
+        "Name": "FPS Limit",
+        "Description": "Limit the frame rate (VKD3D_FRAME_RATE). 0 = uncapped.",
+        "Type": "integer",
+        "Variable": "fps_limit",
+        "Options": { "min": 0, "max": 360, "step": 1 }
+      }
+    ],
+    "Config Flags": [
+      {
+        "Name": "Descriptor Heap",
+        "Description": "VKD3D_CONFIG=descriptor_heap — enable the GPU descriptor heap (perf and crash fixes; opt-in, some NVIDIA caveats).",
+        "Type": "toggle",
+        "Variable": "descriptor_heap",
+        "Default": false
+      },
+      {
+        "Name": "Experimental Features",
+        "Description": "VKD3D_CONFIG=enable_experimental_features — enable vkd3d-proton's experimental feature set.",
+        "Type": "toggle",
+        "Variable": "enable_experimental_features",
+        "Default": false
+      },
+      {
+        "Name": "Force Ray Tracing (DXR)",
+        "Description": "VKD3D_CONFIG=dxr — force-enable DX12 ray tracing even when considered unsafe.",
+        "Type": "toggle",
+        "Variable": "dxr",
+        "Default": false
+      },
+      {
+        "Name": "DXR 1.2",
+        "Description": "VKD3D_CONFIG=dxr12 — experimental DXR 1.2 (needs VK_EXT_opacity_micromap).",
+        "Type": "toggle",
+        "Variable": "dxr12",
+        "Default": false
+      },
+      {
+        "Name": "Disable Ray Tracing",
+        "Description": "VKD3D_CONFIG=nodxr — disable DXR/ray tracing support.",
+        "Type": "toggle",
+        "Variable": "nodxr",
+        "Default": false
+      },
+      {
+        "Name": "Single Queue",
+        "Description": "VKD3D_CONFIG=single_queue — disable async compute/transfer queues (troubleshooting).",
+        "Type": "toggle",
+        "Variable": "single_queue",
+        "Default": false
+      },
+      {
+        "Name": "Force Static CBV",
+        "Description": "VKD3D_CONFIG=force_static_cbv — unsafe speed hack on NVIDIA.",
+        "Type": "toggle",
+        "Variable": "force_static_cbv",
+        "Default": false
+      },
+      {
+        "Name": "No Upload HVV",
+        "Description": "VKD3D_CONFIG=no_upload_hvv — block host-visible VRAM for the UPLOAD heap (resizable-BAR issues).",
+        "Type": "toggle",
+        "Variable": "no_upload_hvv",
+        "Default": false
+      },
+      {
+        "Name": "Extra VKD3D_CONFIG flags",
+        "Description": "Additional VKD3D_CONFIG flags, comma-separated, appended to the ticked ones above (e.g. force_host_cached,breadcrumbs).",
+        "Type": "string",
+        "Variable": "raw_config"
+      }
+    ],
+    "Display": [
+      {
+        "Name": "Present Mode",
+        "Description": "VKD3D_SWAPCHAIN_PRESENT_MODE — IMMEDIATE (no vsync, tearing), MAILBOX (low-latency vsync), FIFO (vsync), FIFO_RELAXED (adaptive).",
+        "Type": "selection",
+        "Variable": "present_mode",
+        "Options": ["IMMEDIATE", "MAILBOX", "FIFO", "FIFO_RELAXED"]
+      }
+    ]
+  },
+  "ENV_VARS": [
+    {
+      "Name": "VKD3D_FRAME_RATE",
+      "Requires": "fps_limit",
+      "Builder": [{ "Requires": "fps_limit", "Type": "set", "Value": "{fps_limit}" }]
+    },
+    {
+      "Name": "VKD3D_CONFIG",
+      "Requires": "descriptor_heap OR enable_experimental_features OR dxr OR dxr12 OR nodxr OR single_queue OR force_static_cbv OR no_upload_hvv OR raw_config",
+      "Builder": [
+        { "Requires": "descriptor_heap", "Type": "append", "Separator": ",", "Value": "descriptor_heap" },
+        { "Requires": "enable_experimental_features", "Type": "append", "Separator": ",", "Value": "enable_experimental_features" },
+        { "Requires": "dxr", "Type": "append", "Separator": ",", "Value": "dxr" },
+        { "Requires": "dxr12", "Type": "append", "Separator": ",", "Value": "dxr12" },
+        { "Requires": "nodxr", "Type": "append", "Separator": ",", "Value": "nodxr" },
+        { "Requires": "single_queue", "Type": "append", "Separator": ",", "Value": "single_queue" },
+        { "Requires": "force_static_cbv", "Type": "append", "Separator": ",", "Value": "force_static_cbv" },
+        { "Requires": "no_upload_hvv", "Type": "append", "Separator": ",", "Value": "no_upload_hvv" },
+        { "Requires": "raw_config", "Type": "append", "Separator": ",", "Value": "{raw_config}" }
+      ]
+    },
+    {
+      "Name": "VKD3D_SWAPCHAIN_PRESENT_MODE",
+      "Requires": "present_mode",
+      "Builder": [{ "Requires": "present_mode", "Type": "set", "Value": "{present_mode}" }]
+    }
+  ]
+}

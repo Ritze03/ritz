@@ -1,0 +1,52 @@
+{
+  "Extension": {
+    "Name": "Hypr-Monctl",
+    "Author": "Ritze",
+    "Version": "1.0",
+    "Description": "Adjust monitor saturation, brightness, and temperature while the game is focused."
+  },
+  "Backend": "hypr-monctl",
+  "RequiresDesktop": "Hyprland",
+  "UI": {
+    "Monitor Control": [
+      {
+        "Name": "Enable Hypr-Monctl",
+        "Description": "Apply per-game color while the game window is focused.",
+        "Type": "toggle",
+        "Variable": "enabled",
+        "Default": false
+      },
+      {
+        "Name": "Window Class",
+        "Description": "Hyprland window class to match. If unset, the game's name is used.",
+        "Type": "string",
+        "Variable": "window_class",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Saturation",
+        "Description": "1.0 = neutral, higher = more vivid.",
+        "Type": "float",
+        "Options": { "min": 0.0, "max": 5.0, "step": 0.05 },
+        "Variable": "saturation",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Brightness",
+        "Description": "1.0 = neutral.",
+        "Type": "float",
+        "Options": { "min": 0.0, "max": 2.0, "step": 0.05 },
+        "Variable": "brightness",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Temperature",
+        "Description": "-1.0 = cool, 0 = neutral, 1.0 = warm.",
+        "Type": "float",
+        "Options": { "min": -1.0, "max": 1.0, "step": 0.05 },
+        "Variable": "temperature",
+        "Requires": "enabled"
+      }
+    ]
+  }
+}
