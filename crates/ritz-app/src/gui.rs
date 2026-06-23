@@ -143,6 +143,7 @@ pub struct GuiApp {
     /// AppID buffer used only when creating a new game.
     nav_appid_buf: String,
     creating_profile: bool,
+    duplicating_preset: Option<Preset>,
     creating_game: bool,
     /// Focus the create-profile/game name box on the next frame.
     focus_nav_name: bool,
@@ -215,6 +216,7 @@ impl GuiApp {
             nav_name_buf: name.to_string(),
             nav_appid_buf: String::new(),
             creating_profile: false,
+            duplicating_preset: None,
             creating_game: false,
             focus_nav_name: false,
             confirm: None,
@@ -1978,12 +1980,14 @@ impl GuiApp {
             Some(NavAction::SelectGeneral) => {
                 self.nav_sel = NavSel::GeneralSettings;
                 self.creating_profile = false;
+                self.duplicating_preset = None;
                 self.creating_game = false;
                 self.text_buffers.clear();
             }
             Some(NavAction::SelectGlobal) => {
                 self.nav_sel = NavSel::GlobalSettings;
                 self.creating_profile = false;
+                self.duplicating_preset = None;
                 self.creating_game = false;
                 self.text_buffers.clear();
             }
@@ -1992,6 +1996,7 @@ impl GuiApp {
                 self.nav_name_buf = name.clone();
                 self.nav_sel = NavSel::Profile(name);
                 self.creating_profile = false;
+                self.duplicating_preset = None;
                 self.creating_game = false;
                 self.text_buffers.clear();
             }
@@ -2001,6 +2006,7 @@ impl GuiApp {
                 self.nav_name_buf = self.game_config.game.name.clone();
                 self.editing_preset_buf = None;
                 self.creating_profile = false;
+                self.duplicating_preset = None;
                 self.creating_game = false;
             }
             Some(NavAction::StartCreateProfile) => {
@@ -2037,7 +2043,8 @@ impl GuiApp {
 
     fn render_nav_settings(&mut self, ui: &mut egui::Ui) {
         if self.creating_profile {
-            ui.label("New profile name:");
+            let label = if self.duplicating_preset.is_some() { "Duplicate profile name:" } else { "New profile name:" };
+            ui.label(label);
             let resp = ui.text_edit_singleline(&mut self.nav_name_buf);
             if self.focus_nav_name {
                 resp.request_focus();
@@ -2046,7 +2053,11 @@ impl GuiApp {
             ui.horizontal(|ui| {
                 let name = self.nav_name_buf.trim().to_string();
                 if ui.button("Create").clicked() && !name.is_empty() {
-                    let preset = Preset { name: name.clone(), ..Default::default() };
+                    let preset = if let Some(src) = self.duplicating_preset.take() {
+                        Preset { name: name.clone(), modules: src.modules, pin: None }
+                    } else {
+                        Preset { name: name.clone(), ..Default::default() }
+                    };
                     let _ = self.paths.save_preset(&preset);
                     self.refresh_presets();
                     self.editing_preset_buf = Some(preset);
@@ -2056,6 +2067,7 @@ impl GuiApp {
                     self.text_buffers.clear();
                 }
                 if ui.button("Cancel").clicked() {
+                    self.duplicating_preset = None;
                     self.creating_profile = false;
                     self.reselect_current();
                 }
@@ -2158,6 +2170,15 @@ impl GuiApp {
                         .clicked()
                     {
                         self.confirm = Some(ConfirmAction::DeleteProfile(name.clone()));
+                    }
+                    if ui
+                        .add_sized([ui.available_width(), 30.0], egui::Button::new("Duplicate Profile"))
+                        .clicked()
+                    {
+                        self.duplicating_preset = self.paths.load_preset(&name).ok().flatten();
+                        self.creating_profile = true;
+                        self.nav_name_buf = format!("{} Copy", name);
+                        self.focus_nav_name = true;
                     }
                 });
             }
@@ -2337,6 +2358,7 @@ impl GuiApp {
     fn render_ext_tree(&mut self, ui: &mut egui::Ui) {
         // Build per-extension icon lists: each entry is (icon_glyph, color).
         // Inheritance from a lower layer → ICON_INHERIT; edit at current scope → ICON_EDIT.
+        let resolution = self.resolve_for_editing();
         let mono = self.general_config.mono_ui;
         let nav_sel = &self.nav_sel;
         let global_modules = &self.global_config.modules;
@@ -2351,10 +2373,19 @@ impl GuiApp {
             // variable (e.g. an old `xkb_de`) must not count as "configured".
             let declared: std::collections::HashSet<&str> =
                 spec.ui.values().flatten().map(|f| f.variable.as_str()).collect();
+            // Fields whose Requires gate is currently closed don't contribute to
+            // the launch command, so stored values behind them aren't "edited".
+            let field_by_var: std::collections::HashMap<&str, &UiField> =
+                spec.ui.values().flatten().map(|f| (f.variable.as_str(), f)).collect();
+            let ext_res = resolution.exts.get(&spec.id());
             let has_in = |modules: &AuthorsMap| -> bool {
                 modules.get(&spec.meta.author)
                     .and_then(|e| e.get(&spec.meta.name))
-                    .map(|vars| vars.keys().any(|k| declared.contains(k.as_str())))
+                    .map(|vars| vars.keys().any(|k| {
+                        declared.contains(k.as_str())
+                            && field_by_var.get(k.as_str())
+                                .map_or(true, |f| field_visible(f, ext_res))
+                    }))
                     .unwrap_or(false)
             };
             let mut icons: Vec<(&'static str, Color32)> = Vec::new();
