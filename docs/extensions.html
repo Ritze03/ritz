@@ -119,7 +119,27 @@
     <tr><td><code>integer</code></td><td>Slider + spinner</td><td>Needs <code>Options: { min, max, step }</code>.</td></tr>
     <tr><td><code>float</code></td><td>Slider + spinner</td><td>Same <code>Options</code> range; decimals allowed.</td></tr>
     <tr><td><code>selection</code></td><td>Dropdown</td><td><code>Options</code> is the list of stored values; optional <code>DisplayOptions</code> gives parallel labels.</td></tr>
+    <tr><td><code>multi_string</code></td><td>Growing slot list</td><td>A <em>list</em> of strings (add/remove rows). See <a href="#multi">Lists &amp; for-each</a>.</td></tr>
   </table>
+
+  <h3 id="multi">Lists &amp; for-each (<code>multi_string</code>)</h3>
+  <p>A <code>multi_string</code> field stores a <strong>list</strong> of strings, edited as a
+  growing slot list (like the Custom Env rows). It resolves to its non-empty entries
+  <strong>joined by newlines</strong>, and is <em>truthy</em> when it has at least one entry.
+  Because of that newline-join, a list naturally behaves like a <strong>for-each</strong> wherever
+  it's consumed:</p>
+  <ul>
+    <li><strong>Launch args &amp; wrappers</strong> shell-split the interpolated value, so
+      <code>{my_list}</code> expands to one token per entry.</li>
+    <li><strong>Hook scripts</strong> receive the newline-joined list in
+      <code>RITZ_VAR_&lt;name&gt;</code> and loop over the lines (the bundled Scripts module runs
+      one command per entry).</li>
+    <li><strong>Env vars</strong> are the exception: a <code>set</code>/<code>append</code> gets the
+      whole list as one newline-joined value (no per-entry expansion).</li>
+  </ul>
+  <pre><code>{ "Name": "Commands", "Type": "multi_string", "Variable": "pre_command" }
+// stored as:  "pre_command": ["echo hi", "mangohud &amp;"]
+// RITZ_VAR_pre_command = "echo hi\nmangohud &amp;"  → the hook runs each line</code></pre>
 
   <h3>Common field keys</h3>
   <table>

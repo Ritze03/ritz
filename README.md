@@ -89,7 +89,7 @@ Functionality ships as JSON **modules** (extensions). The bundled set:
 | **Misc** | Common env/compat: clear `LD_PRELOAD`/`VK_INSTANCE_LAYERS`, force X11 SDL, keyboard layout, GameMode (`gamemoderun`). |
 | **Game Launch Args** | Free-form arguments appended after the game command. |
 | **Custom Env** | Free-form environment variables (chain-wide and game-only). |
-| **Scripts** | Run scripts at lifecycle hooks (pre-launch, post-spawn, on-ready, post-exit). |
+| **Scripts** | Run your own commands at lifecycle points (pre-launch, post-launch, post-exit). Multiple commands per stage; pre/post-exit run in order, post-launch runs them in parallel. |
 | **LSFG-VK** | Lossless Scaling frame generation backend (writes `conf.toml`, activation delay). |
 | **Hypr-Monctl** | Per-game display vibrance via a Hyprland plugin (only loads on Hyprland). |
 
