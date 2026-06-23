@@ -49,6 +49,9 @@ pub struct GeneralConfig {
     /// game, false = cancel the launch.
     #[serde(rename = "EditorCloseLaunches", default = "default_true")]
     pub editor_close_launches: bool,
+    /// Auto-size the launch command preview box to its content instead of fixed height.
+    #[serde(rename = "DynamicPreview", default)]
+    pub dynamic_preview: bool,
 }
 
 impl Default for GeneralConfig {
@@ -60,6 +63,7 @@ impl Default for GeneralConfig {
             touch_mode: false,
             full_width: false,
             editor_close_launches: true,
+            dynamic_preview: false,
         }
     }
 }
@@ -75,6 +79,9 @@ pub struct Preset {
     /// If pinned, a 1–10 slot id used to show the profile at the top of the tree.
     #[serde(rename = "Pin", default, skip_serializing_if = "Option::is_none")]
     pub pin: Option<u8>,
+    /// Optional parent profile — its values form a layer below this profile's own.
+    #[serde(rename = "Parent", default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
 }
 
 impl Preset {

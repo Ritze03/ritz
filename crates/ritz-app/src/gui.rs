@@ -17,7 +17,7 @@ use ritz_core::resolve::{self, Provenance, Resolution};
 use ritz_core::schema::{Extension, FieldType, OptionsSpec, UiField};
 use serde_json::{json, Value};
 
-use crate::context::{self, AppContext};
+use crate::context::{self, chain_would_have_cycle, collect_parent_chain, merge_modules, AppContext};
 
 use crate::theme::{self, COL_GAME, COL_GLOBAL, COL_PROFILE, ICON_EDIT, ICON_INHERIT};
 
@@ -371,8 +371,10 @@ impl GuiApp {
             }
             NavSel::Profile(_) => match &self.editing_preset_buf {
                 Some(p) => {
+                    let parent = p.parent.as_ref()
+                        .map(|n| collect_parent_chain(&self.paths, n));
                     let fake = preset_as_fake_game(p);
-                    resolve::resolve(&self.cur_specs, Some(&fake), None, global)
+                    resolve::resolve(&self.cur_specs, Some(&fake), parent.as_ref(), global)
                 }
                 None => resolve::resolve(&self.cur_specs, None, None, global),
             },
@@ -383,14 +385,22 @@ impl GuiApp {
     fn resolve_for_game(&self) -> Resolution {
         // If the profile being edited is the one applied to this game, use the
         // live (unsaved) edit buffer so the preview reflects in-progress edits.
-        let preset = match (&self.editing_preset_buf, &self.preset) {
-            (Some(buf), Some(applied)) if buf.name == applied.name => Some(buf),
+        let direct = match (&self.editing_preset_buf, &self.preset) {
+            (Some(buf), Some(applied)) if buf.name == applied.name => Some(buf as &Preset),
             _ => self.preset.as_ref(),
         };
+        // Merge parent chain under the direct preset (parent = lower priority).
+        let merged: Option<Preset> = direct.and_then(|p| {
+            let pname = p.parent.as_ref()?;
+            let mut base = collect_parent_chain(&self.paths, pname);
+            merge_modules(&mut base.modules, &p.modules);
+            Some(base)
+        });
+        let effective = merged.as_ref().map(|p| p as &Preset).or(direct);
         resolve::resolve(
             &self.cur_specs,
             Some(&self.game_config),
-            preset,
+            effective,
             Some(&self.global_config),
         )
     }
@@ -456,7 +466,7 @@ impl GuiApp {
                 });
             // Toggles + Open Folder pinned to the bottom footer band.
             egui::TopBottomPanel::bottom("group_toggle")
-                .exact_height(158.0)
+                .exact_height(198.0)
                 .show_separator_line(true)
                 .frame(egui::Frame::none()
                     .fill(theme::PANEL2)
@@ -479,13 +489,17 @@ impl GuiApp {
         });
         } // end if !GeneralSettings
 
-        egui::TopBottomPanel::bottom("preview")
-            .exact_height(158.0)
-            .show_separator_line(true)
-            .frame(egui::Frame::none()
-                .fill(theme::PANEL2)
-                .inner_margin(egui::Margin::same(16.0)))
-            .show(ctx, |ui| {
+        let dynamic_preview = self.general_config.dynamic_preview;
+        {
+            let mut panel = egui::TopBottomPanel::bottom("preview")
+                .show_separator_line(true)
+                .frame(egui::Frame::none()
+                    .fill(theme::PANEL2)
+                    .inner_margin(egui::Margin::same(16.0)));
+            if !dynamic_preview {
+                panel = panel.exact_height(198.0);
+            }
+            panel.show(ctx, |ui| {
                 // General Settings has no launch command — show repo link + credits
                 // in the same box instead of the preview.
                 if matches!(self.nav_sel, NavSel::GeneralSettings) {
@@ -494,13 +508,15 @@ impl GuiApp {
                 }
                 ui.label(theme::header_label("Launch command preview"));
                 ui.add_space(8.0);
+                let preview_res = if matches!(self.nav_sel, NavSel::Profile(_)) {
+                    &edit_resolution
+                } else {
+                    &game_resolution
+                };
                 let preview =
-                    context::assemble_launch(&self.cur_specs, &game_resolution, &self.game_command)
+                    context::assemble_launch(&self.cur_specs, preview_res, &self.game_command)
                         .map(|lc| lc.to_string())
                         .unwrap_or_else(|e| format!("<error: {e}>"));
-                // Fill the remaining footer height; the panel's 16px bottom margin
-                // becomes the gap below, matching the left/right insets.
-                let box_h = ui.available_height();
                 egui::Frame::none()
                     .fill(theme::FIELD)
                     .stroke(egui::Stroke::new(1.0, theme::BORDER))
@@ -508,14 +524,20 @@ impl GuiApp {
                     .inner_margin(egui::Margin::symmetric(13.0, 11.0))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        ui.set_min_height((box_h - 22.0).max(0.0));
+                        if !dynamic_preview {
+                            // Fill the remaining footer height; the panel's 16px bottom
+                            // margin becomes the gap below, matching the left/right insets.
+                            let box_h = ui.available_height();
+                            ui.set_min_height((box_h - 22.0).max(0.0));
+                        }
                         egui::ScrollArea::vertical()
-                            .auto_shrink([false, false])
+                            .auto_shrink([false, dynamic_preview])
                             .show(ui, |ui| {
                                 ui.add(egui::Label::new(command_job(&preview)).wrap());
                             });
                     });
             });
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             if matches!(self.nav_sel, NavSel::GeneralSettings) {
@@ -797,7 +819,6 @@ impl GuiApp {
             if ui.add_sized([w, 30.0], theme::danger_button("Clear Settings")).clicked() {
                 self.confirm = Some(ConfirmAction::ClearSettings);
             }
-            ui.add_space(6.0);
             if ui
                 .add_sized([w, 30.0], theme::secondary_button(format!("\u{f07b}{sep}Open Folder")))
                 .clicked()
@@ -1647,6 +1668,17 @@ impl GuiApp {
             changed = true;
         }
 
+        let mut dyn_prev = self.general_config.dynamic_preview;
+        if settings_toggle_row(
+            ui,
+            "Dynamic Preview Size",
+            "Auto-size the launch command preview to its content instead of a fixed height.",
+            &mut dyn_prev,
+        ) {
+            self.general_config.dynamic_preview = dyn_prev;
+            changed = true;
+        }
+
         // Reload: [Reload Extensions] [Reload Configs]
         settings_value_row(ui, "Reload Actions", "", |ui| {
             if ui
@@ -1746,6 +1778,15 @@ impl GuiApp {
 
     /// Set (or clear) the pin slot of the currently-edited profile, persist, and
     /// refresh the pin cache.
+    fn set_parent_preset(&mut self, name: &str, parent: Option<String>) {
+        if let Some(buf) = &mut self.editing_preset_buf {
+            if buf.name == name {
+                buf.parent = parent;
+                let _ = self.paths.save_preset(buf);
+            }
+        }
+    }
+
     fn set_current_preset_pin(&mut self, pin: Option<u8>) {
         if let Some(p) = &mut self.editing_preset_buf {
             p.pin = pin;
@@ -1840,7 +1881,7 @@ impl GuiApp {
     fn render_nav_panel(&mut self, ui: &mut egui::Ui) {
         // Always show the bottom band (it's empty for General/Global Settings).
         egui::TopBottomPanel::bottom("nav_settings")
-            .exact_height(158.0)
+            .exact_height(198.0)
             .show_separator_line(true)
             .frame(egui::Frame::none()
                 .fill(theme::PANEL2)
@@ -1899,6 +1940,41 @@ impl GuiApp {
             NavSel::Game(_) => self.game_config.config.modules.preset.clone(),
             _ => None,
         };
+        // Collect the parent chain as depth → arrow count.
+        // Profile selected: direct parent=1, grandparent=2, …
+        // Game selected:    active profile=1 (via is_active), its parent=2, …
+        let profile_parents: std::collections::HashMap<String, usize> = match &self.nav_sel {
+            NavSel::Profile(_) => {
+                let mut depths = std::collections::HashMap::new();
+                let mut cur = self.editing_preset_buf.as_ref().and_then(|p| p.parent.clone());
+                let mut seen = std::collections::HashSet::new();
+                let mut depth = 1usize;
+                while let Some(pname) = cur {
+                    if !seen.insert(pname.clone()) { break; }
+                    depths.insert(pname.clone(), depth);
+                    cur = self.paths.load_preset(&pname).ok().flatten().and_then(|p| p.parent);
+                    depth += 1;
+                }
+                depths
+            }
+            NavSel::Game(_) => {
+                let mut depths = std::collections::HashMap::new();
+                if let Some(ref preset_name) = active_preset {
+                    let mut cur = self.paths.load_preset(preset_name).ok().flatten().and_then(|p| p.parent);
+                    let mut seen = std::collections::HashSet::new();
+                    seen.insert(preset_name.clone());
+                    let mut depth = 2usize;
+                    while let Some(pname) = cur {
+                        if !seen.insert(pname.clone()) { break; }
+                        depths.insert(pname.clone(), depth);
+                        cur = self.paths.load_preset(&pname).ok().flatten().and_then(|p| p.parent);
+                        depth += 1;
+                    }
+                }
+                depths
+            }
+            _ => std::collections::HashMap::new(),
+        };
         // Ordered: pinned profiles (by slot id, with " [id]" suffix) first, then
         // the rest in list order.
         let presets = self.all_presets.clone();
@@ -1926,10 +2002,17 @@ impl GuiApp {
                 for (name, pin) in &ordered {
                     let is_sel = self.nav_sel == NavSel::Profile(name.clone());
                     let is_active = active_preset.as_deref() == Some(name.as_str());
-                    let label: egui::WidgetText = if is_active {
+                    let parent_depth = profile_parents.get(name.as_str()).copied();
+                    let arrow_count = parent_depth.unwrap_or(if is_active { 1 } else { 0 });
+                    let label: egui::WidgetText = if arrow_count > 0 {
                         let font_id = ui.style().text_styles[&egui::TextStyle::Body].clone();
                         let mut job = LayoutJob::default();
-                        job.append(ICON_INHERIT, 0.0, TextFormat { font_id: font_id.clone(), color: COL_PROFILE, ..Default::default() });
+                        for i in 0..arrow_count {
+                            if i > 0 {
+                                job.append(" ", 0.0, TextFormat { font_id: font_id.clone(), color: theme::TEXT, ..Default::default() });
+                            }
+                            job.append(ICON_INHERIT, 0.0, TextFormat { font_id: font_id.clone(), color: COL_PROFILE, ..Default::default() });
+                        }
                         job.append(name, gap, TextFormat { font_id, color: theme::TEXT, ..Default::default() });
                         job.into()
                     } else {
@@ -2054,7 +2137,7 @@ impl GuiApp {
                 let name = self.nav_name_buf.trim().to_string();
                 if ui.button("Create").clicked() && !name.is_empty() {
                     let preset = if let Some(src) = self.duplicating_preset.take() {
-                        Preset { name: name.clone(), modules: src.modules, pin: None }
+                        Preset { name: name.clone(), modules: src.modules, pin: None, parent: None }
                     } else {
                         Preset { name: name.clone(), ..Default::default() }
                     };
@@ -2162,6 +2245,49 @@ impl GuiApp {
                             }
                         }
                     }
+                });
+
+                // Parent profile — any profile except self; cycles allowed but shown in red.
+                let cur_parent = self.editing_preset_buf.as_ref().and_then(|p| p.parent.clone());
+                let sep = icon_sep(self.general_config.mono_ui);
+                ui.horizontal(|ui| {
+                    footer_label(ui, "Parent");
+                    let display = cur_parent.as_deref().unwrap_or("None");
+                    egui::ComboBox::from_id_salt("profile_parent_id")
+                        .selected_text(display)
+                        .width(ui.available_width())
+                        .show_ui(ui, |ui| {
+                            let is_none = cur_parent.is_none();
+                            if ui.selectable_label(is_none, "None").clicked() && !is_none {
+                                self.set_parent_preset(&name, None);
+                            }
+                            for pname in self.all_presets.clone() {
+                                if pname == name { continue; }
+                                let selected = cur_parent.as_deref() == Some(&pname);
+                                let is_cyclic = chain_would_have_cycle(&self.paths, &name, &pname);
+                                if is_cyclic {
+                                    let row_h = ui.spacing().interact_size.y;
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        egui::vec2(ui.available_width(), row_h),
+                                        egui::Sense::hover(),
+                                    );
+                                    if ui.is_rect_visible(rect) {
+                                        let c = theme::COL_GLOBAL;
+                                        let fill = egui::Color32::from_rgb(0x3f, 0x21, 0x25);
+                                        ui.painter().rect(rect, ui.visuals().widgets.inactive.rounding, fill, egui::Stroke::new(1.0, c));
+                                        ui.painter().text(
+                                            rect.left_center() + egui::vec2(ui.spacing().button_padding.x, 0.0),
+                                            egui::Align2::LEFT_CENTER,
+                                            format!("\u{ea6c}{sep}{pname}"),
+                                            egui::TextStyle::Body.resolve(ui.style()),
+                                            c,
+                                        );
+                                    }
+                                } else if ui.selectable_label(selected, pname.as_str()).clicked() && !selected {
+                                    self.set_parent_preset(&name, Some(pname));
+                                }
+                            }
+                        });
                 });
 
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
@@ -2365,6 +2491,15 @@ impl GuiApp {
         let game_profile_modules = self.preset.as_ref().map(|p| &p.modules);
         let editing_modules = self.editing_preset_buf.as_ref().map(|p| &p.modules);
         let game_modules = &self.game_config.config.modules.authors;
+        // When editing a profile that has a parent, compute the merged parent chain
+        // once so we can show inheritance indicators for the parent's values.
+        let profile_parent_preset: Option<Preset> = if let NavSel::Profile(_) = &self.nav_sel {
+            self.editing_preset_buf.as_ref()
+                .and_then(|p| p.parent.as_ref())
+                .map(|pname| collect_parent_chain(&self.paths, pname))
+        } else {
+            None
+        };
 
         let icon_lists: Vec<Vec<(&'static str, Color32)>> = if !self.show_inheritance {
             vec![Vec::new(); self.cur_specs.len()]
@@ -2396,8 +2531,9 @@ impl GuiApp {
                     if has_in(game_modules)                                    { icons.push((ICON_EDIT,    COL_GAME)); }
                 }
                 NavSel::Profile(_) => {
-                    if has_in(global_modules)                                   { icons.push((ICON_INHERIT, COL_GLOBAL)); }
-                    if editing_modules.map(|m| has_in(m)).unwrap_or(false)      { icons.push((ICON_EDIT,    COL_PROFILE)); }
+                    if has_in(global_modules)                                              { icons.push((ICON_INHERIT, COL_GLOBAL)); }
+                    if profile_parent_preset.as_ref().map(|p| has_in(&p.modules)).unwrap_or(false) { icons.push((ICON_INHERIT, COL_PROFILE)); }
+                    if editing_modules.map(|m| has_in(m)).unwrap_or(false)                 { icons.push((ICON_EDIT,    COL_PROFILE)); }
                 }
                 NavSel::GlobalSettings => {
                     if has_in(global_modules) { icons.push((ICON_EDIT, COL_GLOBAL)); }

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use ritz_core::builder::{self, ExtInput, LaunchCommand};
-use ritz_core::config::{GameConfig, GeneralConfig, Paths, Preset};
+use ritz_core::config::{AuthorsMap, GameConfig, GeneralConfig, Paths, Preset};
 use ritz_core::extension::{self, LoadedExtension};
 use ritz_core::resolve::{self, Resolution};
 use ritz_core::schema::Extension;
@@ -103,9 +103,25 @@ impl AppContext {
     /// hypothetical profile before the config is written.
     pub fn resolve_with(&self, game_config: GameConfig, appid: &str) -> Result<ResolvedGame> {
         let preset = self.load_preset_for(&game_config)?;
+
+        // A cyclic parent chain would loop forever; exit silently instead of hanging.
+        if let Some(ref p) = preset {
+            if p.parent.is_some() && preset_has_cycle(&self.paths, &p.name) {
+                std::process::exit(0);
+            }
+        }
+
         let global = self.paths.load_global_config().unwrap_or_default();
         let specs = self.specs_for(appid);
-        let resolution = resolve::resolve(&specs, Some(&game_config), preset.as_ref(), Some(&global));
+        // Merge the parent chain (if any) into the effective preset layer.
+        let merged: Option<Preset> = preset.as_ref().and_then(|p| {
+            let pname = p.parent.as_ref()?;
+            let mut base = collect_parent_chain(&self.paths, pname);
+            merge_modules(&mut base.modules, &p.modules);
+            Some(base)
+        });
+        let effective = merged.as_ref().or(preset.as_ref());
+        let resolution = resolve::resolve(&specs, Some(&game_config), effective, Some(&global));
 
         Ok(ResolvedGame {
             appid: appid.to_string(),
@@ -176,6 +192,68 @@ pub fn extension_dirs(paths: &Paths) -> Vec<PathBuf> {
         return vec![PathBuf::from(dir)];
     }
     vec![paths.user_extensions()]
+}
+
+// ── Parent-chain helpers ─────────────────────────────────────────────────────
+
+pub(crate) fn merge_modules(base: &mut AuthorsMap, overlay: &AuthorsMap) {
+    for (author, exts) in overlay {
+        for (ext, vars) in exts {
+            for (var, val) in vars {
+                base.entry(author.clone()).or_default()
+                    .entry(ext.clone()).or_default()
+                    .insert(var.clone(), val.clone());
+            }
+        }
+    }
+}
+
+/// Walk the parent chain from `preset_name`; return true if any node is revisited.
+pub(crate) fn preset_has_cycle(paths: &Paths, preset_name: &str) -> bool {
+    let mut current = preset_name.to_string();
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        if !seen.insert(current.clone()) { return true; }
+        match paths.load_preset(&current).ok().flatten().and_then(|p| p.parent) {
+            Some(next) => current = next,
+            None => return false,
+        }
+    }
+}
+
+/// Returns true if setting `proposed_parent` as the parent of `profile` would
+/// introduce any cycle (including internal cycles in proposed_parent's chain).
+pub(crate) fn chain_would_have_cycle(paths: &Paths, profile: &str, proposed_parent: &str) -> bool {
+    let mut current = proposed_parent.to_string();
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(profile.to_string());
+    loop {
+        if !seen.insert(current.clone()) { return true; }
+        match paths.load_preset(&current).ok().flatten().and_then(|p| p.parent) {
+            Some(next) => current = next,
+            None => return false,
+        }
+    }
+}
+
+/// Walk the chain from `first_parent` upward (stops on any repeated node),
+/// merge root → direct-parent (root = lowest priority), return combined Preset.
+pub(crate) fn collect_parent_chain(paths: &Paths, first_parent: &str) -> Preset {
+    let mut chain: Vec<Preset> = Vec::new();
+    let mut current = first_parent.to_string();
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        if !seen.insert(current.clone()) { break; }
+        if let Some(p) = paths.load_preset(&current).ok().flatten() {
+            let next = p.parent.clone();
+            chain.push(p);
+            match next { Some(n) => current = n, None => break }
+        } else { break; }
+    }
+    chain.reverse();
+    let mut base = Preset::default();
+    for p in &chain { merge_modules(&mut base.modules, &p.modules); }
+    base
 }
 
 /// Load all extensions from disk, dropping those gated to a desktop we're not
