@@ -100,6 +100,24 @@ fn resolve_one(
             let on = matches!(&raw, Some(Value::Bool(true)));
             (on, Some(if on { "true".into() } else { "false".into() }))
         }
+        FieldType::MultiString => {
+            // Stored as an array of strings; resolve to the non-empty entries
+            // joined by newlines (truthy when at least one entry is present).
+            let entries: Vec<String> = match &raw {
+                Some(Value::Array(a)) => a
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+                _ => Vec::new(),
+            };
+            if entries.is_empty() {
+                (false, None)
+            } else {
+                (true, Some(entries.join("\n")))
+            }
+        }
         _ => match &raw {
             Some(Value::Null) | None => (false, None),
             Some(v) => (true, Some(value_to_string(v))),
@@ -185,6 +203,30 @@ mod tests {
         assert!(e.fields["radv_aco"].var.truthy); // default true
         // selection with no default is disabled/falsy
         assert!(!e.fields["backend"].var.truthy);
+    }
+
+    #[test]
+    fn multi_string_joins_entries_by_newline() {
+        let exts: [Extension; 1] = [serde_json::from_value(json!({
+            "Extension": {"Name": "scripts", "Author": "Ritze", "Version": "1.0"},
+            "UI": { "S": [ {"Type": "multi_string", "Variable": "cmds"} ] }
+        }))
+        .unwrap()];
+        let mut game = GameConfig::new("730", "cs2");
+        game.set_value("Ritze", "scripts", "cmds", json!(["echo one", "echo two"]));
+
+        let res = resolve(&exts, Some(&game), None, None);
+        let v = &res.exts["Ritze::scripts::1.0"].fields["cmds"].var;
+        assert!(v.truthy);
+        assert_eq!(v.value, "echo one\necho two");
+
+        // Empty list → falsy, empty value (so RITZ_VAR_* is "" and hooks skip).
+        let mut empty = GameConfig::new("730", "cs2");
+        empty.set_value("Ritze", "scripts", "cmds", json!([] as [String; 0]));
+        let res2 = resolve(&exts, Some(&empty), None, None);
+        let v2 = &res2.exts["Ritze::scripts::1.0"].fields["cmds"].var;
+        assert!(!v2.truthy);
+        assert_eq!(v2.value, "");
     }
 
     #[test]

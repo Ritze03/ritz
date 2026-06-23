@@ -43,12 +43,10 @@ fn var_env(game: &ResolvedGame, ext_id: &str) -> BTreeMap<String, String> {
     env.insert("RITZ_APPID".to_string(), game.appid.clone());
     if let Some(ext) = game.resolution.exts.get(ext_id) {
         for (name, field) in &ext.fields {
-            let value = if field.var.value.is_empty() {
-                field.var.truthy.to_string()
-            } else {
-                field.var.value.clone()
-            };
-            env.insert(format!("RITZ_VAR_{name}"), value);
+            // The resolved value verbatim: "true"/"false" for toggles, the entry
+            // list (newline-joined) for multi_string, "" when unset. Scripts guard
+            // on `[ -n "$RITZ_VAR_x" ]`, so an unset var must be empty (not "false").
+            env.insert(format!("RITZ_VAR_{name}"), field.var.value.clone());
         }
     }
     env

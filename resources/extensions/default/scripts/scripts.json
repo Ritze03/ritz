@@ -2,12 +2,15 @@
   "Extension": {
     "Name": "Scripts",
     "Author": "Ritze",
-    "Version": "1.0",
+    "Version": "1.1",
     "Description": "Run your own commands before, during, and after the game."
   },
   "Hooks": {
     "PreLaunch": "pre.sh",
-    "PostSpawn": { "Script": "post.sh", "Background": true },
+    "PostSpawn": {
+      "Script": "post.sh",
+      "Background": true
+    },
     "PostExit": "exit.sh"
   },
   "UI": {
@@ -15,45 +18,24 @@
       {
         "Name": "Command",
         "Description": "Command to run before the game starts. Ritz waits for it to finish.",
-        "Type": "string",
+        "Type": "multi_string",
         "Variable": "pre_command"
-      },
-      {
-        "Name": "Arguments",
-        "Description": "Arguments appended to the pre-launch command.",
-        "Type": "string",
-        "Variable": "pre_args",
-        "Requires": "pre_command"
       }
     ],
     "Post-Launch (runs in background)": [
       {
         "Name": "Command",
         "Description": "Command to run after the game launches. Runs in the background.",
-        "Type": "string",
+        "Type": "multi_string",
         "Variable": "post_command"
-      },
-      {
-        "Name": "Arguments",
-        "Description": "Arguments appended to the post-launch command.",
-        "Type": "string",
-        "Variable": "post_args",
-        "Requires": "post_command"
       }
     ],
     "Post-Exit (blocks until done)": [
       {
         "Name": "Command",
         "Description": "Command to run after the game exits. Ritz waits for it to finish.",
-        "Type": "string",
+        "Type": "multi_string",
         "Variable": "exit_command"
-      },
-      {
-        "Name": "Arguments",
-        "Description": "Arguments appended to the post-exit command.",
-        "Type": "string",
-        "Variable": "exit_args",
-        "Requires": "exit_command"
       }
     ]
   }

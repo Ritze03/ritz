@@ -95,6 +95,11 @@ pub enum FieldType {
     Integer,
     Float,
     String,
+    /// A list of strings, edited as a growing slot list. Resolves to its entries
+    /// joined by newlines (so consumers that shell-split — args/wrappers — and
+    /// hook scripts that loop the lines get one item per entry).
+    #[serde(rename = "multi_string")]
+    MultiString,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

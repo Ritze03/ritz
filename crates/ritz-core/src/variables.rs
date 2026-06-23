@@ -159,7 +159,7 @@ pub fn resolve_field(field: &UiField, enabled: bool, raw: Option<&str>) -> Resol
             (true, Some(v)) if !v.is_empty() => ResolvedVar::new(true, v),
             _ => ResolvedVar::falsy(),
         },
-        FieldType::String => match (enabled, raw) {
+        FieldType::String | FieldType::MultiString => match (enabled, raw) {
             (true, Some(v)) if !v.is_empty() => ResolvedVar::new(true, v),
             _ => ResolvedVar::falsy(),
         },

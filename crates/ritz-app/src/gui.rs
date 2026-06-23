@@ -120,6 +120,8 @@ pub struct GuiApp {
     game_config: GameConfig,
     preset: Option<Preset>,
     text_buffers: HashMap<String, String>,
+    /// In-progress edit lists for `multi_string` fields, keyed by scope+ext+var.
+    multi_edit: HashMap<String, Vec<String>>,
     /// True when opened from the splash to gate a launch.
     launch_mode: bool,
     /// The launch decision (shared so [`run`] can read it after the window closes).
@@ -200,6 +202,7 @@ impl GuiApp {
             game_config: GameConfig::new(appid, name),
             preset: None,
             text_buffers: HashMap::new(),
+            multi_edit: HashMap::new(),
             launch_mode: false,
             outcome: Arc::new(Mutex::new(close_outcome)),
             detect: None,
@@ -242,6 +245,7 @@ impl GuiApp {
         self.preset = preset_name.and_then(|n| self.paths.load_preset(&n).ok().flatten());
         self.rebuild_cur_specs();
         self.text_buffers.clear();
+        self.multi_edit.clear();
     }
 
     /// Rebuild `cur_specs` (the modules applicable to the current game) from
@@ -818,6 +822,11 @@ impl GuiApp {
         };
         let mut changed = false;
 
+        // A list field renders as its own growing slot card, not the one-row layout.
+        if field.field_type == FieldType::MultiString {
+            return self.render_multi_string_field(ui, field, scope);
+        }
+
         // Row card: scope-tinted background, 8px rounding, with a 3px left bar.
         let tint = Color32::from_rgba_unmultiplied(scope.r(), scope.g(), scope.b(), 16);
         let inner = egui::Frame::none()
@@ -871,6 +880,103 @@ impl GuiApp {
         changed
     }
 
+    /// Render a `multi_string` field: a scope-tinted card with the label and a
+    /// growing list of entry rows (text box + delete) plus a `+ Add` button. The
+    /// list is stored as a JSON array at the current scope.
+    fn render_multi_string_field(&mut self, ui: &mut egui::Ui, field: &UiField, scope: Color32) -> bool {
+        let Some(spec) = self.cur_specs.get(self.selected_ext) else { return false };
+        let author = spec.meta.author.clone();
+        let name = spec.meta.name.clone();
+        let var = field.variable.clone();
+        let label = field.name.clone().unwrap_or_else(|| var.clone());
+        let hover = field.description.clone().unwrap_or_default();
+
+        // Per scope+field working copy of the list, seeded from the stored array.
+        let scope_tag = match &self.nav_sel {
+            NavSel::GlobalSettings => "global".to_string(),
+            NavSel::Profile(n) => format!("profile:{n}"),
+            NavSel::Game(a) => format!("game:{a}"),
+            NavSel::GeneralSettings => "general".to_string(),
+        };
+        let key = format!("{scope_tag}::{author}::{name}::{var}");
+        let stored: Vec<String> = self
+            .current_scope_value(&author, &name, &var)
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let mut entries = self.multi_edit.remove(&key).unwrap_or(stored.clone());
+
+        let tint = Color32::from_rgba_unmultiplied(scope.r(), scope.g(), scope.b(), 16);
+        let row_h = ui.spacing().interact_size.y;
+        let btn_w = row_h + ui.spacing().item_spacing.x;
+        let mut to_delete: Option<usize> = None;
+
+        let inner = egui::Frame::none()
+            .fill(tint)
+            .rounding(egui::Rounding::same(8.0))
+            .inner_margin(egui::Margin { left: 12.0, right: 8.0, top: 8.0, bottom: 8.0 })
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let lab = ui.label(egui::RichText::new(&label).color(theme::TEXT).strong());
+                if !hover.is_empty() {
+                    lab.on_hover_text(&hover);
+                }
+                ui.add_space(4.0);
+                let w = (ui.available_width() - btn_w - 4.0).max(40.0);
+                for (i, entry) in entries.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(entry)
+                                .desired_width(w)
+                                .hint_text(egui::RichText::new("command").color(theme::FAINT)),
+                        );
+                        if icon_button(ui, row_h, "\u{f467}", theme::COL_GLOBAL).clicked() {
+                            to_delete = Some(i);
+                        }
+                    });
+                }
+                if ui.button("+ Add").clicked() {
+                    entries.push(String::new());
+                }
+            });
+
+        if let Some(i) = to_delete {
+            entries.remove(i);
+        }
+
+        // Persist the non-empty entries when they differ from what's stored.
+        let cleaned: Vec<String> = entries.iter().filter(|s| !s.trim().is_empty()).cloned().collect();
+        let mut changed = false;
+        if cleaned != stored {
+            if cleaned.is_empty() {
+                self.unset_current(field);
+            } else {
+                self.set_current(field, json!(cleaned));
+            }
+            changed = true;
+        }
+
+        // Left scope bar to match the other field cards.
+        let r = inner.response.rect;
+        let bar_clip = egui::Rect::from_min_max(r.min, egui::pos2(r.min.x + 3.0, r.max.y));
+        ui.painter()
+            .with_clip_rect(bar_clip)
+            .rect_filled(r, egui::Rounding::same(8.0), scope);
+        ui.add_space(8.0);
+
+        self.multi_edit.insert(key, entries);
+        changed
+    }
+
+    /// The raw stored value for a variable at the scope currently being edited.
+    fn current_scope_value(&self, author: &str, name: &str, var: &str) -> Option<&Value> {
+        match &self.nav_sel {
+            NavSel::GlobalSettings => self.global_config.get_value(author, name, var),
+            NavSel::Profile(_) => self.editing_preset_buf.as_ref()?.get_value(author, name, var),
+            _ => self.game_config.get_value(author, name, var),
+        }
+    }
+
     /// Apply a new tri-state to the current field's stored value.
     fn apply_tri(&mut self, field: &UiField, res: &resolve::ResolvedField, new: Tri) {
         match new {
@@ -906,6 +1012,8 @@ impl GuiApp {
                         num_value(v, false)
                     }
                     FieldType::String => json!(res.var.value.clone()),
+                    // Edited via its own slot card, never through the tri-state checkbox.
+                    FieldType::MultiString => json!([] as [String; 0]),
                 };
                 self.set_current(field, val);
             }
@@ -1018,7 +1126,8 @@ impl GuiApp {
                     ui.add(egui::TextEdit::singleline(&mut shown).desired_width(tw));
                 }
             }
-            FieldType::Toggle => {}
+            // Rendered by their own dedicated paths, not the inline value editor.
+            FieldType::Toggle | FieldType::MultiString => {}
         }
         changed
     }
