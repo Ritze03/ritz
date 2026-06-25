@@ -12,12 +12,12 @@ use anyhow::Result;
 use egui::text::{LayoutJob, TextFormat};
 use egui::Color32;
 use ritz_core::condition;
-use ritz_core::config::{AuthorsMap, GameConfig, GeneralConfig, Paths, Preset};
+use ritz_core::config::{AuthorsMap, GameConfig, GeneralConfig, InheritanceDisplayMode, Paths, Preset};
 use ritz_core::resolve::{self, Provenance, Resolution};
 use ritz_core::schema::{Extension, FieldType, OptionsSpec, UiField};
 use serde_json::{json, Value};
 
-use crate::context::{self, chain_would_have_cycle, collect_parent_chain, merge_modules, AppContext};
+use crate::context::{self, chain_would_have_cycle, collect_parent_chain, collect_parent_presets, merge_modules, AppContext};
 
 use crate::theme::{self, COL_GAME, COL_GLOBAL, COL_PROFILE, ICON_EDIT, ICON_INHERIT};
 
@@ -362,8 +362,18 @@ impl GuiApp {
     fn resolve_for_editing(&self) -> Resolution {
         let global = Some(&self.global_config);
         match &self.nav_sel {
-            NavSel::GeneralSettings | NavSel::Game(_) => {
+            NavSel::GeneralSettings => {
                 resolve::resolve(&self.cur_specs, Some(&self.game_config), self.preset.as_ref(), global)
+            }
+            NavSel::Game(_) => {
+                let merged: Option<Preset> = self.preset.as_ref().and_then(|p| {
+                    let pname = p.parent.as_ref()?;
+                    let mut base = collect_parent_chain(&self.paths, pname);
+                    merge_modules(&mut base.modules, &p.modules);
+                    Some(base)
+                });
+                let effective = merged.as_ref().map(|p| p as &Preset).or(self.preset.as_ref());
+                resolve::resolve(&self.cur_specs, Some(&self.game_config), effective, global)
             }
             NavSel::GlobalSettings => {
                 let fake = preset_as_fake_game(&self.global_config);
@@ -623,11 +633,41 @@ impl GuiApp {
                                 });
                             });
                             ui.add_space(6.0);
+                            let field_chain: Vec<Preset> = match &self.nav_sel {
+                                NavSel::Game(_) => {
+                                    let mut c = Vec::new();
+                                    if let Some(p) = &self.preset {
+                                        c.push(p.clone());
+                                        if let Some(pn) = &p.parent {
+                                            c.extend(collect_parent_presets(&self.paths, pn));
+                                        }
+                                    }
+                                    c
+                                }
+                                NavSel::Profile(_) => self.editing_preset_buf.as_ref()
+                                    .and_then(|p| p.parent.as_ref())
+                                    .map(|pn| collect_parent_presets(&self.paths, pn))
+                                    .unwrap_or_default(),
+                                _ => Vec::new(),
+                            };
                             for field in visible {
                                 let Some(res) = ext_res.and_then(|e| e.fields.get(&field.variable)) else {
                                     continue;
                                 };
-                                if self.render_field(ui, &spec, field, res) {
+                                let preset_depth: Option<usize> =
+                                    if res.provenance == resolve::Provenance::Preset
+                                        && self.general_config.show_field_inheritance
+                                        && !field_chain.is_empty()
+                                    {
+                                        field_chain.iter().enumerate()
+                                            .find(|(_, p)| p.modules
+                                                .get(&spec.meta.author)
+                                                .and_then(|e| e.get(&spec.meta.name))
+                                                .and_then(|vars| vars.get(&field.variable))
+                                                .is_some())
+                                            .map(|(i, _)| i)
+                                    } else { None };
+                                if self.render_field(ui, &spec, field, res, preset_depth) {
                                     changed = true;
                                 }
                             }
@@ -834,6 +874,7 @@ impl GuiApp {
         spec: &Extension,
         field: &UiField,
         res: &resolve::ResolvedField,
+        preset_depth: Option<usize>,
     ) -> bool {
         let state = tri_state(res);
         // A value set at the layer being edited resolves as `Provenance::Game`
@@ -841,8 +882,25 @@ impl GuiApp {
         // scope — Game blue, Profile green, Global red — not always blue.
         let scope = match res.provenance {
             resolve::Provenance::Game => self.editing_scope_color(),
+            resolve::Provenance::Preset
+                if self.general_config.show_field_inheritance
+                    && matches!(self.general_config.inheritance_display, InheritanceDisplayMode::Color)
+                    && preset_depth.is_some() =>
+            {
+                profile_depth_color(preset_depth.unwrap())
+            }
             p => theme::scope_color(p),
         };
+        const NUMS: [&str; 6] = ["1", "2", "3", "4", "5", "5+"];
+        let badge: Option<(&str, Color32)> =
+            if self.general_config.show_field_inheritance
+                && matches!(self.general_config.inheritance_display, InheritanceDisplayMode::Numbers)
+                && res.provenance == resolve::Provenance::Preset
+            {
+                preset_depth.map(|d| (NUMS[d.min(5)], COL_PROFILE))
+            } else {
+                None
+            };
         let mut changed = false;
 
         // A list field renders as its own growing slot card, not the one-row layout.
@@ -867,7 +925,7 @@ impl GuiApp {
                     let hover = field.description.clone().unwrap_or_default();
                     let left = ui.cursor().min.x;
                     if let Some(new) =
-                        scope_checkbox(ui, &label, &hover, state, res.var.truthy, scope)
+                        scope_checkbox(ui, &label, &hover, state, res.var.truthy, scope, badge)
                     {
                         self.apply_tri(field, res, new);
                         changed = true;
@@ -1679,6 +1737,42 @@ impl GuiApp {
             changed = true;
         }
 
+        {
+            let prev = self.general_config.inheritance_display;
+            settings_value_row(ui, "Inheritance Display Mode", "How profile chain depth is shown in the nav and module trees.", |ui| {
+                egui::ComboBox::from_id_salt("inheritance_display_mode")
+                    .selected_text(match self.general_config.inheritance_display {
+                        InheritanceDisplayMode::Color => "Color",
+                        InheritanceDisplayMode::Numbers => "Numbers",
+                        InheritanceDisplayMode::ArrowsOnly => "Arrows Only",
+                    })
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        for (label, val) in [
+                            ("Color", InheritanceDisplayMode::Color),
+                            ("Numbers", InheritanceDisplayMode::Numbers),
+                            ("Arrows Only", InheritanceDisplayMode::ArrowsOnly),
+                        ] {
+                            if ui.selectable_label(self.general_config.inheritance_display == val, label).clicked() {
+                                self.general_config.inheritance_display = val;
+                            }
+                        }
+                    });
+            });
+            if self.general_config.inheritance_display != prev { changed = true; }
+        }
+
+        let mut show_fi = self.general_config.show_field_inheritance;
+        if settings_toggle_row(
+            ui,
+            "Show Field Inheritance",
+            "Tint or label inherited fields in the module settings panel by chain depth.",
+            &mut show_fi,
+        ) {
+            self.general_config.show_field_inheritance = show_fi;
+            changed = true;
+        }
+
         // Reload: [Reload Extensions] [Reload Configs]
         settings_value_row(ui, "Reload Actions", "", |ui| {
             if ui
@@ -1999,19 +2093,46 @@ impl GuiApp {
         egui::CollapsingHeader::new(egui::RichText::new("Profiles").color(COL_PROFILE))
             .default_open(true)
             .show(ui, |ui| {
+                // Total number of profiles that carry an indicator in this context.
+                // Used by Numbers mode to decide arrow vs. numeric labels.
+                let chain_total: usize =
+                    (if active_preset.is_some() { 1 } else { 0 }) + profile_parents.len();
                 for (name, pin) in &ordered {
                     let is_sel = self.nav_sel == NavSel::Profile(name.clone());
                     let is_active = active_preset.as_deref() == Some(name.as_str());
                     let parent_depth = profile_parents.get(name.as_str()).copied();
-                    let arrow_count = parent_depth.unwrap_or(if is_active { 1 } else { 0 });
-                    let label: egui::WidgetText = if arrow_count > 0 {
+                    let show_indicator = is_active || parent_depth.is_some();
+                    // color_depth: 0 = full COL_PROFILE, +1 per step deeper in the chain.
+                    // profile_parents stores 1-based depth; subtract 1 to get color index.
+                    let color_depth = parent_depth.map(|d| d - 1).unwrap_or(0);
+                    let label: egui::WidgetText = if show_indicator {
                         let font_id = ui.style().text_styles[&egui::TextStyle::Body].clone();
                         let mut job = LayoutJob::default();
-                        for i in 0..arrow_count {
-                            if i > 0 {
-                                job.append(" ", 0.0, TextFormat { font_id: font_id.clone(), color: theme::TEXT, ..Default::default() });
+                        match self.general_config.inheritance_display {
+                            InheritanceDisplayMode::Color => {
+                                job.append(ICON_INHERIT, 0.0, TextFormat { font_id: font_id.clone(), color: profile_depth_color(color_depth), ..Default::default() });
                             }
-                            job.append(ICON_INHERIT, 0.0, TextFormat { font_id: font_id.clone(), color: COL_PROFILE, ..Default::default() });
+                            InheritanceDisplayMode::Numbers => {
+                                const NUMS: [&str; 6] = ["1", "2", "3", "4", "5", "5+"];
+                                if chain_total == 1 {
+                                    // Single profile in chain → plain arrow, no number needed.
+                                    job.append(ICON_INHERIT, 0.0, TextFormat { font_id: font_id.clone(), color: COL_PROFILE, ..Default::default() });
+                                } else {
+                                    // Depth number: is_active = 1, chain entry at stored depth d = d.
+                                    let number = parent_depth.unwrap_or(1);
+                                    job.append(NUMS[(number - 1).min(5)], 0.0, TextFormat { font_id: font_id.clone(), color: COL_PROFILE, ..Default::default() });
+                                }
+                            }
+                            InheritanceDisplayMode::ArrowsOnly => {
+                                // N plain arrows: is_active = 1, chain entry at depth d = d arrows.
+                                let arrow_count = parent_depth.unwrap_or(1);
+                                for i in 0..arrow_count {
+                                    if i > 0 {
+                                        job.append(" ", 0.0, TextFormat { font_id: font_id.clone(), color: theme::TEXT, ..Default::default() });
+                                    }
+                                    job.append(ICON_INHERIT, 0.0, TextFormat { font_id: font_id.clone(), color: COL_PROFILE, ..Default::default() });
+                                }
+                            }
                         }
                         job.append(name, gap, TextFormat { font_id, color: theme::TEXT, ..Default::default() });
                         job.into()
@@ -2488,19 +2609,29 @@ impl GuiApp {
         let mono = self.general_config.mono_ui;
         let nav_sel = &self.nav_sel;
         let global_modules = &self.global_config.modules;
-        let game_profile_modules = self.preset.as_ref().map(|p| &p.modules);
         let editing_modules = self.editing_preset_buf.as_ref().map(|p| &p.modules);
         let game_modules = &self.game_config.config.modules.authors;
-        // When editing a profile that has a parent, compute the merged parent chain
-        // once so we can show inheritance indicators for the parent's values.
-        let profile_parent_preset: Option<Preset> = if let NavSel::Profile(_) = &self.nav_sel {
+        // Individual (un-merged) parent presets for depth-shaded arrows.
+        // Profile context: [direct_parent, grandparent, …]
+        let profile_parent_chain: Vec<Preset> = if let NavSel::Profile(_) = &self.nav_sel {
             self.editing_preset_buf.as_ref()
                 .and_then(|p| p.parent.as_ref())
-                .map(|pname| collect_parent_chain(&self.paths, pname))
-        } else {
-            None
-        };
+                .map(|pname| collect_parent_presets(&self.paths, pname))
+                .unwrap_or_default()
+        } else { Vec::new() };
+        // Game context: [direct_preset, its_parent, grandparent, …]
+        let game_preset_chain: Vec<Preset> = if let NavSel::Game(_) = &self.nav_sel {
+            let mut chain = Vec::new();
+            if let Some(p) = &self.preset {
+                chain.push(p.clone());
+                if let Some(pname) = &p.parent {
+                    chain.extend(collect_parent_presets(&self.paths, pname));
+                }
+            }
+            chain
+        } else { Vec::new() };
 
+        let display_mode = self.general_config.inheritance_display;
         let icon_lists: Vec<Vec<(&'static str, Color32)>> = if !self.show_inheritance {
             vec![Vec::new(); self.cur_specs.len()]
         } else { self.cur_specs.iter().map(|spec| {
@@ -2523,17 +2654,43 @@ impl GuiApp {
                     }))
                     .unwrap_or(false)
             };
+            const DEPTH_NUM: [&str; 6] = ["1", "2", "3", "4", "5", "5+"];
+            let push_chain_icons = |icons: &mut Vec<(&'static str, Color32)>, chain: &[Preset]| {
+                match display_mode {
+                    InheritanceDisplayMode::Color => {
+                        for (i, p) in chain.iter().enumerate() {
+                            if has_in(&p.modules) { icons.push((ICON_INHERIT, profile_depth_color(i))); }
+                        }
+                    }
+                    InheritanceDisplayMode::Numbers => {
+                        let contributing: Vec<usize> = chain.iter().enumerate()
+                            .filter(|(_, p)| has_in(&p.modules))
+                            .map(|(i, _)| i)
+                            .collect();
+                        if chain.len() <= 1 {
+                            // Single-profile chain → plain arrow.
+                            if !contributing.is_empty() { icons.push((ICON_INHERIT, COL_PROFILE)); }
+                        } else {
+                            // Multi-profile chain → always show numbers, no arrows.
+                            for i in contributing { icons.push((DEPTH_NUM[i.min(5)], COL_PROFILE)); }
+                        }
+                    }
+                    InheritanceDisplayMode::ArrowsOnly => {
+                        if chain.iter().any(|p| has_in(&p.modules)) { icons.push((ICON_INHERIT, COL_PROFILE)); }
+                    }
+                }
+            };
             let mut icons: Vec<(&'static str, Color32)> = Vec::new();
             match nav_sel {
                 NavSel::Game(_) => {
-                    if has_in(global_modules)                                  { icons.push((ICON_INHERIT, COL_GLOBAL)); }
-                    if game_profile_modules.map(|m| has_in(m)).unwrap_or(false) { icons.push((ICON_INHERIT, COL_PROFILE)); }
-                    if has_in(game_modules)                                    { icons.push((ICON_EDIT,    COL_GAME)); }
+                    if has_in(global_modules) { icons.push((ICON_INHERIT, COL_GLOBAL)); }
+                    push_chain_icons(&mut icons, &game_preset_chain);
+                    if has_in(game_modules) { icons.push((ICON_EDIT, COL_GAME)); }
                 }
                 NavSel::Profile(_) => {
-                    if has_in(global_modules)                                              { icons.push((ICON_INHERIT, COL_GLOBAL)); }
-                    if profile_parent_preset.as_ref().map(|p| has_in(&p.modules)).unwrap_or(false) { icons.push((ICON_INHERIT, COL_PROFILE)); }
-                    if editing_modules.map(|m| has_in(m)).unwrap_or(false)                 { icons.push((ICON_EDIT,    COL_PROFILE)); }
+                    if has_in(global_modules) { icons.push((ICON_INHERIT, COL_GLOBAL)); }
+                    push_chain_icons(&mut icons, &profile_parent_chain);
+                    if editing_modules.map(|m| has_in(m)).unwrap_or(false) { icons.push((ICON_EDIT, COL_PROFILE)); }
                 }
                 NavSel::GlobalSettings => {
                     if has_in(global_modules) { icons.push((ICON_EDIT, COL_GLOBAL)); }
@@ -2618,6 +2775,31 @@ fn render_node(ui: &mut egui::Ui, node: &TreeNode, specs: &[Extension], is_folde
 /// A fixed-width, faint, left-aligned footer label so the inputs/dropdown to its
 /// right all start at the same x and fill to the same right edge. Allocates an
 /// *exact* box (not content-sized) so every row's label column is identical.
+/// COL_PROFILE (#6CC551) with HSV V decreased by 0.10 per depth level (max 5 steps).
+/// depth 0 = full COL_PROFILE, depth 1 = 1-step dimmer, …, depth 5+ = fixed floor.
+fn profile_depth_color(depth: usize) -> Color32 {
+    let steps = depth.min(5) as f32;
+    let h = 106.0_f32 + steps * 20.0;
+    let (v, s) = (0.773_f32 - steps * 0.10, 0.588_f32);
+    let c = v * s;
+    let h6 = h / 60.0;
+    let x = c * (1.0 - (h6 % 2.0 - 1.0).abs());
+    let m = v - c;
+    let (r, g, b) = match h6 as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    Color32::from_rgb(
+        ((r + m) * 255.0).round() as u8,
+        ((g + m) * 255.0).round() as u8,
+        ((b + m) * 255.0).round() as u8,
+    )
+}
+
 fn footer_label(ui: &mut egui::Ui, text: &str) {
     const LABEL_W: f32 = 52.0;
     let (rect, _) =
@@ -2917,13 +3099,16 @@ fn icon_button(ui: &mut egui::Ui, size: f32, glyph: &str, color: Color32) -> egu
 fn checkbox_row(
     ui: &mut egui::Ui,
     label: &str,
+    badge: Option<(&str, Color32)>,
     paint_box: impl FnOnce(&egui::Painter, egui::Rect),
 ) -> egui::Response {
     const BOX: f32 = 18.0;
     const GAP: f32 = 7.0;
     let font = egui::TextStyle::Body.resolve(ui.style());
+    let badge_galley = badge.map(|(text, col)| ui.painter().layout_no_wrap(text.to_owned(), font.clone(), col));
+    let badge_w = badge_galley.as_ref().map(|g| g.size().x + GAP).unwrap_or(0.0);
     let galley = ui.painter().layout_no_wrap(label.to_owned(), font, theme::TEXT);
-    let size = egui::vec2(BOX + GAP + galley.size().x, BOX.max(galley.size().y));
+    let size = egui::vec2(BOX + GAP + badge_w + galley.size().x, BOX.max(galley.size().y));
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
@@ -2935,8 +3120,12 @@ fn checkbox_row(
             egui::Vec2::splat(BOX),
         );
         paint_box(painter, box_rect);
-        let tp = egui::pos2(box_rect.right() + GAP, rect.center().y - galley.size().y / 2.0);
-        painter.galley(tp, galley, theme::TEXT);
+        let mut tx = box_rect.right() + GAP;
+        if let (Some(bg), Some((_, col))) = (badge_galley, badge) {
+            painter.galley(egui::pos2(tx, rect.center().y - bg.size().y / 2.0), bg, col);
+            tx += badge_w;
+        }
+        painter.galley(egui::pos2(tx, rect.center().y - galley.size().y / 2.0), galley, theme::TEXT);
     }
     resp
 }
@@ -3016,7 +3205,7 @@ fn settings_toggle_row(ui: &mut egui::Ui, label: &str, hover: &str, value: &mut 
     let on = *value;
     let clicked = settings_card(ui, |ui| {
         let mut resp =
-            checkbox_row(ui, label, |p, r| paint_scope_box(p, r, on, false, theme::COL_DEFAULT));
+            checkbox_row(ui, label, None, |p, r| paint_scope_box(p, r, on, false, theme::COL_DEFAULT));
         if !hover.is_empty() {
             resp = resp.on_hover_text(hover);
         }
@@ -3030,7 +3219,7 @@ fn settings_toggle_row(ui: &mut egui::Ui, label: &str, hover: &str, value: &mut 
 
 fn styled_checkbox(ui: &mut egui::Ui, checked: &mut bool, label: &str) -> egui::Response {
     let on = *checked;
-    let resp = checkbox_row(ui, label, |p, r| paint_scope_box(p, r, on, false, COL_PROFILE));
+    let resp = checkbox_row(ui, label, None, |p, r| paint_scope_box(p, r, on, false, COL_PROFILE));
     if resp.clicked() {
         *checked = !*checked;
     }
@@ -3049,6 +3238,7 @@ fn scope_checkbox(
     state: Tri,
     inherited_on: bool,
     scope: Color32,
+    badge: Option<(&str, Color32)>,
 ) -> Option<Tri> {
     let on = match state {
         Tri::Enabled => true,
@@ -3056,7 +3246,7 @@ fn scope_checkbox(
         Tri::Unset => inherited_on,
     };
     let faded = state == Tri::Unset;
-    let mut resp = checkbox_row(ui, label, |p, r| paint_scope_box(p, r, on, faded, scope));
+    let mut resp = checkbox_row(ui, label, badge, |p, r| paint_scope_box(p, r, on, faded, scope));
     if !hover.is_empty() {
         resp = resp.on_hover_text(hover);
     }

@@ -22,6 +22,17 @@ pub type AuthorsMap = IndexMap<String, ExtMap>;
 
 // ---- general.json --------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum InheritanceDisplayMode {
+    /// One arrow per level, hue/value shifted darker the deeper the ancestor.
+    #[default]
+    Color,
+    /// Numeric labels (1, 2, …) per depth; single arrow when only one level contributes.
+    Numbers,
+    /// Plain green arrows only — stacked in the nav tree, single in the module tree.
+    ArrowsOnly,
+}
+
 fn default_splash() -> u64 {
     3
 }
@@ -52,6 +63,12 @@ pub struct GeneralConfig {
     /// Auto-size the launch command preview box to its content instead of fixed height.
     #[serde(rename = "DynamicPreview", default)]
     pub dynamic_preview: bool,
+    /// How inherited values are indicated in the module and nav trees.
+    #[serde(rename = "InheritanceDisplay", default)]
+    pub inheritance_display: InheritanceDisplayMode,
+    /// Tint or label fields in the module settings panel by chain depth.
+    #[serde(rename = "ShowFieldInheritance", default = "default_true")]
+    pub show_field_inheritance: bool,
 }
 
 impl Default for GeneralConfig {
@@ -64,6 +81,8 @@ impl Default for GeneralConfig {
             full_width: false,
             editor_close_launches: true,
             dynamic_preview: false,
+            inheritance_display: InheritanceDisplayMode::Color,
+            show_field_inheritance: true,
         }
     }
 }

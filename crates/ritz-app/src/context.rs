@@ -256,6 +256,23 @@ pub(crate) fn collect_parent_chain(paths: &Paths, first_parent: &str) -> Preset 
     base
 }
 
+/// Walk the chain from `first_parent`, return each preset individually in order
+/// (index 0 = direct parent, index 1 = grandparent, …). No merging. Stops on cycle.
+pub(crate) fn collect_parent_presets(paths: &Paths, first_parent: &str) -> Vec<Preset> {
+    let mut chain: Vec<Preset> = Vec::new();
+    let mut current = first_parent.to_string();
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        if !seen.insert(current.clone()) { break; }
+        if let Some(p) = paths.load_preset(&current).ok().flatten() {
+            let next = p.parent.clone();
+            chain.push(p);
+            match next { Some(n) => current = n, None => break }
+        } else { break; }
+    }
+    chain
+}
+
 /// Load all extensions from disk, dropping those gated to a desktop we're not
 /// running (e.g. hypr-monctl off Hyprland) so they never appear in the GUI nor
 /// get resolved/applied. Shared by [`AppContext::load`] and the GUI's hot-reload.
