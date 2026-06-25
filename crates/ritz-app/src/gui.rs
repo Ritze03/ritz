@@ -1188,12 +1188,18 @@ impl GuiApp {
                 let tw = (ui.available_width() - 4.0).max(40.0);
                 if editable {
                     let key = format!("{}::{}", spec.id(), field.variable);
+                    let id = egui::Id::new(("text_edit", &key));
+                    // Sync the buffer from the resolved value whenever the field isn't
+                    // actively focused. This prevents stale values after a profile switch
+                    // (the nav action and resolve_for_editing run in the wrong order within
+                    // one frame, so without this the buffer gets populated from a stale
+                    // resolution and persists until the user clicks the profile again).
+                    if !ui.ctx().memory(|m| m.has_focus(id)) {
+                        self.text_buffers.insert(key.clone(), res.var.value.clone());
+                    }
                     let edited = {
-                        let buf = self
-                            .text_buffers
-                            .entry(key)
-                            .or_insert_with(|| res.var.value.clone());
-                        ui.add(egui::TextEdit::singleline(buf).desired_width(tw))
+                        let buf = self.text_buffers.entry(key).or_insert_with(|| res.var.value.clone());
+                        ui.add(egui::TextEdit::singleline(buf).desired_width(tw).id(id))
                             .changed()
                             .then(|| buf.clone())
                     };
