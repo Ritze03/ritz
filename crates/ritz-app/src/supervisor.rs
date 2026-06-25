@@ -101,9 +101,21 @@ fn supervise_loop(
     let mut ready_fired = ready_names.is_empty();
     let start = Instant::now();
 
-    // Live reload: watch the game config file mtime.
-    let game_path = ctx.paths.game(&game.appid);
-    let mut last_mtime = mtime(&game_path);
+    // Live reload: watch game config + every preset file in the assigned chain.
+    let mut watched: Vec<(std::path::PathBuf, Option<std::time::SystemTime>)> = {
+        let mut v = vec![];
+        let p = ctx.paths.game(&game.appid);
+        v.push((p.clone(), mtime(&p)));
+        let mut cur = game.preset.as_ref().map(|p| p.name.clone());
+        let mut seen = std::collections::HashSet::new();
+        while let Some(name) = cur {
+            if !seen.insert(name.clone()) { break; }
+            let p = ctx.paths.preset(&name);
+            v.push((p.clone(), mtime(&p)));
+            cur = ctx.paths.load_preset(&name).ok().flatten().and_then(|p| p.parent);
+        }
+        v
+    };
 
     loop {
         if let Some(status) = child.try_wait()? {
@@ -132,10 +144,12 @@ fn supervise_loop(
             }
         }
 
-        // Live config reload.
-        let now_mtime = mtime(&game_path);
-        if now_mtime != last_mtime {
-            last_mtime = now_mtime;
+        // Live config reload — trigger if any watched file changed.
+        let any_changed = watched.iter_mut().any(|(path, last)| {
+            let now = mtime(path);
+            if now != *last { *last = now; true } else { false }
+        });
+        if any_changed {
             if let Ok(updated) = ctx.resolve_game(steam) {
                 for b in backends {
                     if let Err(e) = b.live_reload(&updated) {
