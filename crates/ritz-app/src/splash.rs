@@ -693,7 +693,7 @@ pub fn show_unknown(existing_ids: &[String]) {
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([560.0, 440.0])
+            .with_inner_size([560.0, 460.0])
             .with_resizable(false),
         ..Default::default()
     };
@@ -789,38 +789,37 @@ impl eframe::App for UnknownApp {
                         }
                     });
                 ui.add_space(12.0);
-                if id.is_empty() {
-                    ui.vertical_centered(|ui| {
-                        ui.label(egui::RichText::new("Enter a valid name.").color(theme::DIM));
-                    });
+                ui.label(
+                    egui::RichText::new("Set this in the game's launch options:")
+                        .color(theme::DIM),
+                );
+                ui.add_space(4.0);
+                let cmd_text = if id.is_empty() {
+                    "RITZ_APPID=<name> ritz %command%".to_string()
                 } else {
-                    ui.label(
-                        egui::RichText::new("Set this in the game's Steam launch options:")
-                            .color(theme::DIM),
-                    );
+                    format!("RITZ_APPID={id} ritz %command%")
+                };
+                egui::Frame::none()
+                    .fill(theme::FIELD)
+                    .stroke(egui::Stroke::new(1.0, theme::BORDER))
+                    .rounding(egui::Rounding::same(8.0))
+                    .inner_margin(egui::Margin::symmetric(11.0, 9.0))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.add(egui::Label::new(
+                            egui::RichText::new(cmd_text)
+                                .monospace()
+                                .color(if id.is_empty() { theme::FAINT } else { theme::TEXT }),
+                        ).wrap().selectable(true));
+                    });
+                if conflict {
                     ui.add_space(4.0);
-                    egui::Frame::none()
-                        .fill(theme::FIELD)
-                        .stroke(egui::Stroke::new(1.0, theme::BORDER))
-                        .rounding(egui::Rounding::same(8.0))
-                        .inner_margin(egui::Margin::symmetric(11.0, 9.0))
-                        .show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.add(egui::Label::new(
-                                egui::RichText::new(format!("RITZ_APPID={id} ritz %command%"))
-                                    .monospace()
-                                    .color(theme::TEXT),
-                            ).wrap());
-                        });
-                    if conflict {
-                        ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "ID \"{id}\" already exists — pick another name."
-                            ))
-                            .color(theme::COL_GLOBAL),
-                        );
-                    }
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "ID \"{id}\" already exists — pick another name."
+                        ))
+                        .color(theme::COL_GLOBAL),
+                    );
                 }
             });
 
