@@ -3001,7 +3001,9 @@ fn scope_slider(
     // Gap between the spinner and the track.
     ui.add_space(10.0);
     // Track fills the remaining width to the left of the spinner.
-    let track_w = ui.available_width().max(40.0);
+    // Subtract item_spacing.x: egui consumes it when the track widget is placed,
+    // but available_width() does not subtract it in advance.
+    let track_w = (ui.available_width() - ui.spacing().item_spacing.x).max(40.0);
     let (rect, resp) =
         ui.allocate_exact_size(egui::vec2(track_w, 18.0), egui::Sense::click_and_drag());
     if let Some(pos) = resp.interact_pointer_pos() {
@@ -3022,14 +3024,18 @@ fn scope_slider(
         let t = if max > min { ((shown - min) / (max - min)).clamp(0.0, 1.0) as f32 } else { 0.0 };
         let fill_x = rect.left() + t * rect.width();
         let painter = ui.painter();
+        const RADIUS: f32 = 7.5;
+        // Clamp so the handle circle never spills outside the track rect (e.g. when
+        // value == min and fill_x == rect.left()).
+        let handle_x = fill_x.clamp(rect.left() + RADIUS, rect.right() - RADIUS);
         painter.rect_filled(track, egui::Rounding::same(3.0), theme::BORDER);
         painter.rect_filled(
             egui::Rect::from_min_max(track.min, egui::pos2(fill_x, track.max.y)),
             egui::Rounding::same(3.0),
             scope,
         );
-        painter.circle_filled(egui::pos2(fill_x, cy), 7.5, scope);
-        painter.circle_stroke(egui::pos2(fill_x, cy), 7.5, egui::Stroke::new(2.5, theme::PANEL));
+        painter.circle_filled(egui::pos2(handle_x, cy), RADIUS, scope);
+        painter.circle_stroke(egui::pos2(handle_x, cy), RADIUS, egui::Stroke::new(2.5, theme::PANEL));
     }
 
     out

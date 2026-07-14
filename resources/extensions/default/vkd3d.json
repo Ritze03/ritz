@@ -73,6 +73,34 @@
         "Default": false
       },
       {
+        "Name": "No GPU Upload Heap",
+        "Description": "VKD3D_CONFIG=no_gpu_upload_heap — disable the D3D12 GPU upload heap (resizable-BAR issues).",
+        "Type": "toggle",
+        "Variable": "no_gpu_upload_heap",
+        "Default": false
+      },
+      {
+        "Name": "Retain Descriptor Heaps",
+        "Description": "VKD3D_CONFIG=retain_descriptor_heaps — keep descriptor heap memory allocated instead of freeing it.",
+        "Type": "toggle",
+        "Variable": "retain_descriptor_heaps",
+        "Default": false
+      },
+      {
+        "Name": "Pipeline Library App Cache",
+        "Description": "VKD3D_CONFIG=pipeline_library_app_cache — use the application's pipeline library cache.",
+        "Type": "toggle",
+        "Variable": "pipeline_library_app_cache",
+        "Default": false
+      },
+      {
+        "Name": "Skip Application Workarounds",
+        "Description": "VKD3D_CONFIG=skip_application_workarounds — disable per-game workarounds baked into vkd3d-proton.",
+        "Type": "toggle",
+        "Variable": "skip_application_workarounds",
+        "Default": false
+      },
+      {
         "Name": "Extra VKD3D_CONFIG flags",
         "Description": "Additional VKD3D_CONFIG flags, comma-separated, appended to the ticked ones above (e.g. force_host_cached,breadcrumbs).",
         "Type": "string",
@@ -97,7 +125,7 @@
     },
     {
       "Name": "VKD3D_CONFIG",
-      "Requires": "descriptor_heap OR enable_experimental_features OR dxr OR dxr12 OR nodxr OR single_queue OR force_static_cbv OR no_upload_hvv OR raw_config",
+      "Requires": "descriptor_heap OR enable_experimental_features OR dxr OR dxr12 OR nodxr OR single_queue OR force_static_cbv OR no_upload_hvv OR no_gpu_upload_heap OR retain_descriptor_heaps OR pipeline_library_app_cache OR skip_application_workarounds OR raw_config",
       "Builder": [
         { "Requires": "descriptor_heap", "Type": "append", "Separator": ",", "Value": "descriptor_heap" },
         { "Requires": "enable_experimental_features", "Type": "append", "Separator": ",", "Value": "enable_experimental_features" },
@@ -107,6 +135,10 @@
         { "Requires": "single_queue", "Type": "append", "Separator": ",", "Value": "single_queue" },
         { "Requires": "force_static_cbv", "Type": "append", "Separator": ",", "Value": "force_static_cbv" },
         { "Requires": "no_upload_hvv", "Type": "append", "Separator": ",", "Value": "no_upload_hvv" },
+        { "Requires": "no_gpu_upload_heap", "Type": "append", "Separator": ",", "Value": "no_gpu_upload_heap" },
+        { "Requires": "retain_descriptor_heaps", "Type": "append", "Separator": ",", "Value": "retain_descriptor_heaps" },
+        { "Requires": "pipeline_library_app_cache", "Type": "append", "Separator": ",", "Value": "pipeline_library_app_cache" },
+        { "Requires": "skip_application_workarounds", "Type": "append", "Separator": ",", "Value": "skip_application_workarounds" },
         { "Requires": "raw_config", "Type": "append", "Separator": ",", "Value": "{raw_config}" }
       ]
     },
