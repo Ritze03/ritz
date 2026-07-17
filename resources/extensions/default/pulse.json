@@ -1,0 +1,53 @@
+{
+  "Extension": {
+    "Name": "PulseAudio",
+    "Author": "Ritze",
+    "Version": "1.0",
+    "Description": "Audio tuning for PulseAudio (and PipeWire's pulse compat layer)."
+  },
+  "UI": {
+    "Latency": [
+      {
+        "Name": "Latency (ms)",
+        "Description": "PULSE_LATENCY_MSEC — force this much client buffering. Raising it (e.g. 60-90) fixes laggy, crackly or stuttering game audio at the cost of a little delay. 0 = leave default.",
+        "Type": "integer",
+        "Variable": "latency_msec",
+        "Options": { "min": 0, "max": 500, "step": 10 }
+      }
+    ],
+    "Routing": [
+      {
+        "Name": "Output Device",
+        "Description": "PULSE_SINK — name of the sink to send this game's audio to (e.g. a headset). Use `pactl list short sinks` to find names. Empty = default output.",
+        "Type": "string",
+        "Variable": "sink"
+      }
+    ],
+    "Properties": [
+      {
+        "Name": "Tag As Game",
+        "Description": "PULSE_PROP media.role=game — mark the stream's role as 'game' so audio policy can route/duck it appropriately.",
+        "Type": "toggle",
+        "Variable": "role_game",
+        "Default": false
+      }
+    ]
+  },
+  "ENV_VARS": [
+    {
+      "Name": "PULSE_LATENCY_MSEC",
+      "Requires": "latency_msec",
+      "Builder": [{ "Requires": "latency_msec", "Type": "set", "Value": "{latency_msec}" }]
+    },
+    {
+      "Name": "PULSE_SINK",
+      "Requires": "sink",
+      "Builder": [{ "Requires": "sink", "Type": "set", "Value": "{sink}" }]
+    },
+    {
+      "Name": "PULSE_PROP",
+      "Requires": "role_game",
+      "Builder": [{ "Requires": "role_game", "Type": "set", "Value": "media.role=game" }]
+    }
+  ]
+}

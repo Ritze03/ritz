@@ -20,13 +20,6 @@
         "Type": "toggle",
         "Variable": "no_fsync",
         "Default": false
-      },
-      {
-        "Name": "Disable ESYNC",
-        "Description": "Set PROTON_NO_ESYNC=1 (disables the eventfd-based esync fallback).",
-        "Type": "toggle",
-        "Variable": "no_esync",
-        "Default": false
       }
     ],
     "Renderer": [
@@ -139,17 +132,6 @@
     ]
   },
   "ENV_VARS": [
-    {
-      "Name": "PROTON_NO_ESYNC",
-      "Requires": "no_esync",
-      "Builder": [
-        {
-          "Requires": "no_esync",
-          "Type": "set",
-          "Value": "1"
-        }
-      ]
-    },
     {
       "Name": "PROTON_NO_FSYNC",
       "Requires": "no_fsync",

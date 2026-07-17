@@ -80,10 +80,10 @@
         "Default": false
       },
       {
-        "Name": "Retain Descriptor Heaps",
-        "Description": "VKD3D_CONFIG=retain_descriptor_heaps — keep descriptor heap memory allocated instead of freeing it.",
+        "Name": "Retain PSOs",
+        "Description": "VKD3D_CONFIG=retain_psos — keep pipeline state objects alive instead of releasing them (workaround for games that destroy PSOs still in flight).",
         "Type": "toggle",
-        "Variable": "retain_descriptor_heaps",
+        "Variable": "retain_psos",
         "Default": false
       },
       {
@@ -110,10 +110,10 @@
     "Display": [
       {
         "Name": "Present Mode",
-        "Description": "VKD3D_SWAPCHAIN_PRESENT_MODE — IMMEDIATE (no vsync, tearing), MAILBOX (low-latency vsync), FIFO (vsync), FIFO_RELAXED (adaptive).",
+        "Description": "VKD3D_SWAPCHAIN_PRESENT_MODE — IMMEDIATE (no vsync, tearing), MAILBOX (low-latency vsync), FIFO (vsync), FIFO_RELAXED (adaptive), FIFO_LATEST_READY (vsync, always presents newest ready frame).",
         "Type": "selection",
         "Variable": "present_mode",
-        "Options": ["IMMEDIATE", "MAILBOX", "FIFO", "FIFO_RELAXED"]
+        "Options": ["IMMEDIATE", "MAILBOX", "FIFO", "FIFO_RELAXED", "FIFO_LATEST_READY"]
       }
     ]
   },
@@ -125,7 +125,7 @@
     },
     {
       "Name": "VKD3D_CONFIG",
-      "Requires": "descriptor_heap OR enable_experimental_features OR dxr OR dxr12 OR nodxr OR single_queue OR force_static_cbv OR no_upload_hvv OR no_gpu_upload_heap OR retain_descriptor_heaps OR pipeline_library_app_cache OR skip_application_workarounds OR raw_config",
+      "Requires": "descriptor_heap OR enable_experimental_features OR dxr OR dxr12 OR nodxr OR single_queue OR force_static_cbv OR no_upload_hvv OR no_gpu_upload_heap OR retain_psos OR pipeline_library_app_cache OR skip_application_workarounds OR raw_config",
       "Builder": [
         { "Requires": "descriptor_heap", "Type": "append", "Separator": ",", "Value": "descriptor_heap" },
         { "Requires": "enable_experimental_features", "Type": "append", "Separator": ",", "Value": "enable_experimental_features" },
@@ -136,7 +136,7 @@
         { "Requires": "force_static_cbv", "Type": "append", "Separator": ",", "Value": "force_static_cbv" },
         { "Requires": "no_upload_hvv", "Type": "append", "Separator": ",", "Value": "no_upload_hvv" },
         { "Requires": "no_gpu_upload_heap", "Type": "append", "Separator": ",", "Value": "no_gpu_upload_heap" },
-        { "Requires": "retain_descriptor_heaps", "Type": "append", "Separator": ",", "Value": "retain_descriptor_heaps" },
+        { "Requires": "retain_psos", "Type": "append", "Separator": ",", "Value": "retain_psos" },
         { "Requires": "pipeline_library_app_cache", "Type": "append", "Separator": ",", "Value": "pipeline_library_app_cache" },
         { "Requires": "skip_application_workarounds", "Type": "append", "Separator": ",", "Value": "skip_application_workarounds" },
         { "Requires": "raw_config", "Type": "append", "Separator": ",", "Value": "{raw_config}" }
