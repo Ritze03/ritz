@@ -15,7 +15,10 @@ use ritz_core::condition;
 use ritz_core::config::{AuthorsMap, GameConfig, GeneralConfig, InheritanceDisplayMode, Paths, Preset};
 use ritz_core::extension::ExtensionLoadError;
 use ritz_core::resolve::{self, Provenance, Resolution};
-use ritz_core::schema::{Extension, FieldType, OptionsSpec, UiField};
+use ritz_core::schema::{
+    ArgSpec, EnvBuilderEntry, EnvOp, EnvVarSpec, Extension, FieldType, OptionsSpec, UiField,
+    WrapperSpec,
+};
 use serde_json::{json, Value};
 
 use crate::context::{self, chain_would_have_cycle, collect_parent_chain, collect_parent_presets, merge_modules, AppContext};
@@ -28,6 +31,10 @@ enum NavSel {
     GlobalSettings,  // extension-variable global overrides — shown in central panel (ext editor)
     Profile(String),
     Game(String), // appid
+    /// Read-only manifest inspector for one module, keyed by its `Extension::id()`
+    /// (`Author::Name::Version`). Not a config-edit scope — non-preview scope
+    /// helpers (persist/current_scope_value/etc.) treat it like the ambient game.
+    ModuleEditor(String),
 }
 
 /// A destructive action awaiting confirmation in a small dialog.
@@ -372,7 +379,9 @@ impl GuiApp {
             NavSel::GeneralSettings => {
                 resolve::resolve(&self.cur_specs, Some(&self.game_config), self.preset.as_ref(), global)
             }
-            NavSel::Game(_) => {
+            // ModuleEditor is a read-only view over one module, not a config-edit
+            // scope — resolve as if the ambient game were selected.
+            NavSel::Game(_) | NavSel::ModuleEditor(_) => {
                 let merged: Option<Preset> = self.preset.as_ref().and_then(|p| {
                     let pname = p.parent.as_ref()?;
                     let mut base = collect_parent_chain(&self.paths, pname);
@@ -429,7 +438,9 @@ impl GuiApp {
                 Some(p) => self.paths.save_preset(p),
                 None => return,
             },
-            NavSel::GeneralSettings | NavSel::Game(_) => self.paths.save_game(&self.game_config),
+            NavSel::GeneralSettings | NavSel::Game(_) | NavSel::ModuleEditor(_) => {
+                self.paths.save_game(&self.game_config)
+            }
         };
         if let Err(e) = result {
             eprintln!("ritz: failed to save: {e:#}");
@@ -525,6 +536,16 @@ impl GuiApp {
                     return;
                 }
                 ui.label(theme::header_label("Launch command preview"));
+                if matches!(self.nav_sel, NavSel::ModuleEditor(_)) {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Previewing against: {}",
+                            self.game_config.game.name
+                        ))
+                        .color(theme::FAINT)
+                        .small(),
+                    );
+                }
                 ui.add_space(8.0);
                 let preview_res = if matches!(self.nav_sel, NavSel::Profile(_)) {
                     &edit_resolution
@@ -565,11 +586,17 @@ impl GuiApp {
                 return;
             }
 
+            if let NavSel::ModuleEditor(id) = self.nav_sel.clone() {
+                self.render_module_inspector(ui, &id);
+                return;
+            }
+
             let edit_ctx_label: Option<String> = match &self.nav_sel {
                 NavSel::GlobalSettings => {
                     Some("Editing Global Settings — applies to all games".to_string())
                 }
                 NavSel::Profile(name) => Some(format!("Editing Profile: {name}")),
+                NavSel::ModuleEditor(_) => None, // handled above; unreachable here
                 NavSel::Game(_) => {
                     Some(format!("Editing Game: {}", self.game_config.game.name))
                 }
@@ -583,12 +610,25 @@ impl GuiApp {
 
             // Detail header: title + version/author + description, bottom border.
             ui.add_space(6.0);
+            let mut open_inspector = false;
             ui.horizontal(|ui| {
                 ui.heading(&spec.meta.name);
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new(format!("v{}", spec.meta.version)).color(theme::FAINT));
                 ui.label(egui::RichText::new(format!("by {}", spec.meta.author)).color(theme::FAINT));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(theme::secondary_button("\u{f013}  Inspect"))
+                        .on_hover_text("View this module's manifest (read-only)")
+                        .clicked()
+                    {
+                        open_inspector = true;
+                    }
+                });
             });
+            if open_inspector {
+                self.nav_sel = NavSel::ModuleEditor(spec.id());
+            }
             if let Some(label) = edit_ctx_label {
                 ui.add_space(2.0);
                 ui.label(egui::RichText::new(label).color(theme::ACCENT).small());
@@ -795,6 +835,232 @@ impl GuiApp {
 }
 
 impl GuiApp {
+    /// Phase 1: read-only manifest inspector. Renders meta, every UI section's
+    /// fields, and the four output blocks (ENV_VARS/GAME_ENV_VARS/WRAPPERS/
+    /// GAME_LAUNCH_ARGS) as plain labels — nothing here is editable. `id` is the
+    /// module's `Extension::id()` (`Author::Name::Version`), looked up fresh from
+    /// `cur_specs` each frame so it stays correct if the module reloads.
+    fn render_module_inspector(&self, ui: &mut egui::Ui, id: &str) {
+        let Some(spec) = self.cur_specs.iter().find(|s| s.id() == id) else {
+            ui.label(
+                egui::RichText::new("This module is no longer available.").color(theme::DIM),
+            );
+            return;
+        };
+
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.heading(&spec.meta.name);
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new(format!("v{}", spec.meta.version)).color(theme::FAINT));
+            ui.label(egui::RichText::new(format!("by {}", spec.meta.author)).color(theme::FAINT));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new("READ-ONLY INSPECTOR")
+                        .color(theme::COL_GLOBAL)
+                        .small()
+                        .strong(),
+                );
+            });
+        });
+        if let Some(backend) = &spec.backend {
+            ui.add_space(2.0);
+            ui.label(egui::RichText::new(format!("Backend: {backend}")).color(theme::DIM).small());
+        }
+        if let Some(forked) = &spec.meta.forked_from {
+            ui.label(egui::RichText::new(format!("Forked from: {forked}")).color(theme::DIM).small());
+        }
+        if let Some(desc) = &spec.meta.description {
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(desc).color(theme::DIM));
+        }
+        ui.add_space(10.0);
+        ui.separator();
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .drag_to_scroll(self.general_config.touch_mode)
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    let avail = (ui.available_width() - 18.0).max(300.0);
+                    let max_w = if self.general_config.full_width { avail } else { avail.min(743.0) };
+                    ui.set_max_width(max_w);
+
+                    for (section, fields) in &spec.ui {
+                        if fields.is_empty() {
+                            continue;
+                        }
+                        ui.add_space(12.0);
+                        ui.label(theme::section_label(section));
+                        ui.add_space(6.0);
+                        for field in fields {
+                            render_inspector_field(ui, field);
+                        }
+                    }
+
+                    render_inspector_env_block(ui, "ENV_VARS", &spec.env_vars);
+                    render_inspector_env_block(ui, "GAME_ENV_VARS", &spec.game_env_vars);
+                    render_inspector_wrapper_block(ui, &spec.wrappers);
+                    render_inspector_arg_block(ui, "GAME_LAUNCH_ARGS", &spec.game_launch_args);
+                });
+            });
+    }
+}
+
+/// A read-only labeled card, matching the tint/rounding of the editable field
+/// cards elsewhere in the app but with plain text instead of interactive widgets.
+fn inspector_card(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::none()
+        .fill(theme::FIELD)
+        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        .rounding(egui::Rounding::same(8.0))
+        .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add_contents(ui);
+        });
+    ui.add_space(6.0);
+}
+
+fn inspector_meta_line(ui: &mut egui::Ui, text: impl Into<String>) {
+    ui.label(egui::RichText::new(text.into()).color(theme::DIM).small());
+}
+
+/// One read-only UI-field row: Name, Variable, Type, Description, Requires, and
+/// type-specific detail (Selection options / int-float range / toggle default).
+fn render_inspector_field(ui: &mut egui::Ui, field: &UiField) {
+    inspector_card(ui, |ui| {
+        let label = field.name.clone().unwrap_or_else(|| field.variable.clone());
+        ui.label(egui::RichText::new(label).color(theme::TEXT).strong());
+        inspector_meta_line(ui, format!("Variable: {}", field.variable));
+        inspector_meta_line(ui, format!("Type: {:?}", field.field_type));
+        if let Some(desc) = &field.description {
+            inspector_meta_line(ui, desc.clone());
+        }
+        if let Some(req) = &field.requires {
+            ui.label(
+                egui::RichText::new(format!("Requires: {req}")).color(theme::COL_PROFILE).small(),
+            );
+        }
+        match field.field_type {
+            FieldType::Selection => {
+                let opts = option_values(field);
+                if !opts.is_empty() {
+                    let joined = opts
+                        .iter()
+                        .map(|(v, l)| if v == l { v.clone() } else { format!("{l} ({v})") })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    inspector_meta_line(ui, format!("Options: {joined}"));
+                }
+            }
+            FieldType::Integer | FieldType::Float => {
+                let (min, max, step) = number_range(field);
+                inspector_meta_line(ui, format!("Range: {min}..{max} (step {step})"));
+            }
+            FieldType::Toggle => {
+                let def = field.default.as_ref().and_then(|v| v.as_bool()).unwrap_or(false);
+                inspector_meta_line(ui, format!("Default: {def}"));
+            }
+            FieldType::String | FieldType::MultiString => {}
+        }
+    });
+}
+
+/// One read-only builder step line (`set`/`append`/`unset` + value/separator/Requires).
+fn env_builder_step_line(step: &EnvBuilderEntry) -> String {
+    let op = match step.op {
+        EnvOp::Set => "set",
+        EnvOp::Append => "append",
+        EnvOp::Unset => "unset",
+    };
+    let mut line = op.to_string();
+    if let Some(v) = &step.value {
+        line.push_str(&format!(" = {v}"));
+    }
+    if let Some(sep) = &step.separator {
+        line.push_str(&format!("  (separator {sep:?})"));
+    }
+    if let Some(req) = &step.requires {
+        line.push_str(&format!("  [Requires: {req}]"));
+    }
+    line
+}
+
+/// ENV_VARS / GAME_ENV_VARS block: one card per `EnvVarSpec`, showing Name,
+/// Requires, and every builder step.
+fn render_inspector_env_block(ui: &mut egui::Ui, title: &str, specs: &[EnvVarSpec]) {
+    if specs.is_empty() {
+        return;
+    }
+    ui.add_space(12.0);
+    ui.label(theme::section_label(title));
+    ui.add_space(6.0);
+    for spec in specs {
+        inspector_card(ui, |ui| {
+            ui.label(egui::RichText::new(&spec.name).color(theme::TEXT).strong());
+            if let Some(req) = &spec.requires {
+                ui.label(
+                    egui::RichText::new(format!("Requires: {req}")).color(theme::COL_PROFILE).small(),
+                );
+            }
+            for step in &spec.builder {
+                inspector_meta_line(ui, env_builder_step_line(step));
+            }
+        });
+    }
+}
+
+/// WRAPPERS block: one card per `WrapperSpec`, showing CommandSyntax, Priority,
+/// Requires, and every builder step's value.
+fn render_inspector_wrapper_block(ui: &mut egui::Ui, specs: &[WrapperSpec]) {
+    if specs.is_empty() {
+        return;
+    }
+    ui.add_space(12.0);
+    ui.label(theme::section_label("WRAPPERS"));
+    ui.add_space(6.0);
+    for spec in specs {
+        inspector_card(ui, |ui| {
+            ui.label(egui::RichText::new(&spec.command_syntax).color(theme::TEXT).strong());
+            inspector_meta_line(ui, format!("Priority: {}", spec.priority));
+            if let Some(req) = &spec.requires {
+                ui.label(
+                    egui::RichText::new(format!("Requires: {req}")).color(theme::COL_PROFILE).small(),
+                );
+            }
+            for step in &spec.builder {
+                let mut line = step.value.clone();
+                if let Some(req) = &step.requires {
+                    line.push_str(&format!("  [Requires: {req}]"));
+                }
+                inspector_meta_line(ui, line);
+            }
+        });
+    }
+}
+
+/// GAME_LAUNCH_ARGS block: one card per `ArgSpec`, showing Value and Requires.
+fn render_inspector_arg_block(ui: &mut egui::Ui, title: &str, specs: &[ArgSpec]) {
+    if specs.is_empty() {
+        return;
+    }
+    ui.add_space(12.0);
+    ui.label(theme::section_label(title));
+    ui.add_space(6.0);
+    for spec in specs {
+        inspector_card(ui, |ui| {
+            ui.label(egui::RichText::new(&spec.value).color(theme::TEXT).strong());
+            if let Some(req) = &spec.requires {
+                ui.label(
+                    egui::RichText::new(format!("Requires: {req}")).color(theme::COL_PROFILE).small(),
+                );
+            }
+        });
+    }
+}
+
+impl GuiApp {
     /// The Graphite title bar: logo + wordmark, breadcrumb chip, and (in launch
     /// mode) the Cancel/Launch action pair.
     fn render_title_bar(&mut self, ctx: &egui::Context) {
@@ -985,6 +1251,8 @@ impl GuiApp {
             NavSel::GlobalSettings => "global".to_string(),
             NavSel::Profile(n) => format!("profile:{n}"),
             NavSel::Game(a) => format!("game:{a}"),
+            // Not a real edit scope — behave like the ambient game.
+            NavSel::ModuleEditor(_) => format!("game:{}", self.appid),
             NavSel::GeneralSettings => "general".to_string(),
         };
         let key = format!("{scope_tag}::{author}::{name}::{var}");
@@ -1240,7 +1508,7 @@ impl GuiApp {
                     p.set_value(&a, &n, &field.variable, value);
                 }
             }
-            NavSel::Game(_) | NavSel::GeneralSettings => {
+            NavSel::Game(_) | NavSel::GeneralSettings | NavSel::ModuleEditor(_) => {
                 self.game_config.set_value(&a, &n, &field.variable, value);
             }
         }
@@ -1310,7 +1578,7 @@ impl GuiApp {
                     p.unset_value(&a, &n, &field.variable);
                 }
             }
-            NavSel::Game(_) | NavSel::GeneralSettings => {
+            NavSel::Game(_) | NavSel::GeneralSettings | NavSel::ModuleEditor(_) => {
                 self.game_config.unset_value(&a, &n, &field.variable);
             }
         }
@@ -1322,7 +1590,9 @@ impl GuiApp {
             NavSel::Profile(_) => {
                 if let Some(p) = &mut self.editing_preset_buf { p.set_value(author, name, var, value); }
             }
-            NavSel::Game(_) | NavSel::GeneralSettings => self.game_config.set_value(author, name, var, value),
+            NavSel::Game(_) | NavSel::GeneralSettings | NavSel::ModuleEditor(_) => {
+                self.game_config.set_value(author, name, var, value)
+            }
         }
     }
 
@@ -1332,7 +1602,9 @@ impl GuiApp {
             NavSel::Profile(_) => {
                 if let Some(p) = &mut self.editing_preset_buf { p.unset_value(author, name, var); }
             }
-            NavSel::Game(_) | NavSel::GeneralSettings => self.game_config.unset_value(author, name, var),
+            NavSel::Game(_) | NavSel::GeneralSettings | NavSel::ModuleEditor(_) => {
+                self.game_config.unset_value(author, name, var)
+            }
         }
     }
 
@@ -2255,7 +2527,7 @@ impl GuiApp {
                 self.nav_name_buf = self.game_config.game.name.clone();
                 self.nav_appid_buf = appid;
             }
-            NavSel::GeneralSettings | NavSel::GlobalSettings => {}
+            NavSel::GeneralSettings | NavSel::GlobalSettings | NavSel::ModuleEditor(_) => {}
         }
     }
 
@@ -2325,7 +2597,7 @@ impl GuiApp {
         }
 
         match self.nav_sel.clone() {
-            NavSel::GeneralSettings | NavSel::GlobalSettings => {
+            NavSel::GeneralSettings | NavSel::GlobalSettings | NavSel::ModuleEditor(_) => {
                 // Settings for these live in the central panel.
             }
 
@@ -2574,7 +2846,7 @@ impl GuiApp {
                     let _ = self.paths.save_preset(p);
                 }
             }
-            NavSel::Game(_) | NavSel::GeneralSettings => {
+            NavSel::Game(_) | NavSel::GeneralSettings | NavSel::ModuleEditor(_) => {
                 self.game_config.config.modules.authors.clear();
                 self.persist();
             }
@@ -2620,10 +2892,21 @@ impl GuiApp {
         if self.extension_errors.is_empty() {
             return;
         }
-        let n = self.extension_errors.len();
-        let header = egui::RichText::new(format!("\u{26A0} {n} module(s) failed to load"))
-            .color(theme::COL_GLOBAL)
-            .strong();
+        // A `Dup` entry means the module DID load (it's a config-namespace
+        // collision, not a parse failure) — count the two kinds separately so
+        // the header doesn't claim duplicates "failed to load".
+        let (failed, dup) = self.extension_errors.iter().fold((0usize, 0usize), |(f, d), e| {
+            match e {
+                ExtensionLoadError::Parse { .. } => (f + 1, d),
+                ExtensionLoadError::Dup { .. } => (f, d + 1),
+            }
+        });
+        let header_text = match (failed, dup) {
+            (0, d) => format!("\u{26A0} {d} duplicate module(s)"),
+            (f, 0) => format!("\u{26A0} {f} module(s) failed to load"),
+            (f, d) => format!("\u{26A0} {f} failed to load, {d} duplicate(s)"),
+        };
+        let header = egui::RichText::new(header_text).color(theme::COL_GLOBAL).strong();
         egui::CollapsingHeader::new(header)
             .id_salt("ext_load_errors")
             .default_open(false)
@@ -2661,7 +2944,7 @@ impl GuiApp {
                 .unwrap_or_default()
         } else { Vec::new() };
         // Game context: [direct_preset, its_parent, grandparent, …]
-        let game_preset_chain: Vec<Preset> = if let NavSel::Game(_) = &self.nav_sel {
+        let game_preset_chain: Vec<Preset> = if matches!(self.nav_sel, NavSel::Game(_) | NavSel::ModuleEditor(_)) {
             let mut chain = Vec::new();
             if let Some(p) = &self.preset {
                 chain.push(p.clone());
@@ -2723,7 +3006,9 @@ impl GuiApp {
             };
             let mut icons: Vec<(&'static str, Color32)> = Vec::new();
             match nav_sel {
-                NavSel::Game(_) => {
+                // ModuleEditor is a read-only view, not an edit scope — show the
+                // same inheritance icons as the ambient game.
+                NavSel::Game(_) | NavSel::ModuleEditor(_) => {
                     if has_in(global_modules) { icons.push((ICON_INHERIT, COL_GLOBAL)); }
                     push_chain_icons(&mut icons, &game_preset_chain);
                     if has_in(game_modules) { icons.push((ICON_EDIT, COL_GAME)); }
