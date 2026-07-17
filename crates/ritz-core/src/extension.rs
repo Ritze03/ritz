@@ -10,6 +10,7 @@
 //! Multiple directories can be merged (e.g. shipped built-ins + user drop-ins);
 //! later directories override earlier ones by extension id.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
@@ -18,6 +19,48 @@ use crate::condition;
 use crate::error::{Result, RitzError};
 use crate::schema::Extension;
 use crate::variables::ui_requires_is_valid;
+
+/// A non-fatal problem encountered while loading extensions. These are collected
+/// rather than propagated so one bad manifest never aborts loading the rest of a
+/// directory (directory-level IO errors stay fatal). Each renders to a single
+/// banner line via [`fmt::Display`].
+#[derive(Debug, Clone)]
+pub enum ExtensionLoadError {
+    /// A manifest failed to read, parse, or validate.
+    Parse { path: PathBuf, reason: String },
+    /// Two or more loaded modules share an (Author, Name) config identity
+    /// (Version-blind), so they collide in the config namespace.
+    Dup {
+        author: String,
+        name: String,
+        paths: Vec<PathBuf>,
+    },
+}
+
+impl fmt::Display for ExtensionLoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ExtensionLoadError::Parse { path, reason } => {
+                write!(f, "failed to load {}: {}", path.display(), reason)
+            }
+            ExtensionLoadError::Dup {
+                author,
+                name,
+                paths,
+            } => {
+                let joined = paths
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(
+                    f,
+                    "duplicate module {author}::{name} loaded from {joined}"
+                )
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct LoadedExtension {
@@ -37,13 +80,23 @@ pub struct LoadedExtension {
 }
 
 /// Discover all extensions under a directory, recursing to any depth.
-pub fn discover(root: &Path) -> Result<Vec<LoadedExtension>> {
+///
+/// A single unparseable/invalid manifest is demoted to a collected
+/// [`ExtensionLoadError`] rather than aborting the whole directory; only
+/// directory-level IO failures (unreadable dir, bad entry) stay fatal.
+pub fn discover(root: &Path) -> Result<(Vec<LoadedExtension>, Vec<ExtensionLoadError>)> {
     let mut out = Vec::new();
-    discover_into(root, root, &mut out)?;
-    Ok(out)
+    let mut errors = Vec::new();
+    discover_into(root, root, &mut out, &mut errors)?;
+    Ok((out, errors))
 }
 
-fn discover_into(dir: &Path, root: &Path, out: &mut Vec<LoadedExtension>) -> Result<()> {
+fn discover_into(
+    dir: &Path,
+    root: &Path,
+    out: &mut Vec<LoadedExtension>,
+    errors: &mut Vec<ExtensionLoadError>,
+) -> Result<()> {
     if !dir.exists() {
         return Ok(());
     }
@@ -58,24 +111,58 @@ fn discover_into(dir: &Path, root: &Path, out: &mut Vec<LoadedExtension>) -> Res
         })?;
         let path = entry.path();
         if path.is_dir() {
-            discover_into(&path, root, out)?;
+            discover_into(&path, root, out, errors)?;
         } else if path.extension().and_then(|e| e.to_str()) == Some("json") {
-            out.push(load_file(&path, dir, root)?);
+            // Per-file parse/validate failures are collected, not propagated.
+            match load_file(&path, dir, root) {
+                Ok(ext) => out.push(ext),
+                Err(e) => errors.push(ExtensionLoadError::Parse {
+                    path: path.clone(),
+                    reason: e.to_string(),
+                }),
+            }
         }
     }
     Ok(())
 }
 
 /// Load and merge extensions from multiple directories. Later directories
-/// override earlier by extension id. Returns extensions in stable id order.
-pub fn load_all(dirs: &[PathBuf]) -> Result<Vec<LoadedExtension>> {
+/// override earlier by extension id. Returns extensions in stable id order,
+/// plus every non-fatal load problem (per-file parse/validate failures and
+/// post-merge duplicate-identity collisions).
+pub fn load_all(dirs: &[PathBuf]) -> Result<(Vec<LoadedExtension>, Vec<ExtensionLoadError>)> {
     let mut by_id: IndexMap<String, LoadedExtension> = IndexMap::new();
+    let mut errors = Vec::new();
     for dir in dirs {
-        for ext in discover(dir)? {
+        let (exts, errs) = discover(dir)?;
+        errors.extend(errs);
+        for ext in exts {
             by_id.insert(ext.spec.id(), ext);
         }
     }
-    Ok(by_id.into_values().collect())
+    let loaded: Vec<LoadedExtension> = by_id.into_values().collect();
+
+    // Post-merge duplicate detection, Version-blind: ids differ by Version, but
+    // config keys on Author+Name only, so same-(Author,Name) modules share one
+    // config namespace and collide. Group and flag any group with >1 member.
+    let mut groups: IndexMap<(String, String), Vec<PathBuf>> = IndexMap::new();
+    for ext in &loaded {
+        groups
+            .entry((ext.spec.meta.author.clone(), ext.spec.meta.name.clone()))
+            .or_default()
+            .push(ext.manifest.clone());
+    }
+    for ((author, name), paths) in groups {
+        if paths.len() > 1 {
+            errors.push(ExtensionLoadError::Dup {
+                author,
+                name,
+                paths,
+            });
+        }
+    }
+
+    Ok((loaded, errors))
 }
 
 fn load_file(manifest: &Path, dir: &Path, root: &Path) -> Result<LoadedExtension> {
@@ -168,7 +255,8 @@ mod tests {
     #[test]
     fn shipped_extensions_load_and_validate() {
         // Discovery recurses into default/ and built-in/ subfolders.
-        let exts = discover(&shipped_dir()).expect("discover");
+        let (exts, errors) = discover(&shipped_dir()).expect("discover");
+        assert!(errors.is_empty(), "bundled modules produced errors: {errors:?}");
         let ids: Vec<String> = exts.iter().map(|e| e.spec.meta.name.clone()).collect();
         assert!(ids.iter().any(|n| n == "Gamescope"), "got: {ids:?}");
         assert!(ids.iter().any(|n| n == "AMD"), "got: {ids:?}");
@@ -205,5 +293,61 @@ mod tests {
         }))
         .unwrap();
         assert!(validate(&ext).is_ok());
+    }
+
+    #[test]
+    fn discover_skips_and_warns_on_a_bad_file() {
+        let tmp = std::env::temp_dir().join(format!("ritz-discover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // One valid manifest.
+        std::fs::write(
+            tmp.join("good.json"),
+            r#"{"Extension": {"Name": "Good", "Author": "Ritze", "Version": "1.0"}}"#,
+        )
+        .unwrap();
+        // One deliberately-broken manifest (malformed JSON).
+        std::fs::write(tmp.join("bad.json"), "{ this is not json").unwrap();
+
+        let (exts, errors) = discover(&tmp).expect("discover should not be fatal");
+        assert_eq!(exts.len(), 1, "only the valid manifest should load");
+        assert_eq!(exts[0].spec.meta.name, "Good");
+        assert_eq!(errors.len(), 1, "the broken manifest should be reported");
+        assert!(matches!(errors[0], ExtensionLoadError::Parse { .. }));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn load_all_detects_version_blind_duplicates() {
+        let tmp = std::env::temp_dir().join(format!("ritz-dup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Same Author+Name, differing Version → distinct ids but one config key.
+        std::fs::write(
+            tmp.join("a.json"),
+            r#"{"Extension": {"Name": "Dup", "Author": "Ritze", "Version": "1.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.join("b.json"),
+            r#"{"Extension": {"Name": "Dup", "Author": "Ritze", "Version": "2.0"}}"#,
+        )
+        .unwrap();
+
+        let (exts, errors) = load_all(&[tmp.clone()]).expect("load_all");
+        assert_eq!(exts.len(), 2, "both distinct-id modules load");
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ExtensionLoadError::Dup { author, name, paths }
+                    if author == "Ritze" && name == "Dup" && paths.len() == 2
+            )),
+            "expected a Dup error, got: {errors:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

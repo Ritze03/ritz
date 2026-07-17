@@ -383,21 +383,39 @@ fn read_json_opt<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Option<T>>
     }
 }
 
-fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+/// Atomically write `bytes` to `path`: write to a sibling temp file, then
+/// `fs::rename` it into place (rename is atomic within a filesystem, so readers
+/// never observe a half-written file). The temp path is `path` with a literal
+/// `.tmp` **suffix appended to the OsString** — NOT `with_extension`, which would
+/// truncate multi-dot names (e.g. `foo.bar.json` → `foo.tmp`). No fsync, matching
+/// the `resources.rs` bootstrap precedent (durability is not required here; the
+/// swap-in-place semantics are).
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|source| RitzError::Io {
             path: parent.display().to_string(),
             source,
         })?;
     }
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, bytes).map_err(|source| RitzError::Io {
+        path: tmp.display().to_string(),
+        source,
+    })?;
+    std::fs::rename(&tmp, path).map_err(|source| RitzError::Io {
+        path: path.display().to_string(),
+        source,
+    })
+}
+
+fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let s = serde_json::to_string_pretty(value).map_err(|source| RitzError::Json {
         path: path.display().to_string(),
         source,
     })?;
-    std::fs::write(path, s).map_err(|source| RitzError::Io {
-        path: path.display().to_string(),
-        source,
-    })
+    write_atomic(path, s.as_bytes())
 }
 
 #[cfg(test)]

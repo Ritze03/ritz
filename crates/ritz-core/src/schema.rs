@@ -15,38 +15,38 @@ pub struct Extension {
     pub meta: ExtensionMeta,
 
     /// Optional: restrict this extension to specific Steam AppIds. Omit = global.
-    #[serde(rename = "AppIds", default)]
+    #[serde(rename = "AppIds", default, skip_serializing_if = "Option::is_none")]
     pub app_ids: Option<Vec<String>>,
 
     /// Optional: route to a built-in runtime backend handler (e.g. "lsfg-vk").
-    #[serde(rename = "Backend", default)]
+    #[serde(rename = "Backend", default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
 
     /// Optional: only load this extension on the named desktop (matched against
     /// `$XDG_CURRENT_DESKTOP`, e.g. "Hyprland"). Omit = available everywhere.
-    #[serde(rename = "RequiresDesktop", default)]
+    #[serde(rename = "RequiresDesktop", default, skip_serializing_if = "Option::is_none")]
     pub requires_desktop: Option<String>,
 
     /// UI sections in declared order; each section is a list of fields.
-    #[serde(rename = "UI", default)]
+    #[serde(rename = "UI", default, skip_serializing_if = "IndexMap::is_empty")]
     pub ui: IndexMap<String, Vec<UiField>>,
 
-    #[serde(rename = "ENV_VARS", default)]
+    #[serde(rename = "ENV_VARS", default, skip_serializing_if = "Vec::is_empty")]
     pub env_vars: Vec<EnvVarSpec>,
 
-    #[serde(rename = "WRAPPERS", default)]
+    #[serde(rename = "WRAPPERS", default, skip_serializing_if = "Vec::is_empty")]
     pub wrappers: Vec<WrapperSpec>,
 
-    #[serde(rename = "GAME_ENV_VARS", default)]
+    #[serde(rename = "GAME_ENV_VARS", default, skip_serializing_if = "Vec::is_empty")]
     pub game_env_vars: Vec<EnvVarSpec>,
 
-    #[serde(rename = "GAME_LAUNCH_ARGS", default)]
+    #[serde(rename = "GAME_LAUNCH_ARGS", default, skip_serializing_if = "Vec::is_empty")]
     pub game_launch_args: Vec<ArgSpec>,
 
-    #[serde(rename = "Hooks", default)]
+    #[serde(rename = "Hooks", default, skip_serializing_if = "Option::is_none")]
     pub hooks: Option<Hooks>,
 
-    #[serde(rename = "ScriptBuilders", default)]
+    #[serde(rename = "ScriptBuilders", default, skip_serializing_if = "Vec::is_empty")]
     pub script_builders: Vec<ScriptBuilder>,
 }
 
@@ -83,8 +83,12 @@ pub struct ExtensionMeta {
     pub author: String,
     #[serde(rename = "Version")]
     pub version: String,
-    #[serde(rename = "Description", default)]
+    #[serde(rename = "Description", default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Optional lineage marker set when this module was created by forking
+    /// another (`"Author::Name"`). Cosmetic; does not affect config identity.
+    #[serde(rename = "ForkedFrom", default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,22 +108,22 @@ pub enum FieldType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiField {
-    #[serde(rename = "Name", default)]
+    #[serde(rename = "Name", default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(rename = "Description", default)]
+    #[serde(rename = "Description", default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(rename = "Type")]
     pub field_type: FieldType,
     #[serde(rename = "Variable")]
     pub variable: String,
-    #[serde(rename = "Default", default)]
+    #[serde(rename = "Default", default, skip_serializing_if = "Option::is_none")]
     pub default: Option<Value>,
-    #[serde(rename = "Options", default)]
+    #[serde(rename = "Options", default, skip_serializing_if = "Option::is_none")]
     pub options: Option<OptionsSpec>,
-    #[serde(rename = "DisplayOptions", default)]
+    #[serde(rename = "DisplayOptions", default, skip_serializing_if = "Option::is_none")]
     pub display_options: Option<Vec<String>>,
     /// GUI visibility gate. `global:` references are rejected at load time.
-    #[serde(rename = "Requires", default)]
+    #[serde(rename = "Requires", default, skip_serializing_if = "Option::is_none")]
     pub requires: Option<String>,
 }
 
@@ -285,5 +289,33 @@ mod tests {
         let exit = hooks.post_exit.unwrap();
         assert_eq!(exit.script(), "exit.sh");
         assert!(!exit.background());
+    }
+
+    #[test]
+    fn minimal_extension_serializes_without_null_or_empty_array_noise() {
+        // Only Name/Author/Version/Description + one UI field: the optional/Vec
+        // blocks must be skipped, not emitted as `null` / `[]`.
+        let ext: Extension = serde_json::from_value(serde_json::json!({
+            "Extension": {
+                "Name": "Mini", "Author": "Ritze", "Version": "1.0",
+                "Description": "a minimal module"
+            },
+            "UI": {"S": [{"Type": "toggle", "Variable": "enabled"}]}
+        }))
+        .unwrap();
+
+        let out = serde_json::to_string_pretty(&ext).unwrap();
+        assert!(!out.contains("null"), "serialized output has null noise:\n{out}");
+        assert!(!out.contains("[]"), "serialized output has empty-array noise:\n{out}");
+        // Skipped optional blocks must not appear at all.
+        assert!(!out.contains("Backend"), "unexpected Backend key:\n{out}");
+        assert!(!out.contains("WRAPPERS"), "unexpected WRAPPERS key:\n{out}");
+
+        // Round-trips: re-parse equals the original (compare via JSON value).
+        let reparsed: Extension = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            serde_json::to_value(&ext).unwrap(),
+            serde_json::to_value(&reparsed).unwrap()
+        );
     }
 }

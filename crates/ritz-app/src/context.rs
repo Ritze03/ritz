@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use ritz_core::builder::{self, ExtInput, LaunchCommand};
 use ritz_core::config::{AuthorsMap, GameConfig, GeneralConfig, Paths, Preset};
-use ritz_core::extension::{self, LoadedExtension};
+use ritz_core::extension::{self, ExtensionLoadError, LoadedExtension};
 use ritz_core::resolve::{self, Resolution};
 use ritz_core::schema::Extension;
 use ritz_core::steam::SteamCommand;
@@ -16,6 +16,9 @@ pub struct AppContext {
     pub paths: Paths,
     pub general: GeneralConfig,
     pub extensions: Vec<LoadedExtension>,
+    /// Non-fatal problems from the last extension load (bad manifests, duplicate
+    /// identities). Surfaced as a GUI banner; never blocks loading the rest.
+    pub extension_errors: Vec<ExtensionLoadError>,
 }
 
 impl AppContext {
@@ -24,11 +27,12 @@ impl AppContext {
         // Export bundled extensions + plugin into the config dir (skips existing).
         crate::resources::bootstrap(&paths).context("exporting bundled resources")?;
         let general = paths.load_general().context("loading general.json")?;
-        let extensions = load_extensions(&paths)?;
+        let (extensions, extension_errors) = load_extensions(&paths)?;
         Ok(Self {
             paths,
             general,
             extensions,
+            extension_errors,
         })
     }
 
@@ -276,9 +280,10 @@ pub(crate) fn collect_parent_presets(paths: &Paths, first_parent: &str) -> Vec<P
 /// Load all extensions from disk, dropping those gated to a desktop we're not
 /// running (e.g. hypr-monctl off Hyprland) so they never appear in the GUI nor
 /// get resolved/applied. Shared by [`AppContext::load`] and the GUI's hot-reload.
-pub fn load_extensions(paths: &Paths) -> Result<Vec<LoadedExtension>> {
+pub fn load_extensions(paths: &Paths) -> Result<(Vec<LoadedExtension>, Vec<ExtensionLoadError>)> {
     let dirs = extension_dirs(paths);
-    let mut extensions = extension::load_all(&dirs).context("loading extensions")?;
+    let (mut extensions, errors) =
+        extension::load_all(&dirs).context("loading extensions")?;
     extensions.retain(|e| {
         e.spec
             .requires_desktop
@@ -289,5 +294,5 @@ pub fn load_extensions(paths: &Paths) -> Result<Vec<LoadedExtension>> {
     // which varies between reads, so the author-mode tree (which shows modules in
     // this order within each author) would otherwise shuffle on reload.
     extensions.sort_by(|a, b| a.spec.meta.name.cmp(&b.spec.meta.name));
-    Ok(extensions)
+    Ok((extensions, errors))
 }

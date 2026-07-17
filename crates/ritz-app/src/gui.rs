@@ -13,6 +13,7 @@ use egui::text::{LayoutJob, TextFormat};
 use egui::Color32;
 use ritz_core::condition;
 use ritz_core::config::{AuthorsMap, GameConfig, GeneralConfig, InheritanceDisplayMode, Paths, Preset};
+use ritz_core::extension::ExtensionLoadError;
 use ritz_core::resolve::{self, Provenance, Resolution};
 use ritz_core::schema::{Extension, FieldType, OptionsSpec, UiField};
 use serde_json::{json, Value};
@@ -105,6 +106,9 @@ pub struct GuiApp {
     /// Tree folder for each entry in `all_specs` (relative to the extensions root).
     all_dirs: Vec<PathBuf>,
     all_is_folder_ext: Vec<bool>,
+    /// Non-fatal load problems (bad manifests / duplicate identities) shown as a
+    /// banner atop the module tree. Refreshed on every hot-reload.
+    extension_errors: Vec<ExtensionLoadError>,
     cur_specs: Vec<Extension>,
     /// Tree folder for each entry in `cur_specs`, index-aligned.
     cur_dirs: Vec<PathBuf>,
@@ -176,6 +180,7 @@ impl GuiApp {
         let all_specs: Vec<Extension> = ctx.extensions.iter().map(|e| e.spec.clone()).collect();
         let all_dirs: Vec<PathBuf> = ctx.extensions.iter().map(|e| e.rel_dir.clone()).collect();
         let all_is_folder_ext: Vec<bool> = ctx.extensions.iter().map(|e| e.is_folder_ext).collect();
+        let extension_errors = ctx.extension_errors.clone();
         let general_config = ctx.paths.load_general().unwrap_or_default();
         let global_config = ctx.paths.load_global_config().unwrap_or_default();
         let all_presets = ctx.paths.list_presets();
@@ -191,6 +196,7 @@ impl GuiApp {
             all_specs,
             all_dirs,
             all_is_folder_ext,
+            extension_errors,
             cur_specs: Vec::new(),
             cur_dirs: Vec::new(),
             cur_is_folder_ext: Vec::new(),
@@ -323,12 +329,13 @@ impl GuiApp {
 
     /// Reload all extensions from disk into the running editor (hot-reload).
     fn reload_extensions(&mut self) {
-        let Ok(exts) = context::load_extensions(&self.paths) else {
+        let Ok((exts, errors)) = context::load_extensions(&self.paths) else {
             return;
         };
         self.all_specs = exts.iter().map(|e| e.spec.clone()).collect();
         self.all_dirs = exts.iter().map(|e| e.rel_dir.clone()).collect();
         self.all_is_folder_ext = exts.iter().map(|e| e.is_folder_ext).collect();
+        self.extension_errors = errors;
         self.rebuild_cur_specs();
     }
 
@@ -493,6 +500,7 @@ impl GuiApp {
                         .drag_to_scroll(self.general_config.touch_mode)
                         .show(ui, |ui| {
                             ui.add_space(4.0);
+                            self.render_ext_errors_banner(ui);
                             self.render_ext_tree(ui);
                         });
                 });
@@ -2604,6 +2612,33 @@ impl TreeNode {
 }
 
 impl GuiApp {
+    /// Warning banner atop the module tree when some manifests failed to load or
+    /// collide. Lazily built (nothing rendered when there are no errors); the
+    /// per-error `Display` lines live inside a collapsible so the tree stays
+    /// uncluttered.
+    fn render_ext_errors_banner(&self, ui: &mut egui::Ui) {
+        if self.extension_errors.is_empty() {
+            return;
+        }
+        let n = self.extension_errors.len();
+        let header = egui::RichText::new(format!("\u{26A0} {n} module(s) failed to load"))
+            .color(theme::COL_GLOBAL)
+            .strong();
+        egui::CollapsingHeader::new(header)
+            .id_salt("ext_load_errors")
+            .default_open(false)
+            .show(ui, |ui| {
+                for err in &self.extension_errors {
+                    ui.label(
+                        egui::RichText::new(err.to_string())
+                            .color(theme::DIM)
+                            .small(),
+                    );
+                }
+            });
+        ui.add_space(6.0);
+    }
+
     /// Render the left-panel module tree. In folder mode it mirrors the nested
     /// `extensions/` layout; in author mode it groups by extension Author. In
     /// both modes the built-in (backend) modules are collected under a single
