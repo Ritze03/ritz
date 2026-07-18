@@ -234,6 +234,14 @@ for the module's *manifest* (not its config values).
   always-present **✕ Close** button (`TopAction::Close`) exits even with nothing to save
   (dropping in-memory edits); **Save** and **Discard** also exit on success so the user
   lands back on the real module.
+- **Locked trees while editing** — the nav-away guard above is now a *backstop*, not the
+  normal path: while a draft exists the **MODULES tree** (and its "New" button) is wrapped
+  in `ui.add_enabled_ui(module_draft.is_none(), …)`, so it greys out and can't swap the
+  module out mid-edit; while the draft is **dirty** the **left nav** (Profiles / Games /
+  General / Global) is likewise disabled, so a stray click can't silently discard unsaved
+  edits. *Why the left nav is only locked when dirty:* it retargets the editor's live
+  launch preview, which is useful — the lock exists to protect unsaved edits, not to pin
+  the preview. Exit stays Close / Save / Discard (or Ctrl+S).
 - **Keybinds** (handled at the top of `GuiApp::ui`, before panels render) — **Ctrl+E**
   enters the editor for the selected module; **Ctrl+S** triggers Save when the editor is
   open and `ModuleDraft::save_enabled` holds (same gate as the button), a no-op otherwise;
@@ -324,10 +332,39 @@ for the module's *manifest* (not its config values).
   and applied by `apply_deferred` **after** the render loop, never mid-iteration. One
   reusable `row_actions` widget (`[↑][↓][🗑]`) returns a `RowAction` the caller turns into
   the container-correct op (`apply_row` = `Vec::swap`/`remove`).
-- **Nesting shades** — `editor_card(ui, fill, add)` takes a per-level fill from the
-  `theme::EDIT_L0..L3` ramp so the hierarchy reads at a glance: module card = `EDIT_L0`,
-  section / ENV / WRAPPER / arg block cards = `EDIT_L1`, field cards = `EDIT_L2`,
-  builder-step rows = `EDIT_L3` (each one step lighter than base panel).
+- **Bordered cards with the title inside** —
+  `editor_card(ui, cache, fill, title, actions, add) -> RowAction` draws a 1px `theme::BORDER`
+  frame and renders `theme::section_label(title)` as the **first widget inside the frame's
+  inner margin**, then 4px, then the body. *Why not a fieldset/legend notch:* the border
+  stays a plain continuous stroke — the title is simply the first row inside it, which is
+  cheaper and doesn't fight egui's layout. Every block header ("UI Sections", "ENV_VARS",
+  "GAME_ENV_VARS", "WRAPPERS", "GAME_LAUNCH_ARGS") is the title of the card that *contains*
+  its entries, rather than a label floating above the box. An empty `title` skips the
+  header row. `actions: Option<(idx, len)>` puts the `[↑][↓][🗑]` cluster on the title row.
+- **Nesting shades** — `editor_card`'s `fill` takes a per-level shade from the
+  `theme::EDIT_L0..L3` ramp so the hierarchy reads at a glance: module card and the four
+  output-block cards = `EDIT_L0`, section / ENV-var / wrapper / arg entry cards = `EDIT_L1`,
+  field cards = `EDIT_L2`, builder-step cards = `EDIT_L3` (each one step lighter than base
+  panel). *Why keep the shades on top of the borders:* ritz nests four levels deep
+  (module → block → section/field → builder row); the border alone doesn't say *how deep*.
+- **Fixed column layout** — editor rows reuse the fixed-column idiom `render_field` uses
+  for normal module controls (pad the cursor out to a constant x, then let the control take
+  the remainder). `editor_row_label(ui, label, reserve)` draws the label, pads to
+  `EDITOR_LABEL_W` (96px — `render_field`'s 260px reserve at editor scale) and returns the
+  control width from the pure `editor_control_width(remaining, reserve)`, so every textbox
+  in a card starts and ends at the same x instead of each sizing to its leftover space.
+- **Row alignment** — `row_actions` pushes itself to the row's right edge and then
+  allocates exactly `ACTION_COL_W`, so section, field and builder rows share one right edge
+  and one vertical center. Cards nest, so a deeper card's edge is inset by its parents'
+  margins — that inset is the hierarchy, not misalignment.
+- **Icon centering** — all icon affordances go through `icon_button(ui, cache, icon, label,
+  style, enabled)`, which reserves a fixed square cell and positions the glyph via
+  `crate::icon_center::IconCenterCache` (measured `Galley::mesh_bounds` ink box, cached per
+  glyph+size+family). *Why:* `Align2::CENTER_CENTER` centers a glyph's *layout* box —
+  identical line height for every glyph, advance width including side bearings — so a gear
+  and a trash can look centered by different amounts and a row of icons reads ragged.
+  Every call site must anchor `Align2::LEFT_TOP`; the cache already returns a corrected
+  top-left, and re-centering would double-correct.
 - **Labels & placeholder color** — every editor box has a leading `field_label` ("Section",
   "Name", "Variable", "Description", "Requires", "Value", …) and its placeholder is a gray
   `gray_hint` (`theme::FAINT`) while entered text stays the normal foreground. `requires_edit`

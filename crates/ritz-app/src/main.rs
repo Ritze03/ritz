@@ -16,6 +16,7 @@ mod backends;
 mod context;
 mod fonts;
 mod gui;
+mod icon_center;
 mod image;
 mod hooks;
 mod notify;

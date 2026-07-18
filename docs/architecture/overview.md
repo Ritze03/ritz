@@ -109,6 +109,7 @@ behaviour. The escape hatch for logic JSON can't express is a named
 | `crates/ritz-app/src/backends/` | Runtime backends: `Backend` trait, `registry`, `active`; `lsfg.rs`, `hypr_monctl.rs`. |
 | `crates/ritz-app/src/resources.rs` | Embedded assets; `bootstrap` copies them into the config dir on startup. |
 | `crates/ritz-app/src/theme.rs` | "Graphite" theme tokens + egui style — single source of colour truth. |
+| `crates/ritz-app/src/icon_center.rs` | `IconCenterCache` — measured ink-box centering for icon glyphs (`Galley::mesh_bounds`), so icon rows don't read ragged. |
 | `crates/ritz-core/src/schema.rs` | The `Extension` manifest schema: fields, builders, env/wrapper/arg specs. |
 | `crates/ritz-core/src/extension.rs` | Discovery, loading, validation, dir-merge (`discover`, `load_all`, `validate`). |
 | `crates/ritz-core/src/condition.rs` | The `Requires` grammar parser + evaluator (`parse`, `eval_opt`). |
