@@ -199,20 +199,44 @@ central panel is a full editor for the module's *manifest* (not its config value
   `GuiApp::ensure_draft`. A `ModuleDraft` holds the module `id`, its `manifest` path, an
   `editable` flag, the `Extension` (minus UI sections), the UI `sections` as an ordered
   `Vec<(name, fields)>` (folded back via `ModuleDraft::snapshot`), a `baseline` JSON value
-  (the on-disk manifest) for the `dirty()` check, a `baseline_vars` set, and a
-  `name_error` placeholder (Phase 3 uniqueness). *Why sections live in a `Vec`, not the
+  (the on-disk manifest) for the `dirty()` check, a `baseline_vars` set, a `name_error`
+  (on-disk-identity collision, feeds the Save gate), and a `PendingIdentity` (staged
+  Author/Name/Variable edits) + its `identity_error`. *Why sections live in a `Vec`, not the
   `IndexMap`:* reorder/rename/remove become plain `Vec` ops with no mutable-key problem.
 - **Editability** — a module is editable only when its manifest is *not* one of the
   bundled sets (`GuiApp::module_editability` checks the `default/` / `built-in/` rel-dir
   roots; those are bootstrapped into the user config dir but stay inspect-only until
   forked). Bundled modules render the same widgets **disabled**, Save shows a
   "Fork to edit" tooltip.
-- **Locked fields** — Author / Name / Version are read-only (rename of an *existing*
-  module needs config migration, stage 2b); an *existing* field's `Variable` (present in
-  `baseline_vars`) is read-only, a *newly-added* field's `Variable` is editable (no config
-  to orphan yet). `ModuleDraft::name_error` is refreshed live each frame
-  (`GuiApp::refresh_draft_name_error`, Version-blind collision excluding self by manifest
-  path) and feeds the Save gate — it stays `None` while Author/Name are locked.
+- **Staged identity edits vs Save** (Phase 3 stage 2b) — for an editable module, Author,
+  Name and every *existing* field's `Variable` are editable, but their edits go into a
+  separate `PendingIdentity` (`identity.author` / `identity.name` /
+  `identity.var_edits[current-name]`), **never** `ext.meta` or `field.variable`. Because
+  `ModuleDraft::snapshot` reads only `ext`/`sections`, identity edits never mark the draft
+  `dirty()`, never enable Save, and never hold the config-autosave interlock — they commit
+  *only* through the explicit **Rename** action. A *newly-added* field's `Variable` is still
+  edited directly (no config to orphan). Version stays fixed. `ModuleDraft::name_error`
+  (on-disk identity, `GuiApp::refresh_draft_name_error`) feeds the Save gate and stays
+  `None` for an existing module; the *pending* identity's validity is a separate
+  `identity_error` (`GuiApp::refresh_identity_state` → `ModuleDraft::compute_identity_error`).
+- **Rename / identity migration** (Phase 3 stage 2b, `GuiApp::perform_rename`) — a **Rename**
+  header button, enabled only when `has_pending_identity() && identity_error.is_none()`.
+  `identity_error` rejects an empty/colliding (Author, Name) (`name_collides`, Version-blind,
+  self excluded by path) and any bad var rename via the pure `validate_var_renames`: an
+  empty target, a **chained** rename (a new name equal to another live variable — would
+  strand config, do them one at a time), or two vars renamed to the same name. On commit,
+  in **exactly** this order: (1) compute `from` = on-disk `(Author,Name)`, `to` = new pair,
+  `var_rename` = changed existing-field vars; (2) **scope sweep FIRST** —
+  `config::migrate_renamed_module` moves stored config across every scope; on error, abort
+  **without** touching the manifest; (3) build the new manifest from `snapshot()` — apply
+  the new Author/Name and rewrite in-module references via `schema::apply_var_renames`
+  (each `{old}` interpolation token → `{new}`, each exact `old` identifier in a `Requires`
+  → `new`, plus each field's own `Variable`; exact-token match so `old_thing` / `global:old`
+  survive); (4) write the manifest **LAST, in place** (file never renamed; `id()` comes from
+  JSON meta) via `config::write_atomic`. *Why this order:* the sweep is idempotent and the
+  manifest is written last, so a crash between (2) and (4) leaves the manifest on the OLD
+  identity — re-pressing Rename re-runs cleanly (already-moved scopes no-op). No WAL/journal.
+  Dropped vars reuse the `carryover_report` banner; the editor reopens on the new `id`.
 - **Fork / Create / Delete** (Phase 3 stage 2a) — the editor header carries a **Fork**
   button (on *any* module, bundled or user) and a **Delete** button (only when
   `editable`); the module-list header carries **+ New**, and the module detail view offers

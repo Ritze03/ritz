@@ -75,6 +75,150 @@ impl Extension {
     }
 }
 
+/// Rewrite every in-module reference to a renamed variable, in place, for a
+/// module identity migration (Rename). For each `(old, new)` in `renames`:
+///
+/// - each field's own `Variable` equal to `old` becomes `new`;
+/// - every `{old}` interpolation token in a template string (env-var names,
+///   builder `Value`s, wrapper `CommandSyntax`, arg `Value`s) becomes `{new}`,
+///   preserving `{{`/`}}` escapes;
+/// - every bare `old` identifier in a `Requires` expression becomes `new`.
+///
+/// Matching is **exact-token**, mirroring the two consumers that read these
+/// strings ([`crate::variables::Variables::interpolate`] and the
+/// [`crate::condition`] tokenizer), so a variable that merely *contains* the old
+/// name as a substring — `old_thing`, or a `global:old` reference — is left
+/// untouched. `renames` keys are the pre-rename names; callers reject chained
+/// renames (a new name equal to another live variable) so applying every entry
+/// at once is order-independent.
+pub fn apply_var_renames(ext: &mut Extension, renames: &IndexMap<String, String>) {
+    if renames.is_empty() {
+        return;
+    }
+    for fields in ext.ui.values_mut() {
+        for f in fields.iter_mut() {
+            if let Some(new) = renames.get(&f.variable) {
+                f.variable = new.clone();
+            }
+            rewrite_requires(&mut f.requires, renames);
+        }
+    }
+    for e in ext.env_vars.iter_mut().chain(ext.game_env_vars.iter_mut()) {
+        rewrite_template(&mut e.name, renames);
+        rewrite_requires(&mut e.requires, renames);
+        for b in e.builder.iter_mut() {
+            rewrite_requires(&mut b.requires, renames);
+            if let Some(v) = b.value.as_mut() {
+                rewrite_template(v, renames);
+            }
+        }
+    }
+    for w in ext.wrappers.iter_mut() {
+        rewrite_template(&mut w.command_syntax, renames);
+        rewrite_requires(&mut w.requires, renames);
+        for b in w.builder.iter_mut() {
+            rewrite_requires(&mut b.requires, renames);
+            rewrite_template(&mut b.value, renames);
+        }
+    }
+    for a in ext.game_launch_args.iter_mut() {
+        rewrite_requires(&mut a.requires, renames);
+        rewrite_template(&mut a.value, renames);
+    }
+}
+
+fn rewrite_requires(r: &mut Option<String>, renames: &IndexMap<String, String>) {
+    if let Some(s) = r.as_mut() {
+        *s = rewrite_identifiers(s, renames);
+    }
+}
+
+/// True for the characters that make up a `Requires` identifier (mirrors
+/// `condition::is_ident_char`: alphanumerics, `_`, and `:` for `global:` refs).
+fn is_ident_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == ':'
+}
+
+/// Replace each maximal identifier run equal to a `renames` key with its value,
+/// leaving every non-identifier character (and `AND`/`OR`/`NOT`/substring names)
+/// verbatim.
+fn rewrite_identifiers(s: &str, renames: &IndexMap<String, String>) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if is_ident_char(chars[i]) {
+            let start = i;
+            while i < chars.len() && is_ident_char(chars[i]) {
+                i += 1;
+            }
+            let word: String = chars[start..i].iter().collect();
+            match renames.get(&word) {
+                Some(new) => out.push_str(new),
+                None => out.push_str(&word),
+            }
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Rewrite `{old}` interpolation tokens to `{new}` in a template string,
+/// mirroring [`crate::variables::Variables::interpolate`]'s tokenizer: `{{`/`}}`
+/// are literal-brace escapes and pass through untouched, an unterminated `{`
+/// passes through, and only a real `{...}` whose trimmed contents equal a key is
+/// rewritten (other tokens are re-emitted exactly).
+fn rewrite_template(s: &mut String, renames: &IndexMap<String, String>) {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '{' if chars.get(i + 1) == Some(&'{') => {
+                out.push_str("{{");
+                i += 2;
+            }
+            '}' if chars.get(i + 1) == Some(&'}') => {
+                out.push_str("}}");
+                i += 2;
+            }
+            '{' => {
+                let start = i + 1;
+                let mut j = start;
+                while j < chars.len() && chars[j] != '}' {
+                    j += 1;
+                }
+                if j < chars.len() {
+                    let inner: String = chars[start..j].iter().collect();
+                    match renames.get(inner.trim()) {
+                        Some(new) => {
+                            out.push('{');
+                            out.push_str(new);
+                            out.push('}');
+                        }
+                        None => {
+                            out.push('{');
+                            out.push_str(&inner);
+                            out.push('}');
+                        }
+                    }
+                    i = j + 1;
+                } else {
+                    out.push('{');
+                    i += 1;
+                }
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    *s = out;
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionMeta {
     #[serde(rename = "Name")]
@@ -289,6 +433,45 @@ mod tests {
         let exit = hooks.post_exit.unwrap();
         assert_eq!(exit.script(), "exit.sh");
         assert!(!exit.background());
+    }
+
+    #[test]
+    fn apply_var_renames_rewrites_exact_references_only() {
+        // A module referencing `old` in a builder Value token, a Requires, and a
+        // field Variable — plus a similarly-named `old_thing` that must survive.
+        let mut ext: Extension = serde_json::from_value(serde_json::json!({
+            "Extension": { "Name": "M", "Author": "Ritze", "Version": "1.0" },
+            "UI": { "S": [
+                { "Type": "toggle", "Variable": "old" },
+                { "Type": "toggle", "Variable": "old_thing" },
+                { "Type": "string", "Variable": "dep", "Requires": "old AND old_thing" }
+            ]},
+            "ENV_VARS": [
+                { "Name": "MY_{old}", "Builder": [
+                    { "Type": "set", "Value": "x={old} y={old_thing} z={{old}}", "Requires": "old" }
+                ]}
+            ]
+        }))
+        .unwrap();
+
+        let mut renames = IndexMap::new();
+        renames.insert("old".to_string(), "new".to_string());
+        apply_var_renames(&mut ext, &renames);
+
+        let fields: Vec<&UiField> = ext.fields().collect();
+        // Exact field Variable renamed; the substring-sharing one untouched.
+        assert_eq!(fields[0].variable, "new");
+        assert_eq!(fields[1].variable, "old_thing");
+        // Requires: exact identifier rewritten, substring left alone.
+        assert_eq!(fields[2].requires.as_deref(), Some("new AND old_thing"));
+        // Env-var name token + builder Value token rewritten; `{old_thing}` and
+        // the `{{old}}` escape preserved; builder Requires rewritten.
+        assert_eq!(ext.env_vars[0].name, "MY_{new}");
+        assert_eq!(
+            ext.env_vars[0].builder[0].value.as_deref(),
+            Some("x={new} y={old_thing} z={{old}}")
+        );
+        assert_eq!(ext.env_vars[0].builder[0].requires.as_deref(), Some("new"));
     }
 
     #[test]

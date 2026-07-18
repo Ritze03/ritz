@@ -17,9 +17,10 @@ use ritz_core::config::{self as core_config, AuthorsMap, GameConfig, GeneralConf
 use ritz_core::extension::{self as core_extension, ExtensionLoadError};
 use ritz_core::resolve::{self, Provenance, Resolution};
 use ritz_core::schema::{
-    ArgSpec, EnvBuilderEntry, EnvOp, EnvVarSpec, Extension, FieldType, OptionsSpec, UiField,
-    WrapperBuilderEntry, WrapperSpec,
+    apply_var_renames, ArgSpec, EnvBuilderEntry, EnvOp, EnvVarSpec, Extension, FieldType,
+    OptionsSpec, UiField, WrapperBuilderEntry, WrapperSpec,
 };
+use indexmap::IndexMap;
 use serde_json::{json, Value};
 
 use crate::context::{self, chain_would_have_cycle, collect_parent_chain, collect_parent_presets, merge_modules, AppContext};
@@ -225,9 +226,33 @@ struct ModuleDraft {
     /// is an *existing* field (rename would orphan config → read-only); a field
     /// whose variable is absent is *newly added* → its `Variable` is editable.
     baseline_vars: std::collections::HashSet<String>,
-    /// Name-collision message. Always `None` in Phase 2 (uniqueness lands in
-    /// Phase 3); wired into the Save gate so Phase 3 only needs to fill it.
+    /// Name-collision message for the module's **on-disk** identity, fed into the
+    /// Save gate. For an existing editable module the on-disk Author/Name never
+    /// collide with themselves (excluded by path), so this stays `None`; identity
+    /// edits are validated separately via [`ModuleDraft::identity_error`].
     name_error: Option<String>,
+    /// Staged identity change (Author / Name / existing-field `Variable`). Held
+    /// **out of** [`ModuleDraft::snapshot`] so editing it never marks the draft
+    /// dirty and never travels the normal Save path — it is committed only through
+    /// the explicit Rename action.
+    identity: PendingIdentity,
+    /// Validity of the pending identity change, recomputed each frame by
+    /// [`GuiApp::refresh_identity_state`]. `Some(msg)` = there IS a pending change
+    /// but it cannot be committed (empty/colliding name, or a bad var rename);
+    /// `None` = either no pending change or a committable one.
+    identity_error: Option<String>,
+}
+
+/// Staged (Author, Name, per-variable) identity edits for the open module,
+/// committed only by the Rename action. Seeded from the on-disk identity when the
+/// draft is (re)built; `var_edits` is keyed by each **existing** field's current
+/// (on-disk) `Variable` — the stable rename key — with the value being the edited
+/// name buffer.
+#[derive(Clone, Default)]
+struct PendingIdentity {
+    author: String,
+    name: String,
+    var_edits: IndexMap<String, String>,
 }
 
 impl ModuleDraft {
@@ -259,6 +284,93 @@ impl ModuleDraft {
                 self.name_error.is_some(),
             )
     }
+
+    /// Every current field `Variable` in declaration order (baseline + newly
+    /// added). Used to detect chained/colliding var renames.
+    fn current_field_vars(&self) -> Vec<String> {
+        self.sections
+            .iter()
+            .flat_map(|(_, fields)| fields.iter().map(|f| f.variable.clone()))
+            .collect()
+    }
+
+    /// The subset of `identity.var_edits` that actually renames an **existing**
+    /// (still-present) field's variable, as `old → new`. Removed fields and
+    /// unchanged names are excluded; an edited-to-empty name is kept (so the
+    /// validator can flag it).
+    fn changed_var_renames(&self) -> IndexMap<String, String> {
+        let mut out = IndexMap::new();
+        for (_, fields) in &self.sections {
+            for f in fields {
+                if !self.baseline_vars.contains(&f.variable) {
+                    continue;
+                }
+                if let Some(new) = self.identity.var_edits.get(&f.variable) {
+                    let new = new.trim();
+                    if new != f.variable {
+                        out.insert(f.variable.clone(), new.to_string());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// True when the staged identity differs from the on-disk identity.
+    fn has_pending_identity(&self) -> bool {
+        self.identity.author != self.ext.meta.author
+            || self.identity.name != self.ext.meta.name
+            || !self.changed_var_renames().is_empty()
+    }
+
+    /// Reason the pending identity change cannot be committed, or `None` when
+    /// there is no pending change or it is committable. `name_collides` is passed
+    /// in because the collision check needs the full loaded set (owned by
+    /// [`GuiApp`]).
+    fn compute_identity_error(&self, name_collides: bool) -> Option<String> {
+        if !self.has_pending_identity() {
+            return None;
+        }
+        if self.identity.author.trim().is_empty() || self.identity.name.trim().is_empty() {
+            return Some("Author and Name must not be empty".to_string());
+        }
+        if name_collides {
+            return Some("Author + Name already in use".to_string());
+        }
+        validate_var_renames(&self.current_field_vars(), &self.changed_var_renames()).err()
+    }
+}
+
+/// Reject an invalid set of `old → new` variable renames (pure, unit-tested):
+///
+/// - an empty target name;
+/// - a **chained** rename — a new name equal to some *other* field's current
+///   variable — which would strand config (do the renames one at a time);
+/// - two renames producing the *same* new name.
+///
+/// `current_vars` is every field's pre-rename variable. `Ok(())` = safe to apply.
+fn validate_var_renames(
+    current_vars: &[String],
+    renames: &IndexMap<String, String>,
+) -> std::result::Result<(), String> {
+    let mut seen_new: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (old, new) in renames {
+        let new = new.trim();
+        if new.is_empty() {
+            return Err(format!("Variable \"{old}\" cannot be renamed to an empty name"));
+        }
+        // Chained rename / collision: the new name is already some other field's
+        // live variable (a field renamed A→B while B still exists, or a swap).
+        if current_vars.iter().any(|v| v == new && v != old) {
+            return Err(format!(
+                "Renaming \"{old}\" to \"{new}\" collides with an existing variable \u{2014} rename that one separately"
+            ));
+        }
+        if !seen_new.insert(new) {
+            return Err(format!("Two variables renamed to the same name \"{new}\""));
+        }
+    }
+    Ok(())
 }
 
 /// Pure Save-gate predicate (factored out for testing): Save is allowed only when
@@ -387,13 +499,15 @@ enum Deferred {
     ArgAdd,
 }
 
-/// What the editor header requested this frame (Save / Discard / Fork / Delete).
+/// What the editor header requested this frame (Save / Discard / Fork / Delete /
+/// Rename).
 enum TopAction {
     None,
     Save,
     Discard,
     Fork,
     Delete,
+    Rename,
 }
 
 #[derive(Clone)]
@@ -704,7 +818,7 @@ impl GuiApp {
             .module_editability(id)
             .unwrap_or_else(|| (PathBuf::new(), false));
         let baseline = serde_json::to_value(&spec).unwrap_or(Value::Null);
-        let baseline_vars = spec
+        let baseline_vars: std::collections::HashSet<String> = spec
             .ui
             .values()
             .flatten()
@@ -714,6 +828,17 @@ impl GuiApp {
             spec.ui.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         let mut ext = spec;
         ext.ui.clear(); // authoritative UI lives in `sections`
+        // Seed the staged identity from the on-disk identity: Author/Name buffers
+        // and one var-edit buffer per existing field variable (keyed by its
+        // current name), so an unedited draft has no pending change.
+        let identity = PendingIdentity {
+            author: ext.meta.author.clone(),
+            name: ext.meta.name.clone(),
+            var_edits: baseline_vars
+                .iter()
+                .map(|v: &String| (v.clone(), v.clone()))
+                .collect(),
+        };
         self.module_draft = Some(ModuleDraft {
             id: id.to_string(),
             manifest,
@@ -723,6 +848,8 @@ impl GuiApp {
             baseline,
             baseline_vars,
             name_error: None,
+            identity,
+            identity_error: None,
         });
     }
 
@@ -776,6 +903,25 @@ impl GuiApp {
         });
         if let (Some(collides), Some(draft)) = (flag, self.module_draft.as_mut()) {
             draft.name_error = collides.then(|| "Author + Name already in use".to_string());
+        }
+    }
+
+    /// Recompute the open draft's pending-identity validity. The (Author, Name)
+    /// collision check is Version-blind and excludes the module itself by manifest
+    /// path — same rule as [`refresh_draft_name_error`], but run against the
+    /// *pending* (edited) Author/Name rather than the on-disk pair.
+    fn refresh_identity_state(&mut self) {
+        let collides = self.module_draft.as_ref().map(|d| {
+            name_collides(
+                &self.all_specs,
+                &self.all_manifests,
+                d.identity.author.trim(),
+                d.identity.name.trim(),
+                Some(d.manifest.as_path()),
+            )
+        });
+        if let (Some(collides), Some(draft)) = (collides, self.module_draft.as_mut()) {
+            draft.identity_error = draft.compute_identity_error(collides);
         }
     }
 
@@ -850,6 +996,86 @@ impl GuiApp {
         }
 
         let new_id = ext.id();
+        self.module_draft = None;
+        self.reload_extensions();
+        self.reload_configs();
+        self.nav_sel = NavSel::ModuleEditor(new_id);
+    }
+
+    /// Commit the staged identity change (Author / Name / existing-field
+    /// `Variable`) for the open editable module. Safety-critical **ordering**:
+    ///
+    /// 1. compute `from` = current on-disk identity, `to` = new identity, and the
+    ///    `old→new` var renames from the changed existing fields;
+    /// 2. **scope sweep FIRST** — [`migrate_renamed_module`] moves stored config
+    ///    across every scope; on error, abort **without** touching the manifest;
+    /// 3. build the new manifest from the draft snapshot: apply the new
+    ///    Author/Name and rewrite in-module `{var}`/`Requires` references + field
+    ///    `Variable`s via [`apply_var_renames`];
+    /// 4. write the manifest **LAST, in place** (file never renamed; `id()` comes
+    ///    from JSON meta) — only after the sweep succeeded.
+    ///
+    /// Because the sweep is idempotent and the manifest is written last, a crash
+    /// between steps 2 and 4 leaves the manifest on the OLD identity, so
+    /// re-pressing Rename re-runs cleanly (already-moved scopes no-op).
+    fn perform_rename(&mut self) {
+        // Snapshot everything we need out of the draft so the immutable borrow is
+        // released before we touch `self.paths` / reload.
+        let Some((mut ext, manifest, old_author, old_name, new_author, new_name, var_rename)) = self
+            .module_draft
+            .as_ref()
+            .filter(|d| d.editable && d.has_pending_identity() && d.identity_error.is_none())
+            .map(|d| {
+                (
+                    d.snapshot(),
+                    d.manifest.clone(),
+                    d.ext.meta.author.clone(),
+                    d.ext.meta.name.clone(),
+                    d.identity.author.trim().to_string(),
+                    d.identity.name.trim().to_string(),
+                    d.changed_var_renames(),
+                )
+            })
+        else {
+            return;
+        };
+
+        self.carryover_report = None;
+        let from = (old_author.as_str(), old_name.as_str());
+        let to = (new_author.as_str(), new_name.as_str());
+
+        // Step 2: scope sweep FIRST. On error, abort before the manifest is touched.
+        let report =
+            match core_config::migrate_renamed_module(&self.paths, from, to, &var_rename) {
+                Ok(r) => r,
+                Err(e) => {
+                    self.carryover_report =
+                        Some(format!("Rename aborted: config migration failed: {e}"));
+                    return;
+                }
+            };
+
+        // Step 3: build the new manifest (identity + reference rewrite).
+        ext.meta.author = new_author;
+        ext.meta.name = new_name;
+        apply_var_renames(&mut ext, &var_rename);
+
+        // Step 4: write the manifest LAST, in place, only after the sweep succeeded.
+        let json = match serde_json::to_string_pretty(&ext) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("ritz: failed to serialize renamed module: {e:#}");
+                return;
+            }
+        };
+        if let Err(e) = core_config::write_atomic(&manifest, json.as_bytes()) {
+            eprintln!("ritz: failed to write renamed module: {e:#}");
+            return;
+        }
+
+        // Step 5: report dropped vars, reload, keep the editor open on the new id.
+        let new_id = ext.id();
+        self.set_carryover_report(report);
         self.module_draft = None;
         self.reload_extensions();
         self.reload_configs();
@@ -985,6 +1211,7 @@ impl GuiApp {
         if let NavSel::ModuleEditor(id) = self.nav_sel.clone() {
             self.ensure_draft(&id);
             self.refresh_draft_name_error();
+            self.refresh_identity_state();
         }
 
         let edit_resolution = self.resolve_for_editing();
@@ -1588,6 +1815,8 @@ impl GuiApp {
             let sections_unique = draft.sections_unique();
             let req_ok = all_requires_parse(&snap);
             let save_on = draft.save_enabled();
+            let has_identity = draft.has_pending_identity();
+            let identity_err = draft.identity_error.clone();
 
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -1621,6 +1850,23 @@ impl GuiApp {
                         .clicked()
                     {
                         action = TopAction::Fork;
+                    }
+                    // Rename / Apply identity changes: commits the staged Author /
+                    // Name / Variable edits via the scope sweep + manifest rewrite.
+                    // Enabled only for an editable module with a *valid* pending
+                    // identity change (never the normal Save/autosave path).
+                    if editable {
+                        let rename = ui
+                            .add_enabled(
+                                has_identity && identity_err.is_none(),
+                                theme::secondary_button("Rename"),
+                            )
+                            .on_hover_text(
+                                "Apply the staged Author / Name / Variable changes \u{2014} migrates saved settings across all scopes",
+                            );
+                        if rename.clicked() {
+                            action = TopAction::Rename;
+                        }
                     }
                     if editable
                         && ui
@@ -1676,6 +1922,27 @@ impl GuiApp {
                         .small(),
                 );
             }
+            // Pending-identity feedback: why Rename is blocked, or a ready prompt.
+            if editable && has_identity {
+                match &identity_err {
+                    Some(reason) => {
+                        ui.label(
+                            egui::RichText::new(format!("Cannot rename: {reason}"))
+                                .color(theme::COL_GLOBAL)
+                                .small(),
+                        );
+                    }
+                    None => {
+                        ui.label(
+                            egui::RichText::new(
+                                "Pending identity change \u{2014} press Rename to migrate saved settings and apply it.",
+                            )
+                            .color(theme::COL_PROFILE)
+                            .small(),
+                        );
+                    }
+                }
+            }
             ui.add_space(10.0);
             ui.separator();
 
@@ -1702,6 +1969,7 @@ impl GuiApp {
             TopAction::Save => self.save_module(),
             TopAction::Discard => self.discard_module(),
             TopAction::Fork => self.open_fork_dialog(id),
+            TopAction::Rename => self.perform_rename(),
             TopAction::Delete => {
                 if let Some(d) = &self.module_draft {
                     let label = format!("{}::{}", d.ext.meta.author, d.ext.meta.name);
@@ -1846,6 +2114,7 @@ fn render_editor_body(ui: &mut egui::Ui, draft: &mut ModuleDraft, deferred: &mut
         ext,
         sections,
         baseline_vars,
+        identity,
         ..
     } = draft;
 
@@ -1853,17 +2122,35 @@ fn render_editor_body(ui: &mut egui::Ui, draft: &mut ModuleDraft, deferred: &mut
     ui.add_space(6.0);
     editor_card(ui, |ui| {
         ui.label(egui::RichText::new("Module").color(theme::TEXT).strong());
+        // Author + Name are STAGED identity edits: they mutate `identity`, never
+        // `ext.meta`, so they don't touch the draft snapshot / Save gate and are
+        // committed only through the Rename button.
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("Author").color(theme::DIM).small());
+                ui.add(
+                    egui::TextEdit::singleline(&mut identity.author).desired_width(220.0),
+                );
+            });
+            ui.add_space(8.0);
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("Name").color(theme::DIM).small());
+                ui.add(egui::TextEdit::singleline(&mut identity.name).desired_width(220.0));
+            });
+        });
+        ui.label(
+            egui::RichText::new(
+                "Author & Name are applied via Rename (migrates saved settings). Version is fixed.",
+            )
+            .color(theme::FAINT)
+            .small(),
+        );
+        ui.add_space(6.0);
         ui.label(egui::RichText::new("Description").color(theme::DIM).small());
         opt_text_edit(ui, &mut ext.meta.description, "Description");
         ui.add_space(4.0);
         ui.label(egui::RichText::new("Backend (advanced, optional)").color(theme::DIM).small());
         opt_text_edit(ui, &mut ext.backend, "Backend");
-        ui.add_space(4.0);
-        ui.label(
-            egui::RichText::new("Author, Name and Version are locked in this release.")
-                .color(theme::FAINT)
-                .small(),
-        );
     });
 
     // ── UI sections ─────────────────────────────────────────────────────────
@@ -1888,7 +2175,16 @@ fn render_editor_body(ui: &mut egui::Ui, draft: &mut ModuleDraft, deferred: &mut
             ui.add_space(4.0);
             let f_len = fields.len();
             for (fi, field) in fields.iter_mut().enumerate() {
-                render_field_editor(ui, field, si, fi, f_len, baseline_vars, deferred);
+                render_field_editor(
+                    ui,
+                    field,
+                    si,
+                    fi,
+                    f_len,
+                    baseline_vars,
+                    &mut identity.var_edits,
+                    deferred,
+                );
             }
             if add_button(ui, "Add field").clicked() {
                 deferred.push(Deferred::FieldAdd(si));
@@ -1904,8 +2200,10 @@ fn render_editor_body(ui: &mut egui::Ui, draft: &mut ModuleDraft, deferred: &mut
 }
 
 /// One editable UI-field card. An *existing* field's `Variable` (present on disk)
-/// is read-only — renaming it would orphan config (Phase 3's migration). A newly
-/// added field's `Variable` is editable at creation.
+/// is renamed as a **staged identity edit** — the buffer lives in
+/// `var_edits[current-name]`, so `field.variable` itself is untouched (no draft
+/// dirtiness) until the Rename action migrates config and rewrites the manifest.
+/// A newly added field's `Variable` is edited directly (no config to migrate).
 fn render_field_editor(
     ui: &mut egui::Ui,
     field: &mut UiField,
@@ -1913,6 +2211,7 @@ fn render_field_editor(
     fi: usize,
     f_len: usize,
     baseline_vars: &std::collections::HashSet<String>,
+    var_edits: &mut IndexMap<String, String>,
     deferred: &mut Vec<Deferred>,
 ) {
     editor_card(ui, |ui| {
@@ -1930,12 +2229,21 @@ fn render_field_editor(
             }
         });
 
-        // Variable — locked if it existed on disk, editable if newly added.
+        // Variable — for an existing (on-disk) field this edits the STAGED rename
+        // buffer (committed via Rename); a newly added field edits it directly.
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Variable").color(theme::DIM).small());
             if baseline_vars.contains(&field.variable) {
-                ui.label(egui::RichText::new(&field.variable).color(theme::FAINT).monospace());
-                ui.label(egui::RichText::new("(locked)").color(theme::FAINT).small());
+                let key = field.variable.clone();
+                let buf = var_edits.entry(key.clone()).or_insert_with(|| key.clone());
+                ui.add(egui::TextEdit::singleline(buf).desired_width(200.0));
+                if buf.trim() != key {
+                    ui.label(
+                        egui::RichText::new("(rename pending)")
+                            .color(theme::COL_PROFILE)
+                            .small(),
+                    );
+                }
             } else {
                 ui.add(egui::TextEdit::singleline(&mut field.variable).desired_width(200.0));
             }
@@ -4948,7 +5256,7 @@ mod tests {
     fn draft_from(manifest: Value, editable: bool) -> ModuleDraft {
         let spec: Extension = serde_json::from_value(manifest).unwrap();
         let baseline = serde_json::to_value(&spec).unwrap();
-        let baseline_vars = spec
+        let baseline_vars: std::collections::HashSet<String> = spec
             .ui
             .values()
             .flatten()
@@ -4957,6 +5265,14 @@ mod tests {
         let sections = spec.ui.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         let mut ext = spec;
         ext.ui.clear();
+        let identity = PendingIdentity {
+            author: ext.meta.author.clone(),
+            name: ext.meta.name.clone(),
+            var_edits: baseline_vars
+                .iter()
+                .map(|v: &String| (v.clone(), v.clone()))
+                .collect(),
+        };
         ModuleDraft {
             id: ext.id(),
             manifest: PathBuf::from("/nonexistent/mod.json"),
@@ -4966,6 +5282,8 @@ mod tests {
             baseline,
             baseline_vars,
             name_error: None,
+            identity,
+            identity_error: None,
         }
     }
 
@@ -5043,6 +5361,52 @@ mod tests {
         assert!(draft.baseline_vars.contains("enabled"));
         // …while a brand-new variable is not, so its Variable stays editable.
         assert!(!draft.baseline_vars.contains("new_var"));
+    }
+
+    fn renames_of(pairs: &[(&str, &str)]) -> IndexMap<String, String> {
+        pairs.iter().map(|(o, n)| (o.to_string(), n.to_string())).collect()
+    }
+
+    #[test]
+    fn chained_rename_is_rejected_but_free_rename_is_accepted() {
+        let current = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        // Free rename to a fresh name → accepted.
+        assert!(validate_var_renames(&current, &renames_of(&[("a", "z")])).is_ok());
+        // Chained rename: a → b while b is still a live variable → rejected.
+        assert!(validate_var_renames(&current, &renames_of(&[("a", "b")])).is_err());
+        // Swap (a→b, b→a) is a chain in both directions → rejected.
+        assert!(validate_var_renames(&current, &renames_of(&[("a", "b"), ("b", "a")])).is_err());
+        // Two vars renamed to the same new name → rejected.
+        assert!(validate_var_renames(&current, &renames_of(&[("a", "x"), ("b", "x")])).is_err());
+        // Rename to empty → rejected.
+        assert!(validate_var_renames(&current, &renames_of(&[("a", "")])).is_err());
+        // No renames → trivially ok.
+        assert!(validate_var_renames(&current, &IndexMap::new()).is_ok());
+    }
+
+    #[test]
+    fn staged_identity_edits_do_not_touch_the_save_path() {
+        let mut draft = draft_from(sample_manifest(), true);
+        // No pending change on a fresh draft.
+        assert!(!draft.has_pending_identity());
+        // Staging an Author/Name/Variable change must NOT make the draft dirty or
+        // saveable — it travels the Rename path only, never Save/autosave.
+        draft.identity.author = "Someone".to_string();
+        draft.identity.name = "Renamed".to_string();
+        *draft.identity.var_edits.get_mut("enabled").unwrap() = "on".to_string();
+        assert!(draft.has_pending_identity());
+        assert!(!draft.dirty(), "identity edits must not dirty the snapshot");
+        assert!(!draft.save_enabled(), "identity edits must not enable Save");
+        assert!(!config_autosave_held(draft.dirty()), "identity edits must not hold autosave");
+        // The staged variable rename surfaces as an old→new entry…
+        assert_eq!(
+            draft.changed_var_renames(),
+            renames_of(&[("enabled", "on")])
+        );
+        // …and a non-colliding identity change is committable.
+        assert!(draft.compute_identity_error(false).is_none());
+        // A colliding (Author, Name) blocks it.
+        assert!(draft.compute_identity_error(true).is_some());
     }
 
     fn spec_named(author: &str, name: &str, version: &str) -> Extension {
