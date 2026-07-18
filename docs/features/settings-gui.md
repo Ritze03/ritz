@@ -205,11 +205,44 @@ central panel is a full editor for the module's *manifest* (not its config value
 - **Editability** — a module is editable only when its manifest is *not* one of the
   bundled sets (`GuiApp::module_editability` checks the `default/` / `built-in/` rel-dir
   roots; those are bootstrapped into the user config dir but stay inspect-only until
-  forked in Phase 3). Bundled modules render the same widgets **disabled**, Save shows a
+  forked). Bundled modules render the same widgets **disabled**, Save shows a
   "Fork to edit" tooltip.
-- **Locked fields** — Author / Name / Version are read-only (rename needs config
-  migration, Phase 3); an *existing* field's `Variable` (present in `baseline_vars`) is
-  read-only, a *newly-added* field's `Variable` is editable (no config to orphan yet).
+- **Locked fields** — Author / Name / Version are read-only (rename of an *existing*
+  module needs config migration, stage 2b); an *existing* field's `Variable` (present in
+  `baseline_vars`) is read-only, a *newly-added* field's `Variable` is editable (no config
+  to orphan yet). `ModuleDraft::name_error` is refreshed live each frame
+  (`GuiApp::refresh_draft_name_error`, Version-blind collision excluding self by manifest
+  path) and feeds the Save gate — it stays `None` while Author/Name are locked.
+- **Fork / Create / Delete** (Phase 3 stage 2a) — the editor header carries a **Fork**
+  button (on *any* module, bundled or user) and a **Delete** button (only when
+  `editable`); the module-list header carries **+ New**, and the module detail view offers
+  **Fork** next to **Inspect**. Fork/Create open `GuiApp::module_dialog`
+  (`ModuleDialog` — Author + Name, Fork adds a "Copy saved settings" checkbox), rendered by
+  `GuiApp::render_module_dialog` with live red/green uniqueness feedback
+  (`name_collides`, whole loaded set) and the confirm button disabled while colliding or
+  Name empty. On confirm:
+  - **Fork** (`GuiApp::perform_fork`) deep-copies the parent `Extension`, sets the new
+    Author/Name + `ForkedFrom = "<parentAuthor>::<parentName>"`, writes it to the user
+    extensions dir under `sanitize(Author)__sanitize(Name).json` (suffixed `-2`, `-3`, …
+    on slug clash — `unique_slug_path`/`uniquify_slug`) via `config::write_atomic`, and if
+    "Copy saved settings" is on calls `config::snapshot_config_to_fork`. It then reloads
+    and opens the fork in the editor (now an editable user module; the bundled parent is
+    untouched on disk).
+  - **Create** (`GuiApp::perform_create`) writes a minimal valid template (meta + one empty
+    `General` UI section, no builders) that passes `extension::validate`, then reloads and
+    opens it.
+  - **Delete** (`GuiApp::delete_module`, gated behind a `ConfirmAction::DeleteModule`
+    dialog with an "Also purge saved settings" checkbox, default OFF) removes the manifest
+    file; when purge is checked it runs `GuiApp::config_cleanup` after reload so the now
+    undeclared vars are swept across every scope. Bundled modules are never deletable.
+- **Dropped-var report** — a fork snapshot (and later rename) returns
+  `(scope-label, dropped-vars)` entries; `GuiApp::set_carryover_report` formats a non-empty
+  report into `GuiApp::carryover_report`, shown as a dismissible banner atop the editor.
+  (A clean copy carries everything, so this is usually empty.)
+- **Invalid-save reason** — when Save is greyed for a schema problem the editor shows the
+  reason: duplicate section names (checked via `ModuleDraft::sections_unique`, since they
+  collapse in the `IndexMap` before `validate` runs) or the `extension::validate` error
+  text (duplicate `Variable`, empty variable, …).
 - **Structural edits** are collected as path-addressed `Deferred` actions during render
   and applied by `apply_deferred` **after** the render loop, never mid-iteration. One
   reusable `row_actions` widget (`[↑][↓][🗑]`) returns a `RowAction` the caller turns into

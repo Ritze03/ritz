@@ -3,7 +3,7 @@
 //! game override) with reset-to-inherit, and previews the live launch command.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -46,6 +46,26 @@ enum ConfirmAction {
     ClearSettings,
     ReExportResources,
     ConfigCleanup,
+    /// Delete a user-authored module manifest. `label` is `Author::Name` for the
+    /// prompt; `manifest` is the file to remove.
+    DeleteModule { manifest: PathBuf, label: String },
+}
+
+/// The Fork / Create-new module dialog. Both share the same Author/Name form;
+/// Fork additionally copies the parent's saved settings and carries its lineage.
+struct ModuleDialog {
+    kind: DialogKind,
+    author: String,
+    name: String,
+    /// Fork only: snapshot the parent's stored config into the fork's namespace.
+    copy_settings: bool,
+}
+
+enum DialogKind {
+    /// Fork the module with this `Extension::id()`.
+    Fork { parent_id: String },
+    /// Create a brand-new module from an empty template.
+    Create,
 }
 
 /// What the user chose to do with the launch when the editor was opened from the
@@ -173,6 +193,15 @@ pub struct GuiApp {
     /// True when an in-memory config edit was withheld from disk because a module
     /// editor draft was dirty; flushed once the draft becomes clean.
     pending_config_write: bool,
+    /// The open Fork / Create-new module dialog, if any.
+    module_dialog: Option<ModuleDialog>,
+    /// "Also purge stored config" checkbox state for the pending Delete-module
+    /// confirmation.
+    delete_module_purge: bool,
+    /// Transient message summarising which stored settings a fork snapshot (or a
+    /// future rename) couldn't carry over. Shown near the module editor until
+    /// dismissed.
+    carryover_report: Option<String>,
 }
 
 /// In-memory editor state for one module manifest. `ext` carries every editable
@@ -245,6 +274,68 @@ fn config_autosave_held(editor_dirty: bool) -> bool {
     editor_dirty
 }
 
+/// True when `(author, name)` is already taken by a loaded module — **Version-blind**
+/// (compares Author+Name only, since config keys on those two). `exclude` skips the
+/// module being edited/forked, matched by manifest path so a module never collides
+/// with itself. `specs` and `manifests` are index-aligned.
+fn name_collides(
+    specs: &[Extension],
+    manifests: &[PathBuf],
+    author: &str,
+    name: &str,
+    exclude: Option<&Path>,
+) -> bool {
+    specs.iter().zip(manifests.iter()).any(|(s, m)| {
+        exclude != Some(m.as_path())
+            && s.meta.author == author
+            && s.meta.name == name
+    })
+}
+
+/// Turn a free-text Author/Name into a filesystem-safe slug component: ASCII
+/// alphanumerics kept (lowercased), everything else → `_`, collapsed edges
+/// trimmed. Empty input falls back to `module` so a filename always has a stem.
+fn sanitize_slug(s: &str) -> String {
+    let mapped: String = s
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .collect();
+    let trimmed = mapped.trim_matches('_');
+    if trimmed.is_empty() {
+        "module".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Given a slug `base` (no extension) and an `exists` predicate over candidate
+/// filenames, return the first free `"<base>.json"`, `"<base>-2.json"`,
+/// `"<base>-3.json"`, … Factored out (predicate injected) so it's unit-testable
+/// without touching the filesystem.
+fn uniquify_slug(base: &str, exists: impl Fn(&str) -> bool) -> String {
+    let first = format!("{base}.json");
+    if !exists(&first) {
+        return first;
+    }
+    let mut n = 2;
+    loop {
+        let candidate = format!("{base}-{n}.json");
+        if !exists(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// Build the write path for a new module in `dir`: `sanitize(author)__sanitize(name).json`,
+/// suffixed `-2`, `-3`, … if the file already exists (so a fork never clobbers an
+/// unrelated manifest that happens to slug-collide).
+fn unique_slug_path(dir: &Path, author: &str, name: &str) -> PathBuf {
+    let base = format!("{}__{}", sanitize_slug(author), sanitize_slug(name));
+    let fname = uniquify_slug(&base, |c| dir.join(c).exists());
+    dir.join(fname)
+}
+
 /// True if every `Requires` expression in the manifest parses (empty = ok).
 fn all_requires_parse(ext: &Extension) -> bool {
     let ok = |r: &Option<String>| {
@@ -296,11 +387,13 @@ enum Deferred {
     ArgAdd,
 }
 
-/// What the editor header requested this frame (Save / Discard buttons).
+/// What the editor header requested this frame (Save / Discard / Fork / Delete).
 enum TopAction {
     None,
     Save,
     Discard,
+    Fork,
+    Delete,
 }
 
 #[derive(Clone)]
@@ -377,6 +470,9 @@ impl GuiApp {
             logo: None,
             module_draft: None,
             pending_config_write: false,
+            module_dialog: None,
+            delete_module_purge: false,
+            carryover_report: None,
         };
         app.switch_game(appid, name);
         app.nav_name_buf = app.game_config.game.name.clone();
@@ -665,6 +761,175 @@ impl GuiApp {
         self.flush_config_writes_if_clean();
     }
 
+    /// Recompute the open draft's live name-collision flag (Version-blind, excluding
+    /// itself by manifest path). For an existing editable module Author/Name are
+    /// locked, so this stays `None`; the field is wired now for stage 2b's rename.
+    fn refresh_draft_name_error(&mut self) {
+        let flag = self.module_draft.as_ref().map(|d| {
+            name_collides(
+                &self.all_specs,
+                &self.all_manifests,
+                &d.ext.meta.author,
+                &d.ext.meta.name,
+                Some(d.manifest.as_path()),
+            )
+        });
+        if let (Some(collides), Some(draft)) = (flag, self.module_draft.as_mut()) {
+            draft.name_error = collides.then(|| "Author + Name already in use".to_string());
+        }
+    }
+
+    /// Open the Fork dialog seeded from the module `id` (its Author, and
+    /// "`<name>` (copy)" as the default fork name).
+    fn open_fork_dialog(&mut self, id: &str) {
+        let Some(spec) = self.all_specs.iter().find(|s| s.id() == id) else {
+            return;
+        };
+        let author = if spec.meta.author.is_empty() {
+            "Ritze".to_string()
+        } else {
+            spec.meta.author.clone()
+        };
+        let name = format!("{} (copy)", spec.meta.name);
+        self.module_dialog = Some(ModuleDialog {
+            kind: DialogKind::Fork { parent_id: id.to_string() },
+            author,
+            name,
+            copy_settings: true,
+        });
+    }
+
+    /// Open the Create-new-module dialog (empty template; no copy-settings option).
+    fn open_create_dialog(&mut self) {
+        self.module_dialog = Some(ModuleDialog {
+            kind: DialogKind::Create,
+            author: "Ritze".to_string(),
+            name: "New Module".to_string(),
+            copy_settings: false,
+        });
+    }
+
+    /// Deep-copy the parent module, retag it with the new Author/Name + `ForkedFrom`
+    /// lineage, write it to the user extensions dir under a unique slug, optionally
+    /// snapshot the parent's stored config into the fork's namespace, then reload
+    /// and open the fork in the editor.
+    fn perform_fork(&mut self, parent_id: &str, author: String, name: String, copy_settings: bool) {
+        self.carryover_report = None;
+        let Some(parent) = self.all_specs.iter().find(|s| s.id() == parent_id).cloned() else {
+            return;
+        };
+        let parent_author = parent.meta.author.clone();
+        let parent_name = parent.meta.name.clone();
+        let mut ext = parent;
+        ext.meta.author = author.clone();
+        ext.meta.name = name.clone();
+        ext.meta.forked_from = Some(format!("{parent_author}::{parent_name}"));
+
+        let path = unique_slug_path(&self.paths.user_extensions(), &author, &name);
+        let json = match serde_json::to_string_pretty(&ext) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("ritz: failed to serialize fork: {e:#}");
+                return;
+            }
+        };
+        if let Err(e) = core_config::write_atomic(&path, json.as_bytes()) {
+            eprintln!("ritz: failed to write fork: {e:#}");
+            return;
+        }
+
+        if copy_settings {
+            match core_config::snapshot_config_to_fork(
+                &self.paths,
+                (&parent_author, &parent_name),
+                (&author, &name),
+            ) {
+                Ok(report) => self.set_carryover_report(report),
+                Err(e) => eprintln!("ritz: fork config snapshot failed: {e:#}"),
+            }
+        }
+
+        let new_id = ext.id();
+        self.module_draft = None;
+        self.reload_extensions();
+        self.reload_configs();
+        self.nav_sel = NavSel::ModuleEditor(new_id);
+    }
+
+    /// Write a minimal valid template module (meta + one empty UI section) to the
+    /// user extensions dir, then reload and open it in the editor.
+    fn perform_create(&mut self, author: String, name: String) {
+        self.carryover_report = None;
+        let template = json!({
+            "Extension": { "Name": name, "Author": author, "Version": "1.0" },
+            "UI": { "General": [] }
+        });
+        let ext: Extension = match serde_json::from_value(template) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("ritz: failed to build template module: {e:#}");
+                return;
+            }
+        };
+        if let Err(e) = core_extension::validate(&ext) {
+            eprintln!("ritz: template module failed validation: {e:#}");
+            return;
+        }
+        let path = unique_slug_path(&self.paths.user_extensions(), &author, &name);
+        let json = match serde_json::to_string_pretty(&ext) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("ritz: failed to serialize template module: {e:#}");
+                return;
+            }
+        };
+        if let Err(e) = core_config::write_atomic(&path, json.as_bytes()) {
+            eprintln!("ritz: failed to write template module: {e:#}");
+            return;
+        }
+        let new_id = ext.id();
+        self.module_draft = None;
+        self.reload_extensions();
+        self.nav_sel = NavSel::ModuleEditor(new_id);
+    }
+
+    /// Delete a user-authored module's manifest file. When `purge` is set, also
+    /// sweep the now-undeclared config across every scope via [`config_cleanup`].
+    /// Leaves the module editor for the ambient game.
+    fn delete_module(&mut self, manifest: &Path, purge: bool) {
+        if let Err(e) = std::fs::remove_file(manifest) {
+            eprintln!("ritz: failed to delete module: {e:#}");
+            return;
+        }
+        self.module_draft = None;
+        self.reload_extensions();
+        if purge {
+            // The deleted module's vars are now undeclared, so cleanup removes
+            // exactly them (alongside any other stale values it normally prunes).
+            self.config_cleanup();
+        }
+        self.nav_sel = NavSel::Game(self.appid.clone());
+    }
+
+    /// Format a fork/rename dropped-var report into the transient carryover
+    /// message (cleared when empty — a clean copy carries everything over).
+    fn set_carryover_report(&mut self, report: Vec<(String, Vec<String>)>) {
+        if report.is_empty() {
+            return;
+        }
+        let count: usize = report.iter().map(|(_, vars)| vars.len()).sum();
+        let mut parts = Vec::new();
+        for (scope, vars) in &report {
+            for v in vars {
+                parts.push(format!("{v} ({scope})"));
+            }
+        }
+        self.carryover_report = Some(format!(
+            "{count} setting(s) couldn't be carried over: {}",
+            parts.join(", ")
+        ));
+    }
+
     /// Flush config edits that were withheld by the interlock, but only once no
     /// module draft is dirty. Saves every config layer so a held edit at any
     /// scope (global / profile / game) reaches disk.
@@ -719,6 +984,7 @@ impl GuiApp {
         // Keep the module-editor draft in sync with the selected module.
         if let NavSel::ModuleEditor(id) = self.nav_sel.clone() {
             self.ensure_draft(&id);
+            self.refresh_draft_name_error();
         }
 
         let edit_resolution = self.resolve_for_editing();
@@ -736,6 +1002,7 @@ impl GuiApp {
             });
 
         if !matches!(self.nav_sel, NavSel::GeneralSettings) {
+        let mut open_create = false;
         egui::SidePanel::left("ext_list")
             .exact_width(280.0)
             .resizable(false)
@@ -747,7 +1014,18 @@ impl GuiApp {
                     .fill(theme::PANEL)
                     .inner_margin(egui::Margin { left: 16.0, right: 16.0, top: 14.0, bottom: 8.0 }))
                 .show_inside(ui, |ui| {
-                    ui.label(theme::header_label("Modules"));
+                    ui.horizontal(|ui| {
+                        ui.label(theme::header_label("Modules"));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add(theme::secondary_button("\u{f067} New"))
+                                .on_hover_text("Create a new custom module")
+                                .clicked()
+                            {
+                                open_create = true;
+                            }
+                        });
+                    });
                 });
             // Toggles + Open Folder pinned to the bottom footer band.
             egui::TopBottomPanel::bottom("group_toggle")
@@ -773,6 +1051,9 @@ impl GuiApp {
                         });
                 });
         });
+        if open_create {
+            self.open_create_dialog();
+        }
         } // end if !GeneralSettings
 
         // Assemble the launch preview. In the module editor, splice the in-memory
@@ -904,6 +1185,7 @@ impl GuiApp {
             // Detail header: title + version/author + description, bottom border.
             ui.add_space(6.0);
             let mut open_inspector = false;
+            let mut open_fork = false;
             ui.horizontal(|ui| {
                 ui.heading(&spec.meta.name);
                 ui.add_space(6.0);
@@ -917,10 +1199,20 @@ impl GuiApp {
                     {
                         open_inspector = true;
                     }
+                    if ui
+                        .add(theme::secondary_button("Fork"))
+                        .on_hover_text("Create an editable copy of this module")
+                        .clicked()
+                    {
+                        open_fork = true;
+                    }
                 });
             });
             if open_inspector {
                 self.nav_sel = NavSel::ModuleEditor(spec.id());
+            }
+            if open_fork {
+                self.open_fork_dialog(&spec.id());
             }
             if let Some(label) = edit_ctx_label {
                 ui.add_space(2.0);
@@ -1029,6 +1321,8 @@ impl GuiApp {
             changed = true;
         }
 
+        self.render_module_dialog(ctx);
+
         if self.poll_detect(ctx) {
             changed = true;
         }
@@ -1082,6 +1376,10 @@ impl GuiApp {
                  module? This cleans every game, profile, and the global config."
                     .to_string(),
             ),
+            ConfirmAction::DeleteModule { label, .. } => (
+                "Delete Module",
+                format!("Delete the module \"{label}\"? This removes its manifest file."),
+            ),
         };
 
         // Modal backdrop: dim everything and swallow clicks meant for the panels
@@ -1107,6 +1405,14 @@ impl GuiApp {
                 ui.set_max_width(320.0);
                 ui.add_space(4.0);
                 ui.label(msg);
+                if matches!(action, ConfirmAction::DeleteModule { .. }) {
+                    ui.add_space(8.0);
+                    styled_checkbox(
+                        ui,
+                        &mut self.delete_module_purge,
+                        "Also purge this module's saved settings",
+                    );
+                }
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
                     if ui.add(theme::danger_button("Confirm")).clicked() {
@@ -1128,6 +1434,10 @@ impl GuiApp {
                     self.reload_extensions();
                 }
                 ConfirmAction::ConfigCleanup => self.config_cleanup(),
+                ConfirmAction::DeleteModule { manifest, .. } => {
+                    self.delete_module(&manifest, self.delete_module_purge);
+                    self.delete_module_purge = false;
+                }
             }
             self.confirm = None;
             return true;
@@ -1136,6 +1446,98 @@ impl GuiApp {
             self.confirm = None;
         }
         false
+    }
+
+    /// Render the Fork / Create-new module dialog, if open. Live-validates the
+    /// (Author, Name) pair for uniqueness (Version-blind, whole loaded set) and
+    /// disables the confirm button while the pair collides or Name is empty.
+    fn render_module_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dlg) = self.module_dialog.take() else {
+            return;
+        };
+
+        let author = dlg.author.trim().to_string();
+        let name = dlg.name.trim().to_string();
+        let name_empty = name.is_empty();
+        let author_empty = author.is_empty();
+        // Uniqueness is checked over the full loaded set; neither Fork nor Create
+        // is editing an existing entry, so nothing is excluded.
+        let collides = !name_empty
+            && name_collides(&self.all_specs, &self.all_manifests, &author, &name, None);
+        let can_confirm = !name_empty && !author_empty && !collides;
+
+        let (title, verb) = match &dlg.kind {
+            DialogKind::Fork { .. } => ("Fork Module", "Fork"),
+            DialogKind::Create => ("Create Module", "Create"),
+        };
+
+        // Modal backdrop (mirrors the confirm dialog).
+        let screen = ctx.screen_rect();
+        egui::Area::new(egui::Id::new("module_dialog_backdrop"))
+            .order(egui::Order::Middle)
+            .fixed_pos(egui::Pos2::ZERO)
+            .interactable(true)
+            .show(ctx, |ui| {
+                ui.painter().rect_filled(screen, 0.0, egui::Color32::from_black_alpha(160));
+                ui.allocate_response(screen.size(), egui::Sense::click_and_drag());
+            });
+
+        let mut confirmed = false;
+        let mut cancelled = false;
+        egui::Window::new(title)
+            .order(egui::Order::Foreground)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_max_width(360.0);
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Author").color(theme::DIM).small());
+                ui.add(egui::TextEdit::singleline(&mut dlg.author).desired_width(f32::INFINITY));
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("Name").color(theme::DIM).small());
+                ui.add(egui::TextEdit::singleline(&mut dlg.name).desired_width(f32::INFINITY));
+                if matches!(dlg.kind, DialogKind::Fork { .. }) {
+                    ui.add_space(8.0);
+                    styled_checkbox(ui, &mut dlg.copy_settings, "Copy saved settings");
+                }
+
+                ui.add_space(8.0);
+                let (fb, col) = if name_empty {
+                    ("Name is required".to_string(), theme::COL_GLOBAL)
+                } else if author_empty {
+                    ("Author is required".to_string(), theme::COL_GLOBAL)
+                } else if collides {
+                    (format!("\u{f00d} {author} :: {name} already exists"), theme::COL_GLOBAL)
+                } else {
+                    (format!("\u{f00c} {author} :: {name} is available"), theme::COL_PROFILE)
+                };
+                ui.label(egui::RichText::new(fb).color(col).small());
+
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(can_confirm, theme::primary_button(verb)).clicked() {
+                        confirmed = true;
+                    }
+                    if ui.add(theme::secondary_button("Cancel")).clicked() {
+                        cancelled = true;
+                    }
+                });
+            });
+
+        if confirmed {
+            match dlg.kind {
+                DialogKind::Fork { parent_id } => {
+                    self.perform_fork(&parent_id, author, name, dlg.copy_settings)
+                }
+                DialogKind::Create => self.perform_create(author, name),
+            }
+            return; // dialog consumed
+        }
+        if !cancelled {
+            // Not dismissed — keep it open (with the edited buffers) next frame.
+            self.module_dialog = Some(dlg);
+        }
     }
 }
 
@@ -1148,6 +1550,28 @@ impl GuiApp {
         let touch = self.general_config.touch_mode;
         let full_width = self.general_config.full_width;
         let mut action = TopAction::None;
+
+        // Transient dropped-var report from the last fork snapshot, dismissible.
+        if let Some(msg) = self.carryover_report.clone() {
+            let mut dismiss = false;
+            editor_card(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("\u{f071} {msg}"))
+                            .color(theme::COL_GLOBAL)
+                            .small(),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add(theme::secondary_button("Dismiss")).clicked() {
+                            dismiss = true;
+                        }
+                    });
+                });
+            });
+            if dismiss {
+                self.carryover_report = None;
+            }
+        }
         {
             let Some(draft) = self.module_draft.as_mut() else {
                 ui.label(egui::RichText::new("This module is no longer available.").color(theme::DIM));
@@ -1160,7 +1584,8 @@ impl GuiApp {
             let editable = draft.editable;
             let dirty = draft.dirty();
             let snap = draft.snapshot();
-            let valid = core_extension::validate(&snap).is_ok();
+            let validate_err = core_extension::validate(&snap).err().map(|e| e.to_string());
+            let sections_unique = draft.sections_unique();
             let req_ok = all_requires_parse(&snap);
             let save_on = draft.save_enabled();
 
@@ -1188,6 +1613,23 @@ impl GuiApp {
                     {
                         action = TopAction::Discard;
                     }
+                    // Fork works on any module (bundled or user); Delete only on
+                    // user-authored (editable) modules.
+                    if ui
+                        .add(theme::secondary_button("Fork"))
+                        .on_hover_text("Create an editable copy of this module")
+                        .clicked()
+                    {
+                        action = TopAction::Fork;
+                    }
+                    if editable
+                        && ui
+                            .add(theme::danger_button("Delete"))
+                            .on_hover_text("Delete this user module")
+                            .clicked()
+                    {
+                        action = TopAction::Delete;
+                    }
                 });
             });
 
@@ -1207,12 +1649,25 @@ impl GuiApp {
                     .small(),
                 );
             }
-            if editable && !valid {
+            // Explain *why* Save is greyed for a schema problem. Duplicate section
+            // names collapse when folded into the `IndexMap` before `validate` sees
+            // them, so that case is caught by `sections_unique` separately.
+            if editable && !sections_unique {
                 ui.label(
-                    egui::RichText::new("Manifest is invalid \u{2014} fix errors before saving.")
-                        .color(theme::COL_GLOBAL)
-                        .small(),
+                    egui::RichText::new(
+                        "Cannot save: two UI sections share a name \u{2014} rename one.",
+                    )
+                    .color(theme::COL_GLOBAL)
+                    .small(),
                 );
+            } else if editable {
+                if let Some(reason) = &validate_err {
+                    ui.label(
+                        egui::RichText::new(format!("Cannot save: {reason}"))
+                            .color(theme::COL_GLOBAL)
+                            .small(),
+                    );
+                }
             }
             if editable && !req_ok {
                 ui.label(
@@ -1246,6 +1701,15 @@ impl GuiApp {
         match action {
             TopAction::Save => self.save_module(),
             TopAction::Discard => self.discard_module(),
+            TopAction::Fork => self.open_fork_dialog(id),
+            TopAction::Delete => {
+                if let Some(d) = &self.module_draft {
+                    let label = format!("{}::{}", d.ext.meta.author, d.ext.meta.name);
+                    let manifest = d.manifest.clone();
+                    self.delete_module_purge = false;
+                    self.confirm = Some(ConfirmAction::DeleteModule { manifest, label });
+                }
+            }
             TopAction::None => {}
         }
     }
@@ -4579,6 +5043,70 @@ mod tests {
         assert!(draft.baseline_vars.contains("enabled"));
         // …while a brand-new variable is not, so its Variable stays editable.
         assert!(!draft.baseline_vars.contains("new_var"));
+    }
+
+    fn spec_named(author: &str, name: &str, version: &str) -> Extension {
+        serde_json::from_value(json!({
+            "Extension": {"Name": name, "Author": author, "Version": version},
+            "UI": {"Main": [{"Type": "toggle", "Variable": "enabled"}]}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn name_collision_is_version_blind_and_excludes_self() {
+        // Two loaded modules; the second shares (Author,Name) with a candidate but
+        // differs in Version — still a collision (config keys on Author+Name).
+        let specs = vec![
+            spec_named("Ritze", "Alpha", "1.0"),
+            spec_named("Ritze", "Beta", "2.0"),
+        ];
+        let manifests = vec![PathBuf::from("/a/alpha.json"), PathBuf::from("/a/beta.json")];
+
+        // Same Author+Name, different Version → collides.
+        assert!(name_collides(&specs, &manifests, "Ritze", "Beta", None));
+        // Distinct Name → free.
+        assert!(!name_collides(&specs, &manifests, "Ritze", "Gamma", None));
+        // Excluding the very module by manifest path clears the self-collision.
+        assert!(!name_collides(
+            &specs,
+            &manifests,
+            "Ritze",
+            "Beta",
+            Some(Path::new("/a/beta.json")),
+        ));
+        // Excluding a *different* path still reports the collision.
+        assert!(name_collides(
+            &specs,
+            &manifests,
+            "Ritze",
+            "Beta",
+            Some(Path::new("/a/alpha.json")),
+        ));
+    }
+
+    #[test]
+    fn slug_uniquify_suffixes_on_clash() {
+        // The base is free → used as-is.
+        let taken: std::collections::HashSet<String> = ["ritze__mod.json".to_string()]
+            .into_iter()
+            .collect();
+        assert_eq!(uniquify_slug("ritze__other", |c| taken.contains(c)), "ritze__other.json");
+        // The base is taken → first free suffix is `-2`.
+        assert_eq!(uniquify_slug("ritze__mod", |c| taken.contains(c)), "ritze__mod-2.json");
+        // `-2` also taken → `-3`.
+        let taken2: std::collections::HashSet<String> =
+            ["ritze__mod.json".to_string(), "ritze__mod-2.json".to_string()]
+                .into_iter()
+                .collect();
+        assert_eq!(uniquify_slug("ritze__mod", |c| taken2.contains(c)), "ritze__mod-3.json");
+    }
+
+    #[test]
+    fn sanitize_slug_maps_non_alnum_and_guards_empty() {
+        assert_eq!(sanitize_slug("My Module!"), "my_module");
+        assert_eq!(sanitize_slug("LSFG-VK"), "lsfg_vk");
+        assert_eq!(sanitize_slug("  "), "module");
     }
 
     #[test]
