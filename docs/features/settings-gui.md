@@ -214,8 +214,39 @@ whole app.
 
 ### Manifest editor — `render_module_editor` (`NavSel::ModuleEditor`)
 
-Clicking **Inspect** on a module switches `nav_sel` to `NavSel::ModuleEditor(id)`, whose
-central panel is a full editor for the module's *manifest* (not its config values).
+Clicking **✎ Edit** on a module (or **Ctrl+E** on the selected module) routes through
+`GuiApp::open_module_editor`, which records the current view in `GuiApp::editor_return`
+and switches `nav_sel` to `NavSel::ModuleEditor(id)`, whose central panel is a full editor
+for the module's *manifest* (not its config values).
+
+- **Entering / leaving** — `GuiApp::open_module_editor(id)` remembers the prior `nav_sel`
+  in `editor_return` (unless already in an editor) so Close can restore it;
+  `GuiApp::enter_editor_for_selection` (Ctrl+E) opens the editor for
+  `cur_specs[selected_ext]`, a no-op in the editor or on General Settings.
+  If the selection moves off the editor by *any* route while a draft is still open
+  (a left-nav click, Ctrl+E elsewhere, …), an early guard in `GuiApp::ui` (after keybind
+  handling, before anything reads the draft) drops `module_draft` as an implicit
+  Close/discard, so a dirty draft can never keep the config-autosave interlock engaged and
+  strand later config writes — the frame-end `flush_config_writes_if_clean` then releases
+  the interlock. `GuiApp::exit_module_editor` drops `module_draft` and restores
+  `editor_return` via the pure `editor_exit_target` (falls back to the ambient `Game(appid)` when the stored view
+  is missing or itself an editor, so no dangling editor selection remains). The header's
+  always-present **✕ Close** button (`TopAction::Close`) exits even with nothing to save
+  (dropping in-memory edits); **Save** and **Discard** also exit on success so the user
+  lands back on the real module.
+- **Keybinds** (handled at the top of `GuiApp::ui`, before panels render) — **Ctrl+E**
+  enters the editor for the selected module; **Ctrl+S** triggers Save when the editor is
+  open and `ModuleDraft::save_enabled` holds (same gate as the button), a no-op otherwise;
+  **Ctrl+R** still hot-reloads. The `command` modifier means text editing is never
+  swallowed.
+- **Focus stability (no reflow steal)** — the dirty/identity/validation status lines that
+  appear on the first keystroke must not knock the focused `TextEdit` out of focus. Two
+  mechanisms guarantee this: (1) the "unsaved changes / All changes saved" line is
+  **always rendered** (greyed when clean) so the clean→dirty transition never inserts a
+  line above the fields; (2) the body `ScrollArea` carries an explicit `id_salt`
+  ("module_editor_body") and **every** editor `TextEdit` a stable `.id_salt` keyed on its
+  structural path (section/field/block index + role), so a focused box keeps the same egui
+  id — and thus focus — even if a banner above it appears and shifts its screen position.
 
 - **Draft state** — `GuiApp::module_draft: Option<ModuleDraft>`, (re)synced each frame by
   `GuiApp::ensure_draft`. A `ModuleDraft` holds the module `id`, its `manifest` path, an
@@ -262,7 +293,7 @@ central panel is a full editor for the module's *manifest* (not its config value
 - **Fork / Create / Delete** (Phase 3 stage 2a) — the editor header carries a **Fork**
   button (on *any* module, bundled or user) and a **Delete** button (only when
   `editable`); the module-list header carries **+ New**, and the module detail view offers
-  **Fork** next to **Inspect**. Fork/Create open `GuiApp::module_dialog`
+  **Fork** next to **✎ Edit**. Fork/Create open `GuiApp::module_dialog`
   (`ModuleDialog` — Author + Name, Fork adds a "Copy saved settings" checkbox), rendered by
   `GuiApp::render_module_dialog` with live red/green uniqueness feedback
   (`name_collides`, whole loaded set) and the confirm button disabled while colliding or
@@ -293,14 +324,23 @@ central panel is a full editor for the module's *manifest* (not its config value
   and applied by `apply_deferred` **after** the render loop, never mid-iteration. One
   reusable `row_actions` widget (`[↑][↓][🗑]`) returns a `RowAction` the caller turns into
   the container-correct op (`apply_row` = `Vec::swap`/`remove`).
+- **Nesting shades** — `editor_card(ui, fill, add)` takes a per-level fill from the
+  `theme::EDIT_L0..L3` ramp so the hierarchy reads at a glance: module card = `EDIT_L0`,
+  section / ENV / WRAPPER / arg block cards = `EDIT_L1`, field cards = `EDIT_L2`,
+  builder-step rows = `EDIT_L3` (each one step lighter than base panel).
+- **Labels & placeholder color** — every editor box has a leading `field_label` ("Section",
+  "Name", "Variable", "Description", "Requires", "Value", …) and its placeholder is a gray
+  `gray_hint` (`theme::FAINT`) while entered text stays the normal foreground. `requires_edit`
+  colors *entered* text `theme::TEXT` (red only on a parse error), not dim.
 - **Requires** fields are live-validated via `condition::parse` (`requires_edit`): red
   text on a parse error, the wordy error shown only once the field loses focus. Any
   unparseable `Requires` blocks Save.
 - **Explicit Save** (`GuiApp::save_module`) is gated by `ModuleDraft::save_enabled`
   (`save_gate`: `dirty && valid && all Requires parse && !name_error`, and `editable`).
   It serializes `snapshot()` and writes via `config::write_atomic`, then reloads
-  extensions so the draft resets clean. **No manifest autosave.** `GuiApp::discard_module`
-  reverts the draft.
+  extensions so the draft resets clean **and calls `exit_module_editor`** so the user
+  returns to the normal view showing the saved module. **No manifest autosave.**
+  `GuiApp::discard_module` drops the draft and also exits (via `exit_module_editor`).
 - **Config-autosave interlock** — while a module draft is dirty (`config_autosave_held`),
   the normal config write at the end of `ui()` is held (`pending_config_write`); the
   in-memory config still updates, and the held write is flushed by
@@ -367,6 +407,8 @@ just supplies its title/message and its own commit logic.
 6. Use **Ctrl+R** to hot-reload both extensions and configs from disk without
    restarting the window (`crate::gui::GuiApp::reload_extensions` +
    `crate::gui::GuiApp::reload_configs`).
+7. Press **Ctrl+E** (or **✎ Edit**) to open the selected module's manifest editor;
+   inside it, **Ctrl+S** saves (when the Save gate holds) and **✕ Close** leaves.
 
 ## Related links
 

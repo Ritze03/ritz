@@ -33,6 +33,19 @@ pub const BTNBD: Color32 = Color32::from_rgb(0x34, 0x39, 0x41);
 /// Text on a primary (accent) button.
 pub const PRIMARY_TEXT: Color32 = Color32::from_rgb(0x0E, 0x1A, 0x18);
 
+// ---- Module-editor nesting shades ----------------------------------------
+// A subtle elevation ramp so nested editor cards read as a hierarchy: each
+// deeper level sits one step lighter than its parent (base panel is 0x1E2125).
+// Module card → section/block card → field card → builder-step row.
+/// Editor nesting level 0 — the top-level Module (meta) card.
+pub const EDIT_L0: Color32 = Color32::from_rgb(0x20, 0x24, 0x28);
+/// Editor nesting level 1 — section / ENV / WRAPPER / arg block cards.
+pub const EDIT_L1: Color32 = Color32::from_rgb(0x26, 0x2A, 0x30);
+/// Editor nesting level 2 — field cards inside a section.
+pub const EDIT_L2: Color32 = Color32::from_rgb(0x2C, 0x31, 0x38);
+/// Editor nesting level 3 — builder-step rows inside a block card.
+pub const EDIT_L3: Color32 = Color32::from_rgb(0x33, 0x39, 0x41);
+
 // Derived selection / hover tints (accent @ ~16% / ~42%, white @ ~5%),
 // premultiplied at compile time (from_rgba_unmultiplied isn't const).
 pub const SEL: Color32 = Color32::from_rgba_premultiplied(0x0F, 0x16, 0x27, 0x29);

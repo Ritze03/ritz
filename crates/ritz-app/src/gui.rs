@@ -203,6 +203,10 @@ pub struct GuiApp {
     /// future rename) couldn't carry over. Shown near the module editor until
     /// dismissed.
     carryover_report: Option<String>,
+    /// The nav selection to restore when the module editor is closed (the view the
+    /// user was in when they opened it). Cleared on exit; `None` falls back to the
+    /// ambient game.
+    editor_return: Option<NavSel>,
 }
 
 /// In-memory editor state for one module manifest. `ext` carries every editable
@@ -386,6 +390,17 @@ fn config_autosave_held(editor_dirty: bool) -> bool {
     editor_dirty
 }
 
+/// Resolve where closing the module editor should land (factored out for
+/// testing). Returns the stored `return_to` view when it is a real (non-editor)
+/// selection; otherwise falls back to the ambient game so no dangling editor
+/// selection remains.
+fn editor_exit_target(return_to: Option<NavSel>, appid: &str) -> NavSel {
+    match return_to {
+        Some(NavSel::ModuleEditor(_)) | None => NavSel::Game(appid.to_string()),
+        Some(other) => other,
+    }
+}
+
 /// True when `(author, name)` is already taken by a loaded module — **Version-blind**
 /// (compares Author+Name only, since config keys on those two). `exclude` skips the
 /// module being edited/forked, matched by manifest path so a module never collides
@@ -508,6 +523,7 @@ enum TopAction {
     Fork,
     Delete,
     Rename,
+    Close,
 }
 
 #[derive(Clone)]
@@ -587,6 +603,7 @@ impl GuiApp {
             module_dialog: None,
             delete_module_purge: false,
             carryover_report: None,
+            editor_return: None,
         };
         app.switch_game(appid, name);
         app.nav_name_buf = app.game_config.game.name.clone();
@@ -804,6 +821,39 @@ impl GuiApp {
         Some((self.all_manifests[idx].clone(), !bundled))
     }
 
+    /// Open the module editor for `id`, remembering the current view so Close can
+    /// restore it. No-op if already editing that module.
+    fn open_module_editor(&mut self, id: String) {
+        if self.nav_sel == NavSel::ModuleEditor(id.clone()) {
+            return;
+        }
+        if !matches!(self.nav_sel, NavSel::ModuleEditor(_)) {
+            self.editor_return = Some(self.nav_sel.clone());
+        }
+        self.nav_sel = NavSel::ModuleEditor(id);
+    }
+
+    /// Enter the editor for the currently-selected module in the normal view
+    /// (Ctrl+E). No-op when already in the editor or when there is no selectable
+    /// module (e.g. the General Settings pane).
+    fn enter_editor_for_selection(&mut self) {
+        if matches!(self.nav_sel, NavSel::ModuleEditor(_) | NavSel::GeneralSettings) {
+            return;
+        }
+        if let Some(spec) = self.cur_specs.get(self.selected_ext) {
+            self.open_module_editor(spec.id());
+        }
+    }
+
+    /// Leave the module editor for the remembered (or ambient) view, dropping the
+    /// in-memory draft. Releasing the interlock flushes any held config writes.
+    fn exit_module_editor(&mut self) {
+        let target = editor_exit_target(self.editor_return.take(), &self.appid);
+        self.module_draft = None;
+        self.nav_sel = target;
+        self.flush_config_writes_if_clean();
+    }
+
     /// Load a fresh draft for `id` unless one is already open for it (keeping any
     /// in-progress edits). Opening a *different* module replaces the draft.
     fn ensure_draft(&mut self, id: &str) {
@@ -875,17 +925,17 @@ impl GuiApp {
             eprintln!("ritz: failed to save module: {e:#}");
             return;
         }
-        // Drop the draft and reload from disk; ensure_draft rebuilds it clean.
+        // Drop the draft and reload from disk, then leave the editor so the user
+        // sees the saved ("real") module in the normal view.
         self.module_draft = None;
         self.reload_extensions();
-        self.flush_config_writes_if_clean();
+        self.exit_module_editor();
     }
 
-    /// Discard the in-memory draft (Revert). ensure_draft reloads a clean copy on
-    /// the next frame; releasing the interlock flushes any held config writes.
+    /// Discard the in-memory draft (Revert) and leave the editor. `exit_module_editor`
+    /// clears the draft and releasing the interlock flushes any held config writes.
     fn discard_module(&mut self) {
-        self.module_draft = None;
-        self.flush_config_writes_if_clean();
+        self.exit_module_editor();
     }
 
     /// Recompute the open draft's live name-collision flag (Version-blind, excluding
@@ -1207,11 +1257,36 @@ impl GuiApp {
             self.reload_configs();
         }
 
+        // Ctrl+E: enter the editor for the currently-selected module (no-op if
+        // already in it or on a pane with no module selection).
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::E)) {
+            self.enter_editor_for_selection();
+        }
+
+        // A draft may only exist while the editor view is active. If the selection
+        // moved off the editor by ANY route (left-nav click, Ctrl+E elsewhere, …)
+        // while a draft is still open, treat it as an implicit Close/discard — drop
+        // the draft so a dirty draft can't keep the config-autosave interlock
+        // engaged and strand later config writes. The frame-end
+        // `flush_config_writes_if_clean` then releases the interlock.
+        if !matches!(self.nav_sel, NavSel::ModuleEditor(_)) && self.module_draft.is_some() {
+            self.module_draft = None;
+            self.editor_return = None;
+            self.flush_config_writes_if_clean();
+        }
+
         // Keep the module-editor draft in sync with the selected module.
         if let NavSel::ModuleEditor(id) = self.nav_sel.clone() {
             self.ensure_draft(&id);
             self.refresh_draft_name_error();
             self.refresh_identity_state();
+            // Ctrl+S: Save when the editor is open and the Save gate is satisfied
+            // (same condition as the button); a no-op otherwise. Save exits the
+            // editor on success.
+            let save_ok = self.module_draft.as_ref().map_or(false, |d| d.save_enabled());
+            if save_ok && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
+                self.save_module();
+            }
         }
 
         let edit_resolution = self.resolve_for_editing();
@@ -1420,8 +1495,8 @@ impl GuiApp {
                 ui.label(egui::RichText::new(format!("by {}", spec.meta.author)).color(theme::FAINT));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
-                        .add(theme::secondary_button("\u{f013}  Inspect"))
-                        .on_hover_text("View this module's manifest (read-only)")
+                        .add(theme::secondary_button("\u{f044}  Edit"))
+                        .on_hover_text("Open this module in the editor")
                         .clicked()
                     {
                         open_inspector = true;
@@ -1436,7 +1511,7 @@ impl GuiApp {
                 });
             });
             if open_inspector {
-                self.nav_sel = NavSel::ModuleEditor(spec.id());
+                self.open_module_editor(spec.id());
             }
             if open_fork {
                 self.open_fork_dialog(&spec.id());
@@ -1777,7 +1852,7 @@ impl GuiApp {
         // Transient dropped-var report from the last fork snapshot, dismissible.
         if let Some(msg) = self.carryover_report.clone() {
             let mut dismiss = false;
-            editor_card(ui, |ui| {
+            editor_card(ui, theme::EDIT_L1, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new(format!("\u{f071} {msg}"))
@@ -1825,6 +1900,16 @@ impl GuiApp {
                     egui::RichText::new(format!("by {}", draft.ext.meta.author)).color(theme::FAINT),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Always-present exit. Save/Discard sit alongside for saving or
+                    // dropping edits explicitly; Close just leaves (dropping any
+                    // in-memory edits) and works even with nothing to save.
+                    if ui
+                        .add(theme::secondary_button("\u{f00d}  Close"))
+                        .on_hover_text("Leave the editor (discards unsaved edits)")
+                        .clicked()
+                    {
+                        action = TopAction::Close;
+                    }
                     let mut save = ui.add_enabled(save_on, theme::primary_button("Save"));
                     if !editable {
                         save = save.on_hover_text("Fork to edit");
@@ -1875,7 +1960,10 @@ impl GuiApp {
                 });
             });
 
-            // Status line under the header.
+            // Status line under the header. ALWAYS rendered (greyed when clean) so
+            // the clean→dirty transition on the first keystroke never inserts a new
+            // line above the fields — which would reflow the edit area. Combined
+            // with the explicit widget IDs below, typing is never interrupted.
             if !editable {
                 ui.label(
                     egui::RichText::new("Bundled module \u{2014} read-only. Fork to edit (coming soon).")
@@ -1889,6 +1977,12 @@ impl GuiApp {
                     )
                     .color(theme::COL_PROFILE)
                     .small(),
+                );
+            } else {
+                ui.label(
+                    egui::RichText::new("All changes saved.")
+                        .color(theme::FAINT)
+                        .small(),
                 );
             }
             // Explain *why* Save is greyed for a schema problem. Duplicate section
@@ -1943,7 +2037,11 @@ impl GuiApp {
             ui.separator();
 
             let mut deferred: Vec<Deferred> = Vec::new();
+            // Explicit, stable scroll id: keeps the body's content Ui id constant
+            // regardless of how many status lines render above it, so the focused
+            // TextEdit's id never shifts when the dirty/identity banners appear.
             egui::ScrollArea::vertical()
+                .id_salt("module_editor_body")
                 .auto_shrink([false, false])
                 .drag_to_scroll(touch)
                 .show(ui, |ui| {
@@ -1964,6 +2062,7 @@ impl GuiApp {
         match action {
             TopAction::Save => self.save_module(),
             TopAction::Discard => self.discard_module(),
+            TopAction::Close => self.exit_module_editor(),
             TopAction::Fork => self.open_fork_dialog(id),
             TopAction::Rename => self.perform_rename(),
             TopAction::Delete => {
@@ -1979,11 +2078,12 @@ impl GuiApp {
     }
 }
 
-/// A labeled card matching the tint/rounding used elsewhere in the app, holding
-/// the editable widgets of one field / block entry.
-fn editor_card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+/// A card matching the rounding used elsewhere in the app, holding the editable
+/// widgets of one field / block entry. `fill` selects the nesting shade (see the
+/// `theme::EDIT_L*` ramp) so deeper levels read as a visible hierarchy.
+fn editor_card(ui: &mut egui::Ui, fill: egui::Color32, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::none()
-        .fill(theme::FIELD)
+        .fill(fill)
         .stroke(egui::Stroke::new(1.0, theme::BORDER))
         .rounding(egui::Rounding::same(8.0))
         .inner_margin(egui::Margin::symmetric(12.0, 8.0))
@@ -1992,6 +2092,18 @@ fn editor_card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
             add(ui);
         });
     ui.add_space(6.0);
+}
+
+/// A short leading label placed before an editor textbox so the user knows what
+/// the box is for.
+fn field_label(ui: &mut egui::Ui, text: &str) {
+    ui.label(egui::RichText::new(text).color(theme::DIM).small());
+}
+
+/// Gray placeholder/hint text for an editor textbox (entered text stays the
+/// normal foreground; only the hint is dimmed).
+fn gray_hint(text: &str) -> egui::RichText {
+    egui::RichText::new(text).color(theme::FAINT)
 }
 
 /// A `+`-prefixed secondary button used for "add" affordances.
@@ -2026,31 +2138,50 @@ fn row_actions(ui: &mut egui::Ui, idx: usize, len: usize) -> RowAction {
     a
 }
 
-/// Edit an `Option<String>` as a single line (empty text → `None`).
-fn opt_text_edit(ui: &mut egui::Ui, val: &mut Option<String>, hint: &str) {
+/// Edit an `Option<String>` as a single line (empty text → `None`) with a leading
+/// `label` and a gray `hint` placeholder. `id_salt` gives the box a stable egui id
+/// so it never loses focus when banners above it appear/disappear.
+fn opt_text_edit(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash,
+    label: &str,
+    val: &mut Option<String>,
+    hint: &str,
+) {
     let mut s = val.clone().unwrap_or_default();
-    ui.add(
-        egui::TextEdit::singleline(&mut s)
-            .hint_text(hint)
-            .desired_width(f32::INFINITY),
-    );
+    ui.horizontal(|ui| {
+        field_label(ui, label);
+        ui.add(
+            egui::TextEdit::singleline(&mut s)
+                .id_salt(id_salt)
+                .hint_text(gray_hint(hint))
+                .desired_width(f32::INFINITY),
+        );
+    });
     *val = if s.is_empty() { None } else { Some(s) };
 }
 
-/// A raw single-line `Requires` editor, live-validated via `condition::parse`.
-/// The text turns red on a parse error; the wordy error is shown only once the
-/// field is not actively being edited.
-fn requires_edit(ui: &mut egui::Ui, val: &mut Option<String>) {
+/// A single-line `Requires` editor with a leading label, live-validated via
+/// `condition::parse`. Entered text is the normal foreground and turns red only on
+/// a parse error; the hint stays gray. The wordy error is shown once the field is
+/// no longer being edited. `id_salt` keeps focus stable across banner reflows.
+fn requires_edit(ui: &mut egui::Ui, id_salt: impl std::hash::Hash, val: &mut Option<String>) {
     let mut s = val.clone().unwrap_or_default();
     let parsed = condition::parse(&s);
     let ok = s.trim().is_empty() || parsed.is_ok();
-    let color = if ok { theme::DIM } else { theme::COL_GLOBAL };
-    let resp = ui.add(
-        egui::TextEdit::singleline(&mut s)
-            .hint_text("Requires (optional)")
-            .text_color(color)
-            .desired_width(f32::INFINITY),
-    );
+    let color = if ok { theme::TEXT } else { theme::COL_GLOBAL };
+    let resp = ui
+        .horizontal(|ui| {
+            field_label(ui, "Requires");
+            ui.add(
+                egui::TextEdit::singleline(&mut s)
+                    .id_salt(id_salt)
+                    .hint_text(gray_hint("e.g. enabled AND !clear"))
+                    .text_color(color)
+                    .desired_width(f32::INFINITY),
+            )
+        })
+        .inner;
     *val = if s.trim().is_empty() { None } else { Some(s) };
     if !ok && (!resp.has_focus() || resp.lost_focus()) {
         if let Err(e) = parsed {
@@ -2136,7 +2267,7 @@ fn render_editor_body(ui: &mut egui::Ui, draft: &mut ModuleDraft, deferred: &mut
 
     // ── Meta ────────────────────────────────────────────────────────────────
     ui.add_space(6.0);
-    editor_card(ui, |ui| {
+    editor_card(ui, theme::EDIT_L0, |ui| {
         ui.label(egui::RichText::new("Module").color(theme::TEXT).strong());
         // Author + Name are STAGED identity edits: they mutate `identity`, never
         // `ext.meta`, so they don't touch the draft snapshot / Save gate and are
@@ -2145,13 +2276,19 @@ fn render_editor_body(ui: &mut egui::Ui, draft: &mut ModuleDraft, deferred: &mut
             ui.vertical(|ui| {
                 ui.label(egui::RichText::new("Author").color(theme::DIM).small());
                 ui.add(
-                    egui::TextEdit::singleline(&mut identity.author).desired_width(220.0),
+                    egui::TextEdit::singleline(&mut identity.author)
+                        .id_salt("meta_author")
+                        .desired_width(220.0),
                 );
             });
             ui.add_space(8.0);
             ui.vertical(|ui| {
                 ui.label(egui::RichText::new("Name").color(theme::DIM).small());
-                ui.add(egui::TextEdit::singleline(&mut identity.name).desired_width(220.0));
+                ui.add(
+                    egui::TextEdit::singleline(&mut identity.name)
+                        .id_salt("meta_name")
+                        .desired_width(220.0),
+                );
             });
         });
         ui.label(
@@ -2162,11 +2299,9 @@ fn render_editor_body(ui: &mut egui::Ui, draft: &mut ModuleDraft, deferred: &mut
             .small(),
         );
         ui.add_space(6.0);
-        ui.label(egui::RichText::new("Description").color(theme::DIM).small());
-        opt_text_edit(ui, &mut ext.meta.description, "Description");
+        opt_text_edit(ui, "meta_desc", "Description", &mut ext.meta.description, "What this module does");
         ui.add_space(4.0);
-        ui.label(egui::RichText::new("Backend (advanced, optional)").color(theme::DIM).small());
-        opt_text_edit(ui, &mut ext.backend, "Backend");
+        opt_text_edit(ui, "meta_backend", "Backend", &mut ext.backend, "advanced, optional");
     });
 
     // ── UI sections ─────────────────────────────────────────────────────────
@@ -2180,9 +2315,15 @@ fn render_editor_body(ui: &mut egui::Ui, draft: &mut ModuleDraft, deferred: &mut
     ui.add_space(6.0);
     let sec_len = sections.len();
     for (si, (name, fields)) in sections.iter_mut().enumerate() {
-        editor_card(ui, |ui| {
+        editor_card(ui, theme::EDIT_L1, |ui| {
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(name).desired_width(220.0));
+                field_label(ui, "Section");
+                ui.add(
+                    egui::TextEdit::singleline(name)
+                        .id_salt(("sec_name", si))
+                        .hint_text(gray_hint("Section name"))
+                        .desired_width(220.0),
+                );
                 let a = row_actions(ui, si, sec_len);
                 if a != RowAction::None {
                     deferred.push(Deferred::Section(si, a));
@@ -2230,12 +2371,14 @@ fn render_field_editor(
     var_edits: &mut IndexMap<String, String>,
     deferred: &mut Vec<Deferred>,
 ) {
-    editor_card(ui, |ui| {
+    editor_card(ui, theme::EDIT_L2, |ui| {
         ui.horizontal(|ui| {
+            field_label(ui, "Name");
             let mut name = field.name.clone().unwrap_or_default();
             ui.add(
                 egui::TextEdit::singleline(&mut name)
-                    .hint_text("Field label")
+                    .id_salt(("field_name", si, fi))
+                    .hint_text(gray_hint("Field label"))
                     .desired_width(220.0),
             );
             field.name = if name.is_empty() { None } else { Some(name) };
@@ -2248,11 +2391,15 @@ fn render_field_editor(
         // Variable — for an existing (on-disk) field this edits the STAGED rename
         // buffer (committed via Rename); a newly added field edits it directly.
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Variable").color(theme::DIM).small());
+            field_label(ui, "Variable");
             if baseline_vars.contains(&field.variable) {
                 let key = field.variable.clone();
                 let buf = var_edits.entry(key.clone()).or_insert_with(|| key.clone());
-                ui.add(egui::TextEdit::singleline(buf).desired_width(200.0));
+                ui.add(
+                    egui::TextEdit::singleline(buf)
+                        .id_salt(("field_var", si, fi))
+                        .desired_width(200.0),
+                );
                 if buf.trim() != key {
                     ui.label(
                         egui::RichText::new("(rename pending)")
@@ -2261,7 +2408,12 @@ fn render_field_editor(
                     );
                 }
             } else {
-                ui.add(egui::TextEdit::singleline(&mut field.variable).desired_width(200.0));
+                ui.add(
+                    egui::TextEdit::singleline(&mut field.variable)
+                        .id_salt(("field_var", si, fi))
+                        .hint_text(gray_hint("variable_name"))
+                        .desired_width(200.0),
+                );
             }
         });
 
@@ -2284,18 +2436,23 @@ fn render_field_editor(
                 });
         });
 
-        opt_text_edit(ui, &mut field.description, "Description");
-        requires_edit(ui, &mut field.requires);
+        opt_text_edit(ui, ("field_desc", si, fi), "Description", &mut field.description, "Shown under the field");
+        requires_edit(ui, ("field_req", si, fi), &mut field.requires);
 
         // Type-specific detail.
         match field.field_type {
             FieldType::Selection => {
-                ui.label(egui::RichText::new("Options").color(theme::DIM).small());
+                field_label(ui, "Options");
                 let opts = ensure_list(&mut field.options);
                 let ol = opts.len();
                 for (oi, opt) in opts.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(opt).desired_width(200.0));
+                        ui.add(
+                            egui::TextEdit::singleline(opt)
+                                .id_salt(("field_opt", si, fi, oi))
+                                .hint_text(gray_hint("option"))
+                                .desired_width(200.0),
+                        );
                         let a = row_actions(ui, oi, ol);
                         if a != RowAction::None {
                             deferred.push(Deferred::FieldOpt(si, fi, oi, a));
@@ -2350,44 +2507,57 @@ fn render_env_block_editor(
     ui.add_space(6.0);
     let len = specs.len();
     for (ei, spec) in specs.iter_mut().enumerate() {
-        editor_card(ui, |ui| {
+        editor_card(ui, theme::EDIT_L1, |ui| {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Name").color(theme::DIM).small());
-                ui.add(egui::TextEdit::singleline(&mut spec.name).desired_width(220.0));
+                field_label(ui, "Name");
+                ui.add(
+                    egui::TextEdit::singleline(&mut spec.name)
+                        .id_salt(("env_name", game, ei))
+                        .hint_text(gray_hint("VAR_NAME"))
+                        .desired_width(220.0),
+                );
                 let a = row_actions(ui, ei, len);
                 if a != RowAction::None {
                     deferred.push(Deferred::Env(game, ei, a));
                 }
             });
-            requires_edit(ui, &mut spec.requires);
+            requires_edit(ui, ("env_req", game, ei), &mut spec.requires);
             let sl = spec.builder.len();
             for (bi, step) in spec.builder.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    egui::ComboBox::from_id_salt((game, ei, bi, "op"))
-                        .selected_text(env_op_label(step.op))
-                        .width(80.0)
-                        .show_ui(ui, |ui| {
-                            for op in [EnvOp::Set, EnvOp::Append, EnvOp::Unset] {
-                                ui.selectable_value(&mut step.op, op, env_op_label(op));
-                            }
-                        });
-                    let mut v = step.value.clone().unwrap_or_default();
-                    ui.add(
-                        egui::TextEdit::singleline(&mut v)
-                            .hint_text("Value")
-                            .desired_width(160.0),
-                    );
-                    step.value = if v.is_empty() { None } else { Some(v) };
-                    let mut sep = step.separator.clone().unwrap_or_default();
-                    ui.label(egui::RichText::new("Sep").color(theme::DIM).small());
-                    ui.add(egui::TextEdit::singleline(&mut sep).desired_width(48.0));
-                    step.separator = if sep.is_empty() { None } else { Some(sep) };
-                    let a = row_actions(ui, bi, sl);
-                    if a != RowAction::None {
-                        deferred.push(Deferred::EnvStep(game, ei, bi, a));
-                    }
+                editor_card(ui, theme::EDIT_L3, |ui| {
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt((game, ei, bi, "op"))
+                            .selected_text(env_op_label(step.op))
+                            .width(80.0)
+                            .show_ui(ui, |ui| {
+                                for op in [EnvOp::Set, EnvOp::Append, EnvOp::Unset] {
+                                    ui.selectable_value(&mut step.op, op, env_op_label(op));
+                                }
+                            });
+                        field_label(ui, "Value");
+                        let mut v = step.value.clone().unwrap_or_default();
+                        ui.add(
+                            egui::TextEdit::singleline(&mut v)
+                                .id_salt(("env_step_val", game, ei, bi))
+                                .hint_text(gray_hint("value"))
+                                .desired_width(160.0),
+                        );
+                        step.value = if v.is_empty() { None } else { Some(v) };
+                        let mut sep = step.separator.clone().unwrap_or_default();
+                        field_label(ui, "Sep");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut sep)
+                                .id_salt(("env_step_sep", game, ei, bi))
+                                .desired_width(48.0),
+                        );
+                        step.separator = if sep.is_empty() { None } else { Some(sep) };
+                        let a = row_actions(ui, bi, sl);
+                        if a != RowAction::None {
+                            deferred.push(Deferred::EnvStep(game, ei, bi, a));
+                        }
+                    });
+                    requires_edit(ui, ("env_step_req", game, ei, bi), &mut step.requires);
                 });
-                requires_edit(ui, &mut step.requires);
             }
             if add_button(ui, "Add step").clicked() {
                 deferred.push(Deferred::EnvStepAdd(game, ei));
@@ -2413,11 +2583,13 @@ fn render_wrapper_block_editor(
     ui.add_space(6.0);
     let len = wrappers.len();
     for (wi, w) in wrappers.iter_mut().enumerate() {
-        editor_card(ui, |ui| {
+        editor_card(ui, theme::EDIT_L1, |ui| {
             ui.horizontal(|ui| {
+                field_label(ui, "Command");
                 ui.add(
                     egui::TextEdit::singleline(&mut w.command_syntax)
-                        .hint_text("gamescope {OPTIONS} --")
+                        .id_salt(("wrap_syntax", wi))
+                        .hint_text(gray_hint("gamescope {OPTIONS} --"))
                         .desired_width(260.0),
                 );
                 let a = row_actions(ui, wi, len);
@@ -2429,21 +2601,25 @@ fn render_wrapper_block_editor(
                 ui.label(egui::RichText::new("Priority (lower = outermost)").color(theme::DIM).small());
                 ui.add(egui::DragValue::new(&mut w.priority));
             });
-            requires_edit(ui, &mut w.requires);
+            requires_edit(ui, ("wrap_req", wi), &mut w.requires);
             let sl = w.builder.len();
             for (bi, step) in w.builder.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut step.value)
-                            .hint_text("Option")
-                            .desired_width(200.0),
-                    );
-                    let a = row_actions(ui, bi, sl);
-                    if a != RowAction::None {
-                        deferred.push(Deferred::WrapperStep(wi, bi, a));
-                    }
+                editor_card(ui, theme::EDIT_L3, |ui| {
+                    ui.horizontal(|ui| {
+                        field_label(ui, "Value");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut step.value)
+                                .id_salt(("wrap_step_val", wi, bi))
+                                .hint_text(gray_hint("option"))
+                                .desired_width(200.0),
+                        );
+                        let a = row_actions(ui, bi, sl);
+                        if a != RowAction::None {
+                            deferred.push(Deferred::WrapperStep(wi, bi, a));
+                        }
+                    });
+                    requires_edit(ui, ("wrap_step_req", wi, bi), &mut step.requires);
                 });
-                requires_edit(ui, &mut step.requires);
             }
             if add_button(ui, "Add option").clicked() {
                 deferred.push(Deferred::WrapperStepAdd(wi));
@@ -2468,11 +2644,13 @@ fn render_arg_block_editor(
     ui.add_space(6.0);
     let len = args.len();
     for (ai, arg) in args.iter_mut().enumerate() {
-        editor_card(ui, |ui| {
+        editor_card(ui, theme::EDIT_L1, |ui| {
             ui.horizontal(|ui| {
+                field_label(ui, "Value");
                 ui.add(
                     egui::TextEdit::singleline(&mut arg.value)
-                        .hint_text("Argument")
+                        .id_salt(("arg_val", ai))
+                        .hint_text(gray_hint("--argument"))
                         .desired_width(260.0),
                 );
                 let a = row_actions(ui, ai, len);
@@ -2480,7 +2658,7 @@ fn render_arg_block_editor(
                     deferred.push(Deferred::Arg(ai, a));
                 }
             });
-            requires_edit(ui, &mut arg.requires);
+            requires_edit(ui, ("arg_req", ai), &mut arg.requires);
         });
     }
 }
@@ -5115,6 +5293,26 @@ mod tests {
             .copied()
             .collect();
         assert_eq!(kept, vec!["GOOD=x"]);
+    }
+
+    #[test]
+    fn editor_exit_target_restores_prior_view_or_falls_back_to_game() {
+        // A real prior view is restored verbatim.
+        assert_eq!(
+            editor_exit_target(Some(NavSel::GlobalSettings), "42"),
+            NavSel::GlobalSettings
+        );
+        assert_eq!(
+            editor_exit_target(Some(NavSel::Profile("Perf".into())), "42"),
+            NavSel::Profile("Perf".into())
+        );
+        // No stored view → ambient game.
+        assert_eq!(editor_exit_target(None, "42"), NavSel::Game("42".into()));
+        // Never land back on the editor (would be a stuck selection) → ambient game.
+        assert_eq!(
+            editor_exit_target(Some(NavSel::ModuleEditor("A::B::1.0".into())), "42"),
+            NavSel::Game("42".into())
+        );
     }
 
     #[test]
