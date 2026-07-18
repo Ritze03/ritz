@@ -190,6 +190,47 @@ thread instead of blocking the UI:* the sleep gives the user time to alt-tab to 
 game window before its class is queried; blocking `update()` for 3s would freeze the
 whole app.
 
+### Manifest editor — `render_module_editor` (`NavSel::ModuleEditor`)
+
+Clicking **Inspect** on a module switches `nav_sel` to `NavSel::ModuleEditor(id)`, whose
+central panel is a full editor for the module's *manifest* (not its config values).
+
+- **Draft state** — `GuiApp::module_draft: Option<ModuleDraft>`, (re)synced each frame by
+  `GuiApp::ensure_draft`. A `ModuleDraft` holds the module `id`, its `manifest` path, an
+  `editable` flag, the `Extension` (minus UI sections), the UI `sections` as an ordered
+  `Vec<(name, fields)>` (folded back via `ModuleDraft::snapshot`), a `baseline` JSON value
+  (the on-disk manifest) for the `dirty()` check, a `baseline_vars` set, and a
+  `name_error` placeholder (Phase 3 uniqueness). *Why sections live in a `Vec`, not the
+  `IndexMap`:* reorder/rename/remove become plain `Vec` ops with no mutable-key problem.
+- **Editability** — a module is editable only when its manifest is *not* one of the
+  bundled sets (`GuiApp::module_editability` checks the `default/` / `built-in/` rel-dir
+  roots; those are bootstrapped into the user config dir but stay inspect-only until
+  forked in Phase 3). Bundled modules render the same widgets **disabled**, Save shows a
+  "Fork to edit" tooltip.
+- **Locked fields** — Author / Name / Version are read-only (rename needs config
+  migration, Phase 3); an *existing* field's `Variable` (present in `baseline_vars`) is
+  read-only, a *newly-added* field's `Variable` is editable (no config to orphan yet).
+- **Structural edits** are collected as path-addressed `Deferred` actions during render
+  and applied by `apply_deferred` **after** the render loop, never mid-iteration. One
+  reusable `row_actions` widget (`[↑][↓][🗑]`) returns a `RowAction` the caller turns into
+  the container-correct op (`apply_row` = `Vec::swap`/`remove`).
+- **Requires** fields are live-validated via `condition::parse` (`requires_edit`): red
+  text on a parse error, the wordy error shown only once the field loses focus. Any
+  unparseable `Requires` blocks Save.
+- **Explicit Save** (`GuiApp::save_module`) is gated by `ModuleDraft::save_enabled`
+  (`save_gate`: `dirty && valid && all Requires parse && !name_error`, and `editable`).
+  It serializes `snapshot()` and writes via `config::write_atomic`, then reloads
+  extensions so the draft resets clean. **No manifest autosave.** `GuiApp::discard_module`
+  reverts the draft.
+- **Config-autosave interlock** — while a module draft is dirty (`config_autosave_held`),
+  the normal config write at the end of `ui()` is held (`pending_config_write`); the
+  in-memory config still updates, and the held write is flushed by
+  `flush_config_writes_if_clean` once the draft is saved, discarded, or hand-reverted.
+  *Why:* a config value could reference a field that only exists in the unsaved draft.
+
+The **live preview** (below) splices the in-memory draft over the module's on-disk entry
+before resolving, so the launch command reflects unsaved edits.
+
 ## Launch-command preview footer
 
 The bottom `preview` panel (in `GuiApp::ui`) is either a fixed 198px band or, if
@@ -198,8 +239,12 @@ box (repo link + credits, `crate::gui::GuiApp::render_about`) when `NavSel` is
 `GeneralSettings` — there's no launch command to preview there — otherwise it calls
 `crate::context::assemble_launch` with whichever resolution matches the panel: when
 editing a **Profile**, the edit-scope resolution (so the preview reflects the profile
-being edited even if it's not the active one for any game); otherwise the game
-resolution. The assembled command is rendered with `crates/ritz-app/src/gui.rs:command_job`,
+being edited even if it's not the active one for any game); when in the **manifest
+editor** (`NavSel::ModuleEditor`), the draft-spliced spec set (the edited module's entry
+replaced by `ModuleDraft::snapshot`, resolved via `GuiApp::resolve_specs_for_game` — one
+clone/frame, no disk, assembler signature unchanged) plus a red `set_set_collisions`
+lint listing env vars two modules both `Set`; otherwise the game resolution. The
+assembled command is rendered with `crates/ritz-app/src/gui.rs:command_job`,
 which highlights every `%command%` token in the accent color. See
 [launch-command-assembly.md](launch-command-assembly.md) for what `assemble_launch`
 does with the resolved fields.

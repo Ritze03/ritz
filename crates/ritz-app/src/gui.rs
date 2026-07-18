@@ -12,12 +12,13 @@ use anyhow::Result;
 use egui::text::{LayoutJob, TextFormat};
 use egui::Color32;
 use ritz_core::condition;
-use ritz_core::config::{AuthorsMap, GameConfig, GeneralConfig, InheritanceDisplayMode, Paths, Preset};
-use ritz_core::extension::ExtensionLoadError;
+use ritz_core::builder::EnvAction;
+use ritz_core::config::{self as core_config, AuthorsMap, GameConfig, GeneralConfig, InheritanceDisplayMode, Paths, Preset};
+use ritz_core::extension::{self as core_extension, ExtensionLoadError};
 use ritz_core::resolve::{self, Provenance, Resolution};
 use ritz_core::schema::{
     ArgSpec, EnvBuilderEntry, EnvOp, EnvVarSpec, Extension, FieldType, OptionsSpec, UiField,
-    WrapperSpec,
+    WrapperBuilderEntry, WrapperSpec,
 };
 use serde_json::{json, Value};
 
@@ -112,6 +113,9 @@ pub struct GuiApp {
     all_specs: Vec<Extension>,
     /// Tree folder for each entry in `all_specs` (relative to the extensions root).
     all_dirs: Vec<PathBuf>,
+    /// Absolute manifest path for each entry in `all_specs`, index-aligned. Used
+    /// by the module editor to write edits back and decide editability.
+    all_manifests: Vec<PathBuf>,
     all_is_folder_ext: Vec<bool>,
     /// Non-fatal load problems (bad manifests / duplicate identities) shown as a
     /// banner atop the module tree. Refreshed on every hot-reload.
@@ -162,6 +166,141 @@ pub struct GuiApp {
     confirm: Option<ConfirmAction>,
     /// App logo texture (loaded once the egui context exists).
     logo: Option<egui::TextureHandle>,
+    /// In-memory draft for the module currently open in the editor, if any. Held
+    /// independent of `nav_sel` so a dirty draft keeps the config-autosave
+    /// interlock engaged even after the user navigates elsewhere.
+    module_draft: Option<ModuleDraft>,
+    /// True when an in-memory config edit was withheld from disk because a module
+    /// editor draft was dirty; flushed once the draft becomes clean.
+    pending_config_write: bool,
+}
+
+/// In-memory editor state for one module manifest. `ext` carries every editable
+/// block *except* the UI sections, which live in `sections` as an ordered
+/// `Vec` (trivial reorder/rename/remove) and are folded back into an
+/// [`Extension`] via [`ModuleDraft::snapshot`] for serialize / validate / preview.
+struct ModuleDraft {
+    /// The `Extension::id()` this draft edits — matches the on-disk manifest.
+    id: String,
+    /// Absolute manifest path (write target).
+    manifest: PathBuf,
+    /// True when the manifest lives in a user-writable (non-bundled) location.
+    editable: bool,
+    /// Everything but the UI sections (meta, backend, env/wrapper/arg blocks).
+    ext: Extension,
+    /// UI sections as an ordered list of `(section name, fields)`.
+    sections: Vec<(String, Vec<UiField>)>,
+    /// The on-disk manifest as a JSON value — the baseline for the dirty check.
+    baseline: Value,
+    /// UI-field variables present on disk. A field whose `Variable` is in this set
+    /// is an *existing* field (rename would orphan config → read-only); a field
+    /// whose variable is absent is *newly added* → its `Variable` is editable.
+    baseline_vars: std::collections::HashSet<String>,
+    /// Name-collision message. Always `None` in Phase 2 (uniqueness lands in
+    /// Phase 3); wired into the Save gate so Phase 3 only needs to fill it.
+    name_error: Option<String>,
+}
+
+impl ModuleDraft {
+    /// Fold `sections` back into `ext.ui` to produce the full [`Extension`].
+    fn snapshot(&self) -> Extension {
+        let mut e = self.ext.clone();
+        e.ui = self.sections.iter().cloned().collect();
+        e
+    }
+    fn dirty(&self) -> bool {
+        serde_json::to_value(self.snapshot()).ok().as_ref() != Some(&self.baseline)
+    }
+    /// Save is enabled only when the draft is on a writable module, differs from
+    /// disk, validates, every `Requires` parses, and there is no name collision.
+    /// Duplicate UI-section names collide when folded into `ext.ui` (an
+    /// `IndexMap`), silently dropping a section on Save — block Save instead.
+    fn sections_unique(&self) -> bool {
+        let mut seen = std::collections::HashSet::new();
+        self.sections.iter().all(|(k, _)| seen.insert(k))
+    }
+    fn save_enabled(&self) -> bool {
+        let snap = self.snapshot();
+        self.editable
+            && self.sections_unique()
+            && save_gate(
+                self.dirty(),
+                core_extension::validate(&snap).is_ok(),
+                all_requires_parse(&snap),
+                self.name_error.is_some(),
+            )
+    }
+}
+
+/// Pure Save-gate predicate (factored out for testing): Save is allowed only when
+/// the draft differs from disk, validates, every `Requires` parses, and no name
+/// collision is flagged.
+fn save_gate(dirty: bool, valid: bool, requires_all_parse: bool, name_error: bool) -> bool {
+    dirty && valid && requires_all_parse && !name_error
+}
+
+/// Pure interlock predicate (factored out for testing): the normal config/scope
+/// autosave is held while a module editor draft is dirty (draft ≠ disk).
+fn config_autosave_held(editor_dirty: bool) -> bool {
+    editor_dirty
+}
+
+/// True if every `Requires` expression in the manifest parses (empty = ok).
+fn all_requires_parse(ext: &Extension) -> bool {
+    let ok = |r: &Option<String>| {
+        r.as_deref()
+            .map_or(true, |s| condition::parse(s).is_ok())
+    };
+    ext.ui.values().flatten().all(|f| ok(&f.requires))
+        && ext
+            .env_vars
+            .iter()
+            .chain(ext.game_env_vars.iter())
+            .all(|e| ok(&e.requires) && e.builder.iter().all(|b| ok(&b.requires)))
+        && ext
+            .wrappers
+            .iter()
+            .all(|w| ok(&w.requires) && w.builder.iter().all(|b| ok(&b.requires)))
+        && ext.game_launch_args.iter().all(|a| ok(&a.requires))
+}
+
+/// Row-action returned by the reusable `[↑][↓][🗑]` widget; the caller applies the
+/// container-correct op.
+#[derive(Clone, Copy, PartialEq)]
+enum RowAction {
+    None,
+    Up,
+    Down,
+    Remove,
+}
+
+/// A path-addressed structural edit (add / remove / reorder), collected during
+/// render and applied to the draft *after* the render loop so no `Vec`/`IndexMap`
+/// is mutated mid-iteration.
+enum Deferred {
+    Section(usize, RowAction),
+    SectionAdd,
+    Field(usize, usize, RowAction),
+    FieldAdd(usize),
+    FieldOpt(usize, usize, usize, RowAction),
+    FieldOptAdd(usize, usize),
+    Env(bool, usize, RowAction),
+    EnvAdd(bool),
+    EnvStep(bool, usize, usize, RowAction),
+    EnvStepAdd(bool, usize),
+    Wrapper(usize, RowAction),
+    WrapperAdd,
+    WrapperStep(usize, usize, RowAction),
+    WrapperStepAdd(usize),
+    Arg(usize, RowAction),
+    ArgAdd,
+}
+
+/// What the editor header requested this frame (Save / Discard buttons).
+enum TopAction {
+    None,
+    Save,
+    Discard,
 }
 
 #[derive(Clone)]
@@ -186,6 +325,7 @@ impl GuiApp {
     pub fn new(ctx: &AppContext, appid: &str, name: &str, game_command: Vec<String>) -> GuiApp {
         let all_specs: Vec<Extension> = ctx.extensions.iter().map(|e| e.spec.clone()).collect();
         let all_dirs: Vec<PathBuf> = ctx.extensions.iter().map(|e| e.rel_dir.clone()).collect();
+        let all_manifests: Vec<PathBuf> = ctx.extensions.iter().map(|e| e.manifest.clone()).collect();
         let all_is_folder_ext: Vec<bool> = ctx.extensions.iter().map(|e| e.is_folder_ext).collect();
         let extension_errors = ctx.extension_errors.clone();
         let general_config = ctx.paths.load_general().unwrap_or_default();
@@ -202,6 +342,7 @@ impl GuiApp {
             default_preset: ctx.general.default_preset.clone(),
             all_specs,
             all_dirs,
+            all_manifests,
             all_is_folder_ext,
             extension_errors,
             cur_specs: Vec::new(),
@@ -234,6 +375,8 @@ impl GuiApp {
             focus_nav_name: false,
             confirm: None,
             logo: None,
+            module_draft: None,
+            pending_config_write: false,
         };
         app.switch_game(appid, name);
         app.nav_name_buf = app.game_config.game.name.clone();
@@ -341,6 +484,7 @@ impl GuiApp {
         };
         self.all_specs = exts.iter().map(|e| e.spec.clone()).collect();
         self.all_dirs = exts.iter().map(|e| e.rel_dir.clone()).collect();
+        self.all_manifests = exts.iter().map(|e| e.manifest.clone()).collect();
         self.all_is_folder_ext = exts.iter().map(|e| e.is_folder_ext).collect();
         self.extension_errors = errors;
         self.rebuild_cur_specs();
@@ -409,6 +553,13 @@ impl GuiApp {
 
     /// Resolution always for the current game — used for the launch command preview.
     fn resolve_for_game(&self) -> Resolution {
+        self.resolve_specs_for_game(&self.cur_specs)
+    }
+
+    /// Like [`resolve_for_game`] but over an explicit spec list — lets the module
+    /// editor resolve a draft-spliced spec set for its live preview without
+    /// touching disk or the launch assembler's signature.
+    fn resolve_specs_for_game(&self, specs: &[Extension]) -> Resolution {
         // If the profile being edited is the one applied to this game, use the
         // live (unsaved) edit buffer so the preview reflects in-progress edits.
         let direct = match (&self.editing_preset_buf, &self.preset) {
@@ -424,11 +575,112 @@ impl GuiApp {
         });
         let effective = merged.as_ref().map(|p| p as &Preset).or(direct);
         resolve::resolve(
-            &self.cur_specs,
+            specs,
             Some(&self.game_config),
             effective,
             Some(&self.global_config),
         )
+    }
+
+    /// Manifest path + editability for a module id. A module is editable only when
+    /// its manifest is *not* one of the bundled sets (`default/…`, `built-in/…`),
+    /// which — although bootstrapped into the user config dir — remain
+    /// inspect-only until forked (Phase 3).
+    fn module_editability(&self, id: &str) -> Option<(PathBuf, bool)> {
+        let idx = self.all_specs.iter().position(|s| s.id() == id)?;
+        let rel = &self.all_dirs[idx];
+        let top = rel.components().next().and_then(|c| c.as_os_str().to_str());
+        let bundled = matches!(top, Some("default") | Some("built-in"));
+        Some((self.all_manifests[idx].clone(), !bundled))
+    }
+
+    /// Load a fresh draft for `id` unless one is already open for it (keeping any
+    /// in-progress edits). Opening a *different* module replaces the draft.
+    fn ensure_draft(&mut self, id: &str) {
+        if self.module_draft.as_ref().map(|d| d.id.as_str()) == Some(id) {
+            return;
+        }
+        let Some(spec) = self.all_specs.iter().find(|s| s.id() == id).cloned() else {
+            self.module_draft = None;
+            return;
+        };
+        let (manifest, editable) = self
+            .module_editability(id)
+            .unwrap_or_else(|| (PathBuf::new(), false));
+        let baseline = serde_json::to_value(&spec).unwrap_or(Value::Null);
+        let baseline_vars = spec
+            .ui
+            .values()
+            .flatten()
+            .map(|f| f.variable.clone())
+            .collect();
+        let sections: Vec<(String, Vec<UiField>)> =
+            spec.ui.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let mut ext = spec;
+        ext.ui.clear(); // authoritative UI lives in `sections`
+        self.module_draft = Some(ModuleDraft {
+            id: id.to_string(),
+            manifest,
+            editable,
+            ext,
+            sections,
+            baseline,
+            baseline_vars,
+            name_error: None,
+        });
+    }
+
+    /// Serialize the draft and write it to its manifest via `write_atomic`, then
+    /// reload extensions so `cur_specs`/dirty reset (draft == disk). Refuses to
+    /// write unless the Save gate is satisfied.
+    fn save_module(&mut self) {
+        let Some(draft) = self.module_draft.as_ref() else {
+            return;
+        };
+        if !draft.save_enabled() {
+            return;
+        }
+        let manifest = draft.manifest.clone();
+        let json = match serde_json::to_string_pretty(&draft.snapshot()) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("ritz: failed to serialize module: {e:#}");
+                return;
+            }
+        };
+        if let Err(e) = core_config::write_atomic(&manifest, json.as_bytes()) {
+            eprintln!("ritz: failed to save module: {e:#}");
+            return;
+        }
+        // Drop the draft and reload from disk; ensure_draft rebuilds it clean.
+        self.module_draft = None;
+        self.reload_extensions();
+        self.flush_config_writes_if_clean();
+    }
+
+    /// Discard the in-memory draft (Revert). ensure_draft reloads a clean copy on
+    /// the next frame; releasing the interlock flushes any held config writes.
+    fn discard_module(&mut self) {
+        self.module_draft = None;
+        self.flush_config_writes_if_clean();
+    }
+
+    /// Flush config edits that were withheld by the interlock, but only once no
+    /// module draft is dirty. Saves every config layer so a held edit at any
+    /// scope (global / profile / game) reaches disk.
+    fn flush_config_writes_if_clean(&mut self) {
+        if !self.pending_config_write {
+            return;
+        }
+        if self.module_draft.as_ref().map_or(false, |d| d.dirty()) {
+            return;
+        }
+        let _ = self.paths.save_global_config(&self.global_config);
+        let _ = self.paths.save_game(&self.game_config);
+        if let Some(p) = &self.editing_preset_buf {
+            let _ = self.paths.save_preset(p);
+        }
+        self.pending_config_write = false;
     }
 
     fn persist(&self) {
@@ -462,6 +714,11 @@ impl GuiApp {
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::R)) {
             self.reload_extensions();
             self.reload_configs();
+        }
+
+        // Keep the module-editor draft in sync with the selected module.
+        if let NavSel::ModuleEditor(id) = self.nav_sel.clone() {
+            self.ensure_draft(&id);
         }
 
         let edit_resolution = self.resolve_for_editing();
@@ -518,6 +775,42 @@ impl GuiApp {
         });
         } // end if !GeneralSettings
 
+        // Assemble the launch preview. In the module editor, splice the in-memory
+        // draft over its on-disk entry so the preview reflects unsaved edits, and
+        // lint for set/set env collisions across modules.
+        let (preview, collisions): (String, Vec<String>) =
+            if matches!(self.nav_sel, NavSel::ModuleEditor(_)) {
+                match &self.module_draft {
+                    Some(draft) => {
+                        let mut preview_specs = self.cur_specs.clone();
+                        if let Some(pos) =
+                            preview_specs.iter().position(|s| s.id() == draft.id)
+                        {
+                            preview_specs[pos] = draft.snapshot();
+                        }
+                        let res = self.resolve_specs_for_game(&preview_specs);
+                        let text =
+                            context::assemble_launch(&preview_specs, &res, &self.game_command)
+                                .map(|lc| lc.to_string())
+                                .unwrap_or_else(|e| format!("<error: {e}>"));
+                        let coll = set_set_collisions(&preview_specs, &res);
+                        (text, coll)
+                    }
+                    None => (String::new(), Vec::new()),
+                }
+            } else {
+                let preview_res = if matches!(self.nav_sel, NavSel::Profile(_)) {
+                    &edit_resolution
+                } else {
+                    &game_resolution
+                };
+                let text =
+                    context::assemble_launch(&self.cur_specs, preview_res, &self.game_command)
+                        .map(|lc| lc.to_string())
+                        .unwrap_or_else(|e| format!("<error: {e}>"));
+                (text, Vec::new())
+            };
+
         let dynamic_preview = self.general_config.dynamic_preview;
         {
             let mut panel = egui::TopBottomPanel::bottom("preview")
@@ -546,16 +839,16 @@ impl GuiApp {
                         .small(),
                     );
                 }
+                for var in &collisions {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "\u{f071} Two modules both Set {var} — one value will be lost.",
+                        ))
+                        .color(theme::COL_GLOBAL)
+                        .small(),
+                    );
+                }
                 ui.add_space(8.0);
-                let preview_res = if matches!(self.nav_sel, NavSel::Profile(_)) {
-                    &edit_resolution
-                } else {
-                    &game_resolution
-                };
-                let preview =
-                    context::assemble_launch(&self.cur_specs, preview_res, &self.game_command)
-                        .map(|lc| lc.to_string())
-                        .unwrap_or_else(|e| format!("<error: {e}>"));
                 egui::Frame::none()
                     .fill(theme::FIELD)
                     .stroke(egui::Stroke::new(1.0, theme::BORDER))
@@ -587,7 +880,7 @@ impl GuiApp {
             }
 
             if let NavSel::ModuleEditor(id) = self.nav_sel.clone() {
-                self.render_module_inspector(ui, &id);
+                self.render_module_editor(ui, &id);
                 return;
             }
 
@@ -741,8 +1034,20 @@ impl GuiApp {
         }
 
         if changed {
-            self.persist();
+            // Interlock: hold the config write to disk while a module editor draft
+            // is dirty (the in-memory config already reflects the edit). The held
+            // write is flushed once the draft becomes clean (Save / Discard / manual
+            // revert), so no config change is lost.
+            let editor_dirty = self.module_draft.as_ref().map_or(false, |d| d.dirty());
+            if config_autosave_held(editor_dirty) {
+                self.pending_config_write = true;
+            } else {
+                self.persist();
+            }
         }
+        // Release the interlock if the draft became clean without a Save/Discard
+        // click (e.g. the user hand-reverted the edit back to disk).
+        self.flush_config_writes_if_clean();
     }
 
     /// Render the pending-confirmation modal, if any. Returns true if a
@@ -835,81 +1140,120 @@ impl GuiApp {
 }
 
 impl GuiApp {
-    /// Phase 1: read-only manifest inspector. Renders meta, every UI section's
-    /// fields, and the four output blocks (ENV_VARS/GAME_ENV_VARS/WRAPPERS/
-    /// GAME_LAUNCH_ARGS) as plain labels — nothing here is editable. `id` is the
-    /// module's `Extension::id()` (`Author::Name::Version`), looked up fresh from
-    /// `cur_specs` each frame so it stays correct if the module reloads.
-    fn render_module_inspector(&self, ui: &mut egui::Ui, id: &str) {
-        let Some(spec) = self.cur_specs.iter().find(|s| s.id() == id) else {
-            ui.label(
-                egui::RichText::new("This module is no longer available.").color(theme::DIM),
-            );
-            return;
-        };
+    /// Phase 2: editable manifest editor. Edits an in-memory [`ModuleDraft`] with a
+    /// live preview and an explicit Save. Bundled modules render the same widgets
+    /// but disabled (Save shows a "Fork to edit" tooltip). `id` is the module's
+    /// `Extension::id()`; the draft is (re)loaded by [`ensure_draft`] each frame.
+    fn render_module_editor(&mut self, ui: &mut egui::Ui, id: &str) {
+        let touch = self.general_config.touch_mode;
+        let full_width = self.general_config.full_width;
+        let mut action = TopAction::None;
+        {
+            let Some(draft) = self.module_draft.as_mut() else {
+                ui.label(egui::RichText::new("This module is no longer available.").color(theme::DIM));
+                return;
+            };
+            if draft.id != id {
+                ui.label(egui::RichText::new("Loading\u{2026}").color(theme::DIM));
+                return;
+            }
+            let editable = draft.editable;
+            let dirty = draft.dirty();
+            let snap = draft.snapshot();
+            let valid = core_extension::validate(&snap).is_ok();
+            let req_ok = all_requires_parse(&snap);
+            let save_on = draft.save_enabled();
 
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.heading(&spec.meta.name);
             ui.add_space(6.0);
-            ui.label(egui::RichText::new(format!("v{}", spec.meta.version)).color(theme::FAINT));
-            ui.label(egui::RichText::new(format!("by {}", spec.meta.author)).color(theme::FAINT));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.horizontal(|ui| {
+                ui.heading(&draft.ext.meta.name);
+                ui.add_space(6.0);
                 ui.label(
-                    egui::RichText::new("READ-ONLY INSPECTOR")
-                        .color(theme::COL_GLOBAL)
-                        .small()
-                        .strong(),
+                    egui::RichText::new(format!("v{}", draft.ext.meta.version)).color(theme::FAINT),
                 );
-            });
-        });
-        if let Some(backend) = &spec.backend {
-            ui.add_space(2.0);
-            ui.label(egui::RichText::new(format!("Backend: {backend}")).color(theme::DIM).small());
-        }
-        if let Some(forked) = &spec.meta.forked_from {
-            ui.label(egui::RichText::new(format!("Forked from: {forked}")).color(theme::DIM).small());
-        }
-        if let Some(desc) = &spec.meta.description {
-            ui.add_space(4.0);
-            ui.label(egui::RichText::new(desc).color(theme::DIM));
-        }
-        ui.add_space(10.0);
-        ui.separator();
-
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .drag_to_scroll(self.general_config.touch_mode)
-            .show(ui, |ui| {
-                ui.vertical(|ui| {
-                    let avail = (ui.available_width() - 18.0).max(300.0);
-                    let max_w = if self.general_config.full_width { avail } else { avail.min(743.0) };
-                    ui.set_max_width(max_w);
-
-                    for (section, fields) in &spec.ui {
-                        if fields.is_empty() {
-                            continue;
-                        }
-                        ui.add_space(12.0);
-                        ui.label(theme::section_label(section));
-                        ui.add_space(6.0);
-                        for field in fields {
-                            render_inspector_field(ui, field);
-                        }
+                ui.label(
+                    egui::RichText::new(format!("by {}", draft.ext.meta.author)).color(theme::FAINT),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let mut save = ui.add_enabled(save_on, theme::primary_button("Save"));
+                    if !editable {
+                        save = save.on_hover_text("Fork to edit");
                     }
-
-                    render_inspector_env_block(ui, "ENV_VARS", &spec.env_vars);
-                    render_inspector_env_block(ui, "GAME_ENV_VARS", &spec.game_env_vars);
-                    render_inspector_wrapper_block(ui, &spec.wrappers);
-                    render_inspector_arg_block(ui, "GAME_LAUNCH_ARGS", &spec.game_launch_args);
+                    if save.clicked() {
+                        action = TopAction::Save;
+                    }
+                    if ui
+                        .add_enabled(dirty && editable, theme::secondary_button("Discard"))
+                        .clicked()
+                    {
+                        action = TopAction::Discard;
+                    }
                 });
             });
+
+            // Status line under the header.
+            if !editable {
+                ui.label(
+                    egui::RichText::new("Bundled module \u{2014} read-only. Fork to edit (coming soon).")
+                        .color(theme::COL_GLOBAL)
+                        .small(),
+                );
+            } else if dirty {
+                ui.label(
+                    egui::RichText::new(
+                        "Unsaved changes \u{2014} config autosave paused until you Save or Discard.",
+                    )
+                    .color(theme::COL_PROFILE)
+                    .small(),
+                );
+            }
+            if editable && !valid {
+                ui.label(
+                    egui::RichText::new("Manifest is invalid \u{2014} fix errors before saving.")
+                        .color(theme::COL_GLOBAL)
+                        .small(),
+                );
+            }
+            if editable && !req_ok {
+                ui.label(
+                    egui::RichText::new("A Requires expression does not parse.")
+                        .color(theme::COL_GLOBAL)
+                        .small(),
+                );
+            }
+            ui.add_space(10.0);
+            ui.separator();
+
+            let mut deferred: Vec<Deferred> = Vec::new();
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .drag_to_scroll(touch)
+                .show(ui, |ui| {
+                    ui.vertical(|ui| {
+                        let avail = (ui.available_width() - 18.0).max(300.0);
+                        let max_w = if full_width { avail } else { avail.min(743.0) };
+                        ui.set_max_width(max_w);
+                        ui.add_enabled_ui(editable, |ui| {
+                            render_editor_body(ui, draft, &mut deferred);
+                        });
+                    });
+                });
+            // Apply structural edits AFTER the render loop (never mid-iteration).
+            for d in deferred {
+                apply_deferred(draft, d);
+            }
+        }
+        match action {
+            TopAction::Save => self.save_module(),
+            TopAction::Discard => self.discard_module(),
+            TopAction::None => {}
+        }
     }
 }
 
-/// A read-only labeled card, matching the tint/rounding of the editable field
-/// cards elsewhere in the app but with plain text instead of interactive widgets.
-fn inspector_card(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
+/// A labeled card matching the tint/rounding used elsewhere in the app, holding
+/// the editable widgets of one field / block entry.
+fn editor_card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::none()
         .fill(theme::FIELD)
         .stroke(egui::Stroke::new(1.0, theme::BORDER))
@@ -917,147 +1261,598 @@ fn inspector_card(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
         .inner_margin(egui::Margin::symmetric(12.0, 8.0))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            add_contents(ui);
+            add(ui);
         });
     ui.add_space(6.0);
 }
 
-fn inspector_meta_line(ui: &mut egui::Ui, text: impl Into<String>) {
-    ui.label(egui::RichText::new(text.into()).color(theme::DIM).small());
+/// A `+`-prefixed secondary button used for "add" affordances.
+fn add_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add(theme::secondary_button(format!("\u{f067} {label}")))
 }
 
-/// One read-only UI-field row: Name, Variable, Type, Description, Requires, and
-/// type-specific detail (Selection options / int-float range / toggle default).
-fn render_inspector_field(ui: &mut egui::Ui, field: &UiField) {
-    inspector_card(ui, |ui| {
-        let label = field.name.clone().unwrap_or_else(|| field.variable.clone());
-        ui.label(egui::RichText::new(label).color(theme::TEXT).strong());
-        inspector_meta_line(ui, format!("Variable: {}", field.variable));
-        inspector_meta_line(ui, format!("Type: {:?}", field.field_type));
-        if let Some(desc) = &field.description {
-            inspector_meta_line(ui, desc.clone());
+/// The reusable `[↑][↓][🗑]` row-action widget. Returns the action the user
+/// clicked; the caller records a path-addressed [`Deferred`] and applies the
+/// container-correct op after the render loop.
+fn row_actions(ui: &mut egui::Ui, idx: usize, len: usize) -> RowAction {
+    let mut a = RowAction::None;
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        if ui.add(theme::danger_button("\u{f1f8}")).on_hover_text("Remove").clicked() {
+            a = RowAction::Remove;
         }
-        if let Some(req) = &field.requires {
-            ui.label(
-                egui::RichText::new(format!("Requires: {req}")).color(theme::COL_PROFILE).small(),
+        if ui
+            .add_enabled(idx + 1 < len, theme::secondary_button("\u{f063}"))
+            .on_hover_text("Move down")
+            .clicked()
+        {
+            a = RowAction::Down;
+        }
+        if ui
+            .add_enabled(idx > 0, theme::secondary_button("\u{f062}"))
+            .on_hover_text("Move up")
+            .clicked()
+        {
+            a = RowAction::Up;
+        }
+    });
+    a
+}
+
+/// Edit an `Option<String>` as a single line (empty text → `None`).
+fn opt_text_edit(ui: &mut egui::Ui, val: &mut Option<String>, hint: &str) {
+    let mut s = val.clone().unwrap_or_default();
+    ui.add(
+        egui::TextEdit::singleline(&mut s)
+            .hint_text(hint)
+            .desired_width(f32::INFINITY),
+    );
+    *val = if s.is_empty() { None } else { Some(s) };
+}
+
+/// A raw single-line `Requires` editor, live-validated via `condition::parse`.
+/// The text turns red on a parse error; the wordy error is shown only once the
+/// field is not actively being edited.
+fn requires_edit(ui: &mut egui::Ui, val: &mut Option<String>) {
+    let mut s = val.clone().unwrap_or_default();
+    let parsed = condition::parse(&s);
+    let ok = s.trim().is_empty() || parsed.is_ok();
+    let color = if ok { theme::DIM } else { theme::COL_GLOBAL };
+    let resp = ui.add(
+        egui::TextEdit::singleline(&mut s)
+            .hint_text("Requires (optional)")
+            .text_color(color)
+            .desired_width(f32::INFINITY),
+    );
+    *val = if s.trim().is_empty() { None } else { Some(s) };
+    if !ok && (!resp.has_focus() || resp.lost_focus()) {
+        if let Err(e) = parsed {
+            ui.label(egui::RichText::new(e.to_string()).color(theme::COL_GLOBAL).small());
+        }
+    }
+}
+
+fn field_type_label(t: FieldType) -> &'static str {
+    match t {
+        FieldType::Toggle => "toggle",
+        FieldType::Selection => "selection",
+        FieldType::Integer => "integer",
+        FieldType::Float => "float",
+        FieldType::String => "string",
+        FieldType::MultiString => "multi_string",
+    }
+}
+
+fn env_op_label(op: EnvOp) -> &'static str {
+    match op {
+        EnvOp::Set => "set",
+        EnvOp::Append => "append",
+        EnvOp::Unset => "unset",
+    }
+}
+
+/// Ensure a field's `Options` is a `List`, returning it for editing. Called only
+/// for Selection fields (a fresh Selection with no list starts empty).
+fn ensure_list(options: &mut Option<OptionsSpec>) -> &mut Vec<String> {
+    if !matches!(options, Some(OptionsSpec::List(_))) {
+        *options = Some(OptionsSpec::List(Vec::new()));
+    }
+    match options {
+        Some(OptionsSpec::List(v)) => v,
+        _ => unreachable!(),
+    }
+}
+
+fn new_field(variable: String) -> UiField {
+    UiField {
+        name: None,
+        description: None,
+        field_type: FieldType::Toggle,
+        variable,
+        default: None,
+        options: None,
+        display_options: None,
+        requires: None,
+    }
+}
+
+/// The whole editable body: meta, UI sections (with fields), and the four output
+/// blocks. Structural edits are pushed to `deferred`; scalar edits mutate in place.
+fn render_editor_body(ui: &mut egui::Ui, draft: &mut ModuleDraft, deferred: &mut Vec<Deferred>) {
+    let ModuleDraft {
+        ext,
+        sections,
+        baseline_vars,
+        ..
+    } = draft;
+
+    // ── Meta ────────────────────────────────────────────────────────────────
+    ui.add_space(6.0);
+    editor_card(ui, |ui| {
+        ui.label(egui::RichText::new("Module").color(theme::TEXT).strong());
+        ui.label(egui::RichText::new("Description").color(theme::DIM).small());
+        opt_text_edit(ui, &mut ext.meta.description, "Description");
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Backend (advanced, optional)").color(theme::DIM).small());
+        opt_text_edit(ui, &mut ext.backend, "Backend");
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new("Author, Name and Version are locked in this release.")
+                .color(theme::FAINT)
+                .small(),
+        );
+    });
+
+    // ── UI sections ─────────────────────────────────────────────────────────
+    ui.add_space(12.0);
+    ui.horizontal(|ui| {
+        ui.label(theme::section_label("UI Sections"));
+        if add_button(ui, "Add section").clicked() {
+            deferred.push(Deferred::SectionAdd);
+        }
+    });
+    ui.add_space(6.0);
+    let sec_len = sections.len();
+    for (si, (name, fields)) in sections.iter_mut().enumerate() {
+        editor_card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(name).desired_width(220.0));
+                let a = row_actions(ui, si, sec_len);
+                if a != RowAction::None {
+                    deferred.push(Deferred::Section(si, a));
+                }
+            });
+            ui.add_space(4.0);
+            let f_len = fields.len();
+            for (fi, field) in fields.iter_mut().enumerate() {
+                render_field_editor(ui, field, si, fi, f_len, baseline_vars, deferred);
+            }
+            if add_button(ui, "Add field").clicked() {
+                deferred.push(Deferred::FieldAdd(si));
+            }
+        });
+    }
+
+    // ── Output blocks ─────────────────────────────────────────────────────────
+    render_env_block_editor(ui, "ENV_VARS", false, &mut ext.env_vars, deferred);
+    render_env_block_editor(ui, "GAME_ENV_VARS", true, &mut ext.game_env_vars, deferred);
+    render_wrapper_block_editor(ui, &mut ext.wrappers, deferred);
+    render_arg_block_editor(ui, &mut ext.game_launch_args, deferred);
+}
+
+/// One editable UI-field card. An *existing* field's `Variable` (present on disk)
+/// is read-only — renaming it would orphan config (Phase 3's migration). A newly
+/// added field's `Variable` is editable at creation.
+fn render_field_editor(
+    ui: &mut egui::Ui,
+    field: &mut UiField,
+    si: usize,
+    fi: usize,
+    f_len: usize,
+    baseline_vars: &std::collections::HashSet<String>,
+    deferred: &mut Vec<Deferred>,
+) {
+    editor_card(ui, |ui| {
+        ui.horizontal(|ui| {
+            let mut name = field.name.clone().unwrap_or_default();
+            ui.add(
+                egui::TextEdit::singleline(&mut name)
+                    .hint_text("Field label")
+                    .desired_width(220.0),
             );
-        }
+            field.name = if name.is_empty() { None } else { Some(name) };
+            let a = row_actions(ui, fi, f_len);
+            if a != RowAction::None {
+                deferred.push(Deferred::Field(si, fi, a));
+            }
+        });
+
+        // Variable — locked if it existed on disk, editable if newly added.
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Variable").color(theme::DIM).small());
+            if baseline_vars.contains(&field.variable) {
+                ui.label(egui::RichText::new(&field.variable).color(theme::FAINT).monospace());
+                ui.label(egui::RichText::new("(locked)").color(theme::FAINT).small());
+            } else {
+                ui.add(egui::TextEdit::singleline(&mut field.variable).desired_width(200.0));
+            }
+        });
+
+        // Type.
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Type").color(theme::DIM).small());
+            egui::ComboBox::from_id_salt((si, fi, "type"))
+                .selected_text(field_type_label(field.field_type))
+                .show_ui(ui, |ui| {
+                    for t in [
+                        FieldType::Toggle,
+                        FieldType::Selection,
+                        FieldType::Integer,
+                        FieldType::Float,
+                        FieldType::String,
+                        FieldType::MultiString,
+                    ] {
+                        ui.selectable_value(&mut field.field_type, t, field_type_label(t));
+                    }
+                });
+        });
+
+        opt_text_edit(ui, &mut field.description, "Description");
+        requires_edit(ui, &mut field.requires);
+
+        // Type-specific detail.
         match field.field_type {
             FieldType::Selection => {
-                let opts = option_values(field);
-                if !opts.is_empty() {
-                    let joined = opts
-                        .iter()
-                        .map(|(v, l)| if v == l { v.clone() } else { format!("{l} ({v})") })
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    inspector_meta_line(ui, format!("Options: {joined}"));
+                ui.label(egui::RichText::new("Options").color(theme::DIM).small());
+                let opts = ensure_list(&mut field.options);
+                let ol = opts.len();
+                for (oi, opt) in opts.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(opt).desired_width(200.0));
+                        let a = row_actions(ui, oi, ol);
+                        if a != RowAction::None {
+                            deferred.push(Deferred::FieldOpt(si, fi, oi, a));
+                        }
+                    });
+                }
+                if add_button(ui, "Add option").clicked() {
+                    deferred.push(Deferred::FieldOptAdd(si, fi));
                 }
             }
             FieldType::Integer | FieldType::Float => {
-                let (min, max, step) = number_range(field);
-                inspector_meta_line(ui, format!("Range: {min}..{max} (step {step})"));
+                let (mut min, mut max, mut step) = number_range(field);
+                let mut ch = false;
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Min").color(theme::DIM).small());
+                    ch |= ui.add(egui::DragValue::new(&mut min)).changed();
+                    ui.label(egui::RichText::new("Max").color(theme::DIM).small());
+                    ch |= ui.add(egui::DragValue::new(&mut max)).changed();
+                    ui.label(egui::RichText::new("Step").color(theme::DIM).small());
+                    ch |= ui.add(egui::DragValue::new(&mut step)).changed();
+                });
+                if ch {
+                    field.options = Some(OptionsSpec::Range { min, max, step: Some(step) });
+                }
             }
             FieldType::Toggle => {
-                let def = field.default.as_ref().and_then(|v| v.as_bool()).unwrap_or(false);
-                inspector_meta_line(ui, format!("Default: {def}"));
+                let mut def = field.default.as_ref().and_then(|v| v.as_bool()).unwrap_or(false);
+                if ui.checkbox(&mut def, "Default on").changed() {
+                    field.default = Some(json!(def));
+                }
             }
             FieldType::String | FieldType::MultiString => {}
         }
     });
 }
 
-/// One read-only builder step line (`set`/`append`/`unset` + value/separator/Requires).
-fn env_builder_step_line(step: &EnvBuilderEntry) -> String {
-    let op = match step.op {
-        EnvOp::Set => "set",
-        EnvOp::Append => "append",
-        EnvOp::Unset => "unset",
-    };
-    let mut line = op.to_string();
-    if let Some(v) = &step.value {
-        line.push_str(&format!(" = {v}"));
-    }
-    if let Some(sep) = &step.separator {
-        line.push_str(&format!("  (separator {sep:?})"));
-    }
-    if let Some(req) = &step.requires {
-        line.push_str(&format!("  [Requires: {req}]"));
-    }
-    line
-}
-
-/// ENV_VARS / GAME_ENV_VARS block: one card per `EnvVarSpec`, showing Name,
-/// Requires, and every builder step.
-fn render_inspector_env_block(ui: &mut egui::Ui, title: &str, specs: &[EnvVarSpec]) {
-    if specs.is_empty() {
-        return;
-    }
+/// ENV_VARS / GAME_ENV_VARS editor. `game` selects which block (for deferral).
+fn render_env_block_editor(
+    ui: &mut egui::Ui,
+    title: &str,
+    game: bool,
+    specs: &mut [EnvVarSpec],
+    deferred: &mut Vec<Deferred>,
+) {
     ui.add_space(12.0);
-    ui.label(theme::section_label(title));
+    ui.horizontal(|ui| {
+        ui.label(theme::section_label(title));
+        if add_button(ui, "Add variable").clicked() {
+            deferred.push(Deferred::EnvAdd(game));
+        }
+    });
     ui.add_space(6.0);
-    for spec in specs {
-        inspector_card(ui, |ui| {
-            ui.label(egui::RichText::new(&spec.name).color(theme::TEXT).strong());
-            if let Some(req) = &spec.requires {
-                ui.label(
-                    egui::RichText::new(format!("Requires: {req}")).color(theme::COL_PROFILE).small(),
-                );
-            }
-            for step in &spec.builder {
-                inspector_meta_line(ui, env_builder_step_line(step));
-            }
-        });
-    }
-}
-
-/// WRAPPERS block: one card per `WrapperSpec`, showing CommandSyntax, Priority,
-/// Requires, and every builder step's value.
-fn render_inspector_wrapper_block(ui: &mut egui::Ui, specs: &[WrapperSpec]) {
-    if specs.is_empty() {
-        return;
-    }
-    ui.add_space(12.0);
-    ui.label(theme::section_label("WRAPPERS"));
-    ui.add_space(6.0);
-    for spec in specs {
-        inspector_card(ui, |ui| {
-            ui.label(egui::RichText::new(&spec.command_syntax).color(theme::TEXT).strong());
-            inspector_meta_line(ui, format!("Priority: {}", spec.priority));
-            if let Some(req) = &spec.requires {
-                ui.label(
-                    egui::RichText::new(format!("Requires: {req}")).color(theme::COL_PROFILE).small(),
-                );
-            }
-            for step in &spec.builder {
-                let mut line = step.value.clone();
-                if let Some(req) = &step.requires {
-                    line.push_str(&format!("  [Requires: {req}]"));
+    let len = specs.len();
+    for (ei, spec) in specs.iter_mut().enumerate() {
+        editor_card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Name").color(theme::DIM).small());
+                ui.add(egui::TextEdit::singleline(&mut spec.name).desired_width(220.0));
+                let a = row_actions(ui, ei, len);
+                if a != RowAction::None {
+                    deferred.push(Deferred::Env(game, ei, a));
                 }
-                inspector_meta_line(ui, line);
+            });
+            requires_edit(ui, &mut spec.requires);
+            let sl = spec.builder.len();
+            for (bi, step) in spec.builder.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt((game, ei, bi, "op"))
+                        .selected_text(env_op_label(step.op))
+                        .width(80.0)
+                        .show_ui(ui, |ui| {
+                            for op in [EnvOp::Set, EnvOp::Append, EnvOp::Unset] {
+                                ui.selectable_value(&mut step.op, op, env_op_label(op));
+                            }
+                        });
+                    let mut v = step.value.clone().unwrap_or_default();
+                    ui.add(
+                        egui::TextEdit::singleline(&mut v)
+                            .hint_text("Value")
+                            .desired_width(160.0),
+                    );
+                    step.value = if v.is_empty() { None } else { Some(v) };
+                    let mut sep = step.separator.clone().unwrap_or_default();
+                    ui.label(egui::RichText::new("Sep").color(theme::DIM).small());
+                    ui.add(egui::TextEdit::singleline(&mut sep).desired_width(48.0));
+                    step.separator = if sep.is_empty() { None } else { Some(sep) };
+                    let a = row_actions(ui, bi, sl);
+                    if a != RowAction::None {
+                        deferred.push(Deferred::EnvStep(game, ei, bi, a));
+                    }
+                });
+                requires_edit(ui, &mut step.requires);
+            }
+            if add_button(ui, "Add step").clicked() {
+                deferred.push(Deferred::EnvStepAdd(game, ei));
             }
         });
     }
 }
 
-/// GAME_LAUNCH_ARGS block: one card per `ArgSpec`, showing Value and Requires.
-fn render_inspector_arg_block(ui: &mut egui::Ui, title: &str, specs: &[ArgSpec]) {
-    if specs.is_empty() {
-        return;
-    }
+/// WRAPPERS editor: CommandSyntax, an editable Priority (lower = outermost), and
+/// per-step option values.
+fn render_wrapper_block_editor(
+    ui: &mut egui::Ui,
+    wrappers: &mut [WrapperSpec],
+    deferred: &mut Vec<Deferred>,
+) {
     ui.add_space(12.0);
-    ui.label(theme::section_label(title));
+    ui.horizontal(|ui| {
+        ui.label(theme::section_label("WRAPPERS"));
+        if add_button(ui, "Add wrapper").clicked() {
+            deferred.push(Deferred::WrapperAdd);
+        }
+    });
     ui.add_space(6.0);
-    for spec in specs {
-        inspector_card(ui, |ui| {
-            ui.label(egui::RichText::new(&spec.value).color(theme::TEXT).strong());
-            if let Some(req) = &spec.requires {
-                ui.label(
-                    egui::RichText::new(format!("Requires: {req}")).color(theme::COL_PROFILE).small(),
+    let len = wrappers.len();
+    for (wi, w) in wrappers.iter_mut().enumerate() {
+        editor_card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut w.command_syntax)
+                        .hint_text("gamescope {OPTIONS} --")
+                        .desired_width(260.0),
                 );
+                let a = row_actions(ui, wi, len);
+                if a != RowAction::None {
+                    deferred.push(Deferred::Wrapper(wi, a));
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Priority (lower = outermost)").color(theme::DIM).small());
+                ui.add(egui::DragValue::new(&mut w.priority));
+            });
+            requires_edit(ui, &mut w.requires);
+            let sl = w.builder.len();
+            for (bi, step) in w.builder.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut step.value)
+                            .hint_text("Option")
+                            .desired_width(200.0),
+                    );
+                    let a = row_actions(ui, bi, sl);
+                    if a != RowAction::None {
+                        deferred.push(Deferred::WrapperStep(wi, bi, a));
+                    }
+                });
+                requires_edit(ui, &mut step.requires);
+            }
+            if add_button(ui, "Add option").clicked() {
+                deferred.push(Deferred::WrapperStepAdd(wi));
             }
         });
     }
+}
+
+/// GAME_LAUNCH_ARGS editor: one Value + Requires per arg.
+fn render_arg_block_editor(
+    ui: &mut egui::Ui,
+    args: &mut [ArgSpec],
+    deferred: &mut Vec<Deferred>,
+) {
+    ui.add_space(12.0);
+    ui.horizontal(|ui| {
+        ui.label(theme::section_label("GAME_LAUNCH_ARGS"));
+        if add_button(ui, "Add argument").clicked() {
+            deferred.push(Deferred::ArgAdd);
+        }
+    });
+    ui.add_space(6.0);
+    let len = args.len();
+    for (ai, arg) in args.iter_mut().enumerate() {
+        editor_card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut arg.value)
+                        .hint_text("Argument")
+                        .desired_width(260.0),
+                );
+                let a = row_actions(ui, ai, len);
+                if a != RowAction::None {
+                    deferred.push(Deferred::Arg(ai, a));
+                }
+            });
+            requires_edit(ui, &mut arg.requires);
+        });
+    }
+}
+
+/// Apply a `RowAction` to a `Vec` (reorder via `swap`, remove via `remove`).
+fn apply_row<T>(v: &mut Vec<T>, idx: usize, a: RowAction) {
+    match a {
+        RowAction::Up => {
+            if idx > 0 && idx < v.len() {
+                v.swap(idx - 1, idx);
+            }
+        }
+        RowAction::Down => {
+            if idx + 1 < v.len() {
+                v.swap(idx, idx + 1);
+            }
+        }
+        RowAction::Remove => {
+            if idx < v.len() {
+                v.remove(idx);
+            }
+        }
+        RowAction::None => {}
+    }
+}
+
+/// A `base` name made unique against `used` by appending `_2`, `_3`, …
+fn unique_string(used: &std::collections::HashSet<String>, base: &str) -> String {
+    if !used.contains(base) {
+        return base.to_string();
+    }
+    let mut n = 2;
+    loop {
+        let cand = format!("{base}_{n}");
+        if !used.contains(&cand) {
+            return cand;
+        }
+        n += 1;
+    }
+}
+
+fn env_block<'a>(ext: &'a mut Extension, game: bool) -> &'a mut Vec<EnvVarSpec> {
+    if game {
+        &mut ext.game_env_vars
+    } else {
+        &mut ext.env_vars
+    }
+}
+
+/// Apply one path-addressed structural edit to the draft. Applied after the
+/// render loop so the containers are never mutated mid-iteration.
+fn apply_deferred(draft: &mut ModuleDraft, d: Deferred) {
+    match d {
+        Deferred::Section(i, a) => apply_row(&mut draft.sections, i, a),
+        Deferred::SectionAdd => {
+            let used: std::collections::HashSet<String> =
+                draft.sections.iter().map(|(k, _)| k.clone()).collect();
+            draft
+                .sections
+                .push((unique_string(&used, "New Section"), Vec::new()));
+        }
+        Deferred::Field(si, fi, a) => {
+            if let Some((_, fs)) = draft.sections.get_mut(si) {
+                apply_row(fs, fi, a);
+            }
+        }
+        Deferred::FieldAdd(si) => {
+            let used: std::collections::HashSet<String> = draft
+                .sections
+                .iter()
+                .flat_map(|(_, fs)| fs.iter().map(|f| f.variable.clone()))
+                .collect();
+            let var = unique_string(&used, "new_var");
+            if let Some((_, fs)) = draft.sections.get_mut(si) {
+                fs.push(new_field(var));
+            }
+        }
+        Deferred::FieldOpt(si, fi, oi, a) => {
+            if let Some((_, fs)) = draft.sections.get_mut(si) {
+                if let Some(f) = fs.get_mut(fi) {
+                    if let Some(OptionsSpec::List(v)) = &mut f.options {
+                        apply_row(v, oi, a);
+                    }
+                }
+            }
+        }
+        Deferred::FieldOptAdd(si, fi) => {
+            if let Some((_, fs)) = draft.sections.get_mut(si) {
+                if let Some(f) = fs.get_mut(fi) {
+                    ensure_list(&mut f.options).push(String::new());
+                }
+            }
+        }
+        Deferred::Env(game, i, a) => apply_row(env_block(&mut draft.ext, game), i, a),
+        Deferred::EnvAdd(game) => env_block(&mut draft.ext, game).push(EnvVarSpec {
+            name: "NEW_VAR".to_string(),
+            requires: None,
+            builder: Vec::new(),
+        }),
+        Deferred::EnvStep(game, ei, bi, a) => {
+            if let Some(e) = env_block(&mut draft.ext, game).get_mut(ei) {
+                apply_row(&mut e.builder, bi, a);
+            }
+        }
+        Deferred::EnvStepAdd(game, ei) => {
+            if let Some(e) = env_block(&mut draft.ext, game).get_mut(ei) {
+                e.builder.push(EnvBuilderEntry {
+                    requires: None,
+                    op: EnvOp::Set,
+                    value: Some(String::new()),
+                    separator: None,
+                });
+            }
+        }
+        Deferred::Wrapper(i, a) => apply_row(&mut draft.ext.wrappers, i, a),
+        Deferred::WrapperAdd => draft.ext.wrappers.push(WrapperSpec {
+            command_syntax: String::new(),
+            requires: None,
+            priority: 0,
+            builder: Vec::new(),
+        }),
+        Deferred::WrapperStep(wi, bi, a) => {
+            if let Some(w) = draft.ext.wrappers.get_mut(wi) {
+                apply_row(&mut w.builder, bi, a);
+            }
+        }
+        Deferred::WrapperStepAdd(wi) => {
+            if let Some(w) = draft.ext.wrappers.get_mut(wi) {
+                w.builder.push(WrapperBuilderEntry {
+                    requires: None,
+                    value: String::new(),
+                });
+            }
+        }
+        Deferred::Arg(i, a) => apply_row(&mut draft.ext.game_launch_args, i, a),
+        Deferred::ArgAdd => draft.ext.game_launch_args.push(ArgSpec {
+            requires: None,
+            value: String::new(),
+        }),
+    }
+}
+
+/// UI-side lint over the preview: env var names that more than one module `Set`s,
+/// where the later fold silently discards a value. Returns names sorted.
+fn set_set_collisions(specs: &[Extension], res: &Resolution) -> Vec<String> {
+    let mut setters: BTreeMap<String, std::collections::HashSet<String>> = BTreeMap::new();
+    for spec in specs {
+        if let Ok(lc) = context::assemble_launch(std::slice::from_ref(spec), res, &[]) {
+            for (name, action) in lc.env_vars.iter().chain(lc.game_env_vars.iter()) {
+                if matches!(action, EnvAction::Set(_)) {
+                    setters.entry(name.clone()).or_default().insert(spec.id());
+                }
+            }
+        }
+    }
+    setters
+        .into_iter()
+        .filter(|(_, m)| m.len() > 1)
+        .map(|(k, _)| k)
+        .collect()
 }
 
 impl GuiApp {
@@ -3683,5 +4478,117 @@ mod tests {
         assert!(!modules["Ritze"]["Core"].contains_key("xkb_de"));
         assert_eq!(modules["Ritze"]["Core"]["kbd_layout"], json!("de"));
         assert!(!modules.contains_key("Other"));
+    }
+
+    /// Build a draft from an on-disk manifest JSON, mirroring `ensure_draft`.
+    fn draft_from(manifest: Value, editable: bool) -> ModuleDraft {
+        let spec: Extension = serde_json::from_value(manifest).unwrap();
+        let baseline = serde_json::to_value(&spec).unwrap();
+        let baseline_vars = spec
+            .ui
+            .values()
+            .flatten()
+            .map(|f| f.variable.clone())
+            .collect();
+        let sections = spec.ui.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let mut ext = spec;
+        ext.ui.clear();
+        ModuleDraft {
+            id: ext.id(),
+            manifest: PathBuf::from("/nonexistent/mod.json"),
+            editable,
+            ext,
+            sections,
+            baseline,
+            baseline_vars,
+            name_error: None,
+        }
+    }
+
+    fn sample_manifest() -> Value {
+        json!({
+            "Extension": {"Name": "Sample", "Author": "Ritze", "Version": "1.0"},
+            "UI": {"Main": [{"Type": "toggle", "Variable": "enabled"}]}
+        })
+    }
+
+    #[test]
+    fn save_gate_predicate_requires_all_conditions() {
+        // All four must hold for Save to enable.
+        assert!(save_gate(true, true, true, false));
+        assert!(!save_gate(false, true, true, false)); // not dirty
+        assert!(!save_gate(true, false, true, false)); // invalid
+        assert!(!save_gate(true, true, false, false)); // a Requires won't parse
+        assert!(!save_gate(true, true, true, true)); // name collision
+    }
+
+    #[test]
+    fn clean_draft_is_not_saveable_and_does_not_hold_autosave() {
+        let draft = draft_from(sample_manifest(), true);
+        // A freshly-loaded draft equals disk: not dirty → Save disabled, interlock off.
+        assert!(!draft.dirty());
+        assert!(!draft.save_enabled());
+        assert!(!config_autosave_held(draft.dirty()));
+    }
+
+    #[test]
+    fn valid_dirty_editable_draft_is_saveable_and_holds_autosave() {
+        let mut draft = draft_from(sample_manifest(), true);
+        draft.ext.meta.description = Some("now edited".to_string());
+        assert!(draft.dirty());
+        assert!(draft.save_enabled());
+        // Interlock engages while the draft is dirty…
+        assert!(config_autosave_held(draft.dirty()));
+        // …and releases once the edit is reverted to match disk.
+        draft.ext.meta.description = None;
+        assert!(!draft.dirty());
+        assert!(!config_autosave_held(draft.dirty()));
+    }
+
+    #[test]
+    fn bundled_module_is_never_saveable() {
+        let mut draft = draft_from(sample_manifest(), false); // not editable
+        draft.ext.meta.description = Some("edited".to_string());
+        assert!(draft.dirty());
+        assert!(!draft.save_enabled(), "bundled modules must not save (Fork to edit)");
+    }
+
+    #[test]
+    fn invalid_draft_write_is_refused() {
+        // Add a field with an empty Variable → `validate` fails → Save refused.
+        let mut draft = draft_from(sample_manifest(), true);
+        draft.sections[0].1.push(new_field(String::new()));
+        assert!(draft.dirty());
+        assert!(!core_extension::validate(&draft.snapshot()).is_ok());
+        assert!(!draft.save_enabled(), "invalid manifest must block Save");
+    }
+
+    #[test]
+    fn unparseable_requires_blocks_save() {
+        let mut draft = draft_from(sample_manifest(), true);
+        // A trailing operator never parses.
+        draft.sections[0].1[0].requires = Some("enabled AND".to_string());
+        assert!(!all_requires_parse(&draft.snapshot()));
+        assert!(!draft.save_enabled(), "a bad Requires must block Save");
+    }
+
+    #[test]
+    fn newly_added_field_variable_is_editable_existing_is_locked() {
+        let draft = draft_from(sample_manifest(), true);
+        // The on-disk field is locked (its variable is in the baseline set)…
+        assert!(draft.baseline_vars.contains("enabled"));
+        // …while a brand-new variable is not, so its Variable stays editable.
+        assert!(!draft.baseline_vars.contains("new_var"));
+    }
+
+    #[test]
+    fn deferred_reorder_and_add_apply_without_mid_iteration_mutation() {
+        let mut draft = draft_from(sample_manifest(), true);
+        apply_deferred(&mut draft, Deferred::SectionAdd);
+        assert_eq!(draft.sections.len(), 2);
+        apply_deferred(&mut draft, Deferred::Section(0, RowAction::Down));
+        assert_eq!(draft.sections[1].0, "Main");
+        apply_deferred(&mut draft, Deferred::FieldAdd(1));
+        assert_eq!(draft.sections[1].1.len(), 2);
     }
 }
