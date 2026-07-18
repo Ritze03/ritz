@@ -40,6 +40,16 @@ Writes and resets go through the scope-appropriate methods, dispatched by the ac
 
 *Why store only the delta:* because absent = inherit, a layer's file contains exactly the variables that layer changes and nothing else — the file stays a readable diff against what it inherits, and a later change to a lower layer automatically shows through.
 
+### Moving a module's config across scopes (fork / rename)
+
+Because stored config keys on `Author → Name → var` only (Version is dropped by `migrate_authors`), forking or renaming a module has to relocate its stored config in **every** scope file at once. `crates/ritz-core/src/config.rs` provides this as a small stack:
+
+- `remap_module_config(authors, from, to, rename, drop)` — the copy-only primitive over one `AuthorsMap` (one scope's map). Copies `from = (author, name)` → `to = (author, name)`, applying per-var `rename` and skipping `drop`. It **never overwrites** an existing destination value (clobber-guard) and **never removes** the source; it returns the source var names that landed nowhere (dropped or clobber-skipped) for reporting. Idempotent w.r.t. the map.
+- `remap_all_scopes(..)` — sweeps `global.json` + every `profiles/*.json` + every `games/*.json` (the latter needs `Paths::list_games`, the games mirror of `list_presets`). With `remove_source=true` it prunes the moved-out source vars after copying (turning copy into move); clobber-skipped source vars are **kept** so a move can't silently lose data. Only files whose map actually changed are rewritten, via `write_atomic`.
+- Two named wrappers are the only shapes the GUI calls: `snapshot_config_to_fork` (parent kept, `remove_source=false`) and `migrate_renamed_module` (source pruned, `remove_source=true`).
+
+*Why a per-var safe prune instead of dropping the whole source entry:* an in-place field rename is `from == to` with only `rename` set — nuking the source entry would delete the just-written destination, so the prune removes only the renamed-away old names and never the clobber-skipped ones.
+
 ## Provenance display
 
 The resolved `Provenance` drives the colour a field (and its tree row) is tinted with, via `crates/ritz-app/src/theme.rs:scope_color`:

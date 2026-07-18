@@ -10,6 +10,7 @@
 //! Multiple directories can be merged (e.g. shipped built-ins + user drop-ins);
 //! later directories override earlier ones by extension id.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -204,16 +205,39 @@ fn check_requires(id: &str, requires: &Option<String>, allow_global: bool) -> Re
 }
 
 /// Validate an extension: all `Requires` expressions parse; UI `Requires` reject
-/// `global:`; variables are non-empty.
+/// `global:`; variables are non-empty, unique across the module, and section
+/// names don't collide.
+///
+/// The duplicate-section and duplicate-`Variable` checks guard against
+/// hand-edited manifests (and future editor writes): a repeated `Variable` means
+/// two fields fight over one config slot (data loss), and colliding section
+/// names produce ambiguous/lost UI sections. Section collision is checked
+/// case-insensitively and whitespace-trimmed — exact-duplicate JSON keys already
+/// silently collapse in the `IndexMap` during parse, so the surviving
+/// near-duplicates ("Audio" vs "audio ") are what validation can still catch.
 pub fn validate(ext: &Extension) -> Result<()> {
     let id = ext.id();
 
-    for fields in ext.ui.values() {
+    let mut seen_sections: HashSet<String> = HashSet::new();
+    let mut seen_vars: HashSet<&str> = HashSet::new();
+    for (section, fields) in &ext.ui {
+        if !seen_sections.insert(section.trim().to_lowercase()) {
+            return Err(RitzError::InvalidExtension {
+                id: id.clone(),
+                reason: format!("duplicate UI section name: {section:?}"),
+            });
+        }
         for field in fields {
             if field.variable.is_empty() {
                 return Err(RitzError::InvalidExtension {
                     id: id.clone(),
                     reason: "UI field has an empty Variable".into(),
+                });
+            }
+            if !seen_vars.insert(field.variable.as_str()) {
+                return Err(RitzError::InvalidExtension {
+                    id: id.clone(),
+                    reason: format!("duplicate Variable across UI fields: {}", field.variable),
                 });
             }
             // UI Requires must not use global:.
@@ -317,6 +341,50 @@ mod tests {
         assert!(matches!(errors[0], ExtensionLoadError::Parse { .. }));
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_section_name() {
+        // Distinct exact JSON keys that normalize to the same section name
+        // (case/whitespace) — the near-duplicates that survive IndexMap parse.
+        let ext: Extension = serde_json::from_value(serde_json::json!({
+            "Extension": {"Name": "x", "Author": "Ritze", "Version": "1.0"},
+            "UI": {
+                "Audio": [{"Type": "toggle", "Variable": "a"}],
+                "audio ": [{"Type": "toggle", "Variable": "b"}]
+            }
+        }))
+        .unwrap();
+        assert!(validate(&ext).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_variable() {
+        let ext: Extension = serde_json::from_value(serde_json::json!({
+            "Extension": {"Name": "x", "Author": "Ritze", "Version": "1.0"},
+            "UI": {
+                "S1": [{"Type": "toggle", "Variable": "dup"}],
+                "S2": [{"Type": "integer", "Variable": "dup"}]
+            }
+        }))
+        .unwrap();
+        assert!(validate(&ext).is_err());
+    }
+
+    #[test]
+    fn validate_accepts_clean_manifest() {
+        let ext: Extension = serde_json::from_value(serde_json::json!({
+            "Extension": {"Name": "x", "Author": "Ritze", "Version": "1.0"},
+            "UI": {
+                "Audio": [{"Type": "toggle", "Variable": "a"}],
+                "Video": [
+                    {"Type": "toggle", "Variable": "b"},
+                    {"Type": "integer", "Variable": "c"}
+                ]
+            }
+        }))
+        .unwrap();
+        assert!(validate(&ext).is_ok());
     }
 
     #[test]
