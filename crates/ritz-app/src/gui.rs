@@ -1468,15 +1468,11 @@ impl GuiApp {
                     let avail = (ui.available_width() - 18.0).max(300.0);
                     let max_w = if self.general_config.full_width { avail } else { avail.min(743.0) };
                     ui.set_max_width(max_w);
-                    if spec.backend.as_deref() == Some("custom-env") {
-                        if self.render_custom_env_backend(ui, &spec) {
-                            changed = true;
-                        }
-                    } else if spec.backend.as_deref() == Some("custom-args") {
-                        if self.render_custom_args_backend(ui, &spec) {
-                            changed = true;
-                        }
-                    } else {
+                    // Custom-env/-game-env/-args modules render through this same
+                    // generic section/field loop — `render_field` dispatches their
+                    // single `multi_string` field (Variable `env`/`game_env`/`args`)
+                    // to the right widget by backend string, see `render_field`.
+                    {
                         let mut any_section = false;
                         for (section, fields) in &spec.ui {
                             let visible: Vec<&UiField> =
@@ -2061,6 +2057,26 @@ fn requires_edit(ui: &mut egui::Ui, val: &mut Option<String>) {
             ui.label(egui::RichText::new(e.to_string()).color(theme::COL_GLOBAL).small());
         }
     }
+}
+
+/// Split a stored custom-env row on its FIRST `=` into (name, value); a row with
+/// no `=` becomes (whole string, empty value). Pure — the inverse of
+/// `format!("{name}={value}")`.
+fn parse_env_row(entry: &str) -> (String, String) {
+    match entry.split_once('=') {
+        Some((n, v)) => (n.to_string(), v.to_string()),
+        None => (entry.to_string(), String::new()),
+    }
+}
+
+/// POSIX env-var name charset: `^[A-Za-z_][A-Za-z0-9_]*$`.
+fn is_valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn field_type_label(t: FieldType) -> &'static str {
@@ -2745,7 +2761,19 @@ impl GuiApp {
         let mut changed = false;
 
         // A list field renders as its own growing slot card, not the one-row layout.
+        // The custom-env / custom-game-env modules' one `multi_string` field (keyed
+        // by backend + Variable name, not by manifest identity) gets the two-column
+        // Name|Value widget instead of the plain single-column one; custom-args
+        // keeps the plain widget (one literal argument per row).
         if field.field_type == FieldType::MultiString {
+            let pair_var = match spec.backend.as_deref() {
+                Some("custom-env") => Some("env"),
+                Some("custom-game-env") => Some("game_env"),
+                _ => None,
+            };
+            if pair_var == Some(field.variable.as_str()) {
+                return self.render_env_pair_field(ui, field, scope);
+            }
             return self.render_multi_string_field(ui, field, scope);
         }
 
@@ -2870,6 +2898,126 @@ impl GuiApp {
 
         // Persist the non-empty entries when they differ from what's stored.
         let cleaned: Vec<String> = entries.iter().filter(|s| !s.trim().is_empty()).cloned().collect();
+        let mut changed = false;
+        if cleaned != stored {
+            if cleaned.is_empty() {
+                self.unset_current(field);
+            } else {
+                self.set_current(field, json!(cleaned));
+            }
+            changed = true;
+        }
+
+        // Left scope bar to match the other field cards.
+        let r = inner.response.rect;
+        let bar_clip = egui::Rect::from_min_max(r.min, egui::pos2(r.min.x + 3.0, r.max.y));
+        ui.painter()
+            .with_clip_rect(bar_clip)
+            .rect_filled(r, egui::Rounding::same(8.0), scope);
+        ui.add_space(8.0);
+
+        self.multi_edit.insert(key, entries);
+        changed
+    }
+
+    /// Render a two-column Name | Value list for the custom-env / custom-game-env
+    /// backends' single `multi_string` field. Storage is unchanged — still the
+    /// field's `multi_string` list — but each entry is displayed split into a Name
+    /// and a Value box and reassembled as `"{name}={value}"` (see [`parse_env_row`]).
+    /// The Name half is live-validated to the POSIX env charset
+    /// ([`is_valid_env_name`]): an invalid name gets a red outline, and a row whose
+    /// name is empty/invalid is dropped when persisting, so a bad pair can never
+    /// reach a stored env var. The Value half is unrestricted (may contain `=`).
+    fn render_env_pair_field(&mut self, ui: &mut egui::Ui, field: &UiField, scope: Color32) -> bool {
+        let Some(spec) = self.cur_specs.get(self.selected_ext) else { return false };
+        let author = spec.meta.author.clone();
+        let name = spec.meta.name.clone();
+        let var = field.variable.clone();
+        let label = field.name.clone().unwrap_or_else(|| var.clone());
+        let hover = field.description.clone().unwrap_or_default();
+
+        let scope_tag = match &self.nav_sel {
+            NavSel::GlobalSettings => "global".to_string(),
+            NavSel::Profile(n) => format!("profile:{n}"),
+            NavSel::Game(a) => format!("game:{a}"),
+            // Not a real edit scope — behave like the ambient game.
+            NavSel::ModuleEditor(_) => format!("game:{}", self.appid),
+            NavSel::GeneralSettings => "general".to_string(),
+        };
+        let key = format!("{scope_tag}::{author}::{name}::{var}");
+        let stored: Vec<String> = self
+            .current_scope_value(&author, &name, &var)
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let mut entries = self.multi_edit.remove(&key).unwrap_or(stored.clone());
+
+        let tint = Color32::from_rgba_unmultiplied(scope.r(), scope.g(), scope.b(), 16);
+        let row_h = ui.spacing().interact_size.y;
+        let btn_w = row_h + ui.spacing().item_spacing.x;
+        let mut to_delete: Option<usize> = None;
+
+        let inner = egui::Frame::none()
+            .fill(tint)
+            .rounding(egui::Rounding::same(8.0))
+            .inner_margin(egui::Margin { left: 12.0, right: 8.0, top: 8.0, bottom: 8.0 })
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let lab = ui.label(egui::RichText::new(&label).color(theme::TEXT).strong());
+                if !hover.is_empty() {
+                    lab.on_hover_text(&hover);
+                }
+                ui.add_space(4.0);
+                // Name gets ~1/3 of the row, Value the rest.
+                let total_w = (ui.available_width() - btn_w - 8.0).max(80.0);
+                let name_w = (total_w * 0.32).max(60.0);
+                let value_w = (total_w - name_w).max(40.0);
+                for (i, entry) in entries.iter_mut().enumerate() {
+                    let (mut n, mut v) = parse_env_row(entry);
+                    let name_ok = n.is_empty() || is_valid_env_name(&n);
+                    ui.horizontal(|ui| {
+                        let name_resp = ui.add(
+                            egui::TextEdit::singleline(&mut n)
+                                .desired_width(name_w)
+                                .hint_text(egui::RichText::new("NAME").color(theme::FAINT)),
+                        );
+                        if !name_ok {
+                            ui.painter().rect_stroke(
+                                name_resp.rect,
+                                ui.visuals().widgets.inactive.rounding,
+                                egui::Stroke::new(1.5, theme::COL_GLOBAL),
+                            );
+                        }
+                        ui.add(
+                            egui::TextEdit::singleline(&mut v)
+                                .desired_width(value_w)
+                                .hint_text(egui::RichText::new("value").color(theme::FAINT)),
+                        );
+                        if icon_button(ui, row_h, "\u{f467}", theme::COL_GLOBAL).clicked() {
+                            to_delete = Some(i);
+                        }
+                    });
+                    *entry = format!("{n}={v}");
+                }
+                if ui.button("+ Add").clicked() {
+                    entries.push(String::new());
+                }
+            });
+
+        if let Some(i) = to_delete {
+            entries.remove(i);
+        }
+
+        // Persist only rows with a valid, non-empty name — an invalid/empty name
+        // never reaches the stored list, so it can't produce a broken env var.
+        let cleaned: Vec<String> = entries
+            .iter()
+            .filter_map(|e| {
+                let (n, v) = parse_env_row(e);
+                let n = n.trim();
+                (!n.is_empty() && is_valid_env_name(n)).then(|| format!("{n}={v}"))
+            })
+            .collect();
         let mut changed = false;
         if cleaned != stored {
             if cleaned.is_empty() {
@@ -3149,301 +3297,6 @@ impl GuiApp {
                 self.game_config.unset_value(&a, &n, &field.variable);
             }
         }
-    }
-
-    fn set_raw_var(&mut self, author: &str, name: &str, var: &str, value: Value) {
-        match &self.nav_sel.clone() {
-            NavSel::GlobalSettings => self.global_config.set_value(author, name, var, value),
-            NavSel::Profile(_) => {
-                if let Some(p) = &mut self.editing_preset_buf { p.set_value(author, name, var, value); }
-            }
-            NavSel::Game(_) | NavSel::GeneralSettings | NavSel::ModuleEditor(_) => {
-                self.game_config.set_value(author, name, var, value)
-            }
-        }
-    }
-
-    fn unset_raw_var(&mut self, author: &str, name: &str, var: &str) {
-        match &self.nav_sel.clone() {
-            NavSel::GlobalSettings => self.global_config.unset_value(author, name, var),
-            NavSel::Profile(_) => {
-                if let Some(p) = &mut self.editing_preset_buf { p.unset_value(author, name, var); }
-            }
-            NavSel::Game(_) | NavSel::GeneralSettings | NavSel::ModuleEditor(_) => {
-                self.game_config.unset_value(author, name, var)
-            }
-        }
-    }
-
-    fn render_custom_env_backend(&mut self, ui: &mut egui::Ui, spec: &Extension) -> bool {
-        let mut changed = false;
-        changed |= self.render_custom_env_section(ui, spec, "env_",      "Environment Variables");
-        changed |= self.render_custom_env_section(ui, spec, "game_env_", "Game Environment Variables");
-        changed
-    }
-
-    fn render_custom_env_section(
-        &mut self,
-        ui: &mut egui::Ui,
-        spec: &Extension,
-        prefix: &str,
-        section_label: &str,
-    ) -> bool {
-        const MAX_SLOTS: usize = 16;
-        let author  = spec.meta.author.clone();
-        let name    = spec.meta.name.clone();
-        let ext_id  = spec.id();
-
-        // Collect active (slot, env_name, env_value) from the current edit layer.
-        let active: Vec<(usize, String, String)> = {
-            let modules: &AuthorsMap = match &self.nav_sel {
-                NavSel::GlobalSettings => &self.global_config.modules,
-                NavSel::Profile(_) => match self.editing_preset_buf.as_ref() {
-                    Some(p) => &p.modules,
-                    None    => return false,
-                },
-                _ => &self.game_config.config.modules.authors,
-            };
-            let vars = modules.get(&author).and_then(|e| e.get(&name));
-            (1..=MAX_SLOTS).filter_map(|i| {
-                let n = vars
-                    .and_then(|m| m.get(&format!("{prefix}{i}_name")))
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)?;
-                let v = vars
-                    .and_then(|m| m.get(&format!("{prefix}{i}_value")))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                Some((i, n, v))
-            }).collect()
-        };
-
-        let used: std::collections::HashSet<usize> = active.iter().map(|(i, _, _)| *i).collect();
-
-        // Slots with a live buffer but not yet committed to config (just added, focus not lost yet).
-        let pending: Vec<usize> = (1..=MAX_SLOTS)
-            .filter(|i| !used.contains(i)
-                && self.text_buffers.contains_key(&format!("{ext_id}::{prefix}{i}")))
-            .collect();
-
-        ui.add_space(6.0);
-        ui.label(egui::RichText::new(section_label).heading().size(15.0));
-        ui.separator();
-
-        let mut changed = false;
-        let mut to_delete: Option<usize> = None;
-        let mut to_cancel: Option<usize> = None;
-        let mut commits: Vec<(usize, String)> = Vec::new();
-
-        let row_h  = ui.spacing().interact_size.y;
-        let btn_w  = row_h + ui.spacing().item_spacing.x;
-        // Compute the field width ONCE: querying ui.available_width() per row makes
-        // it creep wider with each row, so a fixed width keeps every slot identical.
-        let w = (ui.available_width() - btn_w - 4.0).max(40.0);
-
-        for (slot, cur_name, cur_value) in &active {
-            let buf_key = format!("{ext_id}::{prefix}{slot}");
-            let resp = {
-                let buf = self.text_buffers.entry(buf_key.clone())
-                    .or_insert_with(|| format!("{}={}", cur_name, cur_value));
-                let mut r = None;
-                ui.horizontal(|ui| {
-                    r = Some(ui.add(egui::TextEdit::singleline(buf).desired_width(w).hint_text(egui::RichText::new("NAME=value").color(theme::FAINT))));
-                    if icon_button(ui, row_h, "\u{f467}", theme::COL_GLOBAL).clicked() { to_delete = Some(*slot); }
-                });
-                r.unwrap()
-            };
-            if resp.lost_focus() {
-                if let Some(b) = self.text_buffers.get(&buf_key) { commits.push((*slot, b.clone())); }
-            }
-        }
-
-        for slot in &pending {
-            let buf_key = format!("{ext_id}::{prefix}{slot}");
-            let resp = {
-                let buf = self.text_buffers.entry(buf_key.clone()).or_default();
-                let mut r = None;
-                ui.horizontal(|ui| {
-                    r = Some(ui.add(egui::TextEdit::singleline(buf).desired_width(w).hint_text(egui::RichText::new("NAME=value").color(theme::FAINT))));
-                    if icon_button(ui, row_h, "\u{f467}", theme::COL_GLOBAL).clicked() { to_cancel = Some(*slot); }
-                });
-                r.unwrap()
-            };
-            if resp.lost_focus() {
-                if let Some(b) = self.text_buffers.get(&buf_key) { commits.push((*slot, b.clone())); }
-            }
-        }
-
-        for (slot, buf) in commits {
-            let buf_key = format!("{ext_id}::{prefix}{slot}");
-            let (n_part, v_part) = buf.find('=')
-                .map(|i| (buf[..i].trim().to_string(), buf[i+1..].to_string()))
-                .unwrap_or_else(|| (buf.trim().to_string(), String::new()));
-            if n_part.is_empty() {
-                self.text_buffers.remove(&buf_key);
-                self.unset_raw_var(&author, &name, &format!("{prefix}{slot}_name"));
-                self.unset_raw_var(&author, &name, &format!("{prefix}{slot}_value"));
-            } else {
-                self.set_raw_var(&author, &name, &format!("{prefix}{slot}_name"), json!(n_part));
-                self.set_raw_var(&author, &name, &format!("{prefix}{slot}_value"), json!(v_part));
-            }
-            changed = true;
-        }
-
-        if let Some(slot) = to_delete {
-            self.text_buffers.remove(&format!("{ext_id}::{prefix}{slot}"));
-            self.unset_raw_var(&author, &name, &format!("{prefix}{slot}_name"));
-            self.unset_raw_var(&author, &name, &format!("{prefix}{slot}_value"));
-            changed = true;
-        }
-        if let Some(slot) = to_cancel {
-            self.text_buffers.remove(&format!("{ext_id}::{prefix}{slot}"));
-        }
-
-        let total = used.len() + pending.len();
-        if total < MAX_SLOTS {
-            ui.add_space(4.0);
-            if ui.button("+ Add").clicked() {
-                if let Some(next) = (1..=MAX_SLOTS).find(|i| {
-                    !used.contains(i) && !self.text_buffers.contains_key(&format!("{ext_id}::{prefix}{i}"))
-                }) {
-                    self.text_buffers.insert(format!("{ext_id}::{prefix}{next}"), String::new());
-                }
-            }
-        }
-
-        changed
-    }
-
-    /// Value-only slot UI for the `custom-args` backend — a list of game launch
-    /// arguments with add/remove rows (mirrors `render_custom_env_section`, but
-    /// each slot stores the raw `arg_N` string directly, no `NAME=value` split).
-    fn render_custom_args_backend(&mut self, ui: &mut egui::Ui, spec: &Extension) -> bool {
-        const MAX_SLOTS: usize = 16;
-        const PREFIX: &str = "arg_";
-        let author = spec.meta.author.clone();
-        let name = spec.meta.name.clone();
-        let ext_id = spec.id();
-
-        // Active slots: arg_N with a non-empty stored value, on the current layer.
-        let active: Vec<(usize, String)> = {
-            let modules: &AuthorsMap = match &self.nav_sel {
-                NavSel::GlobalSettings => &self.global_config.modules,
-                NavSel::Profile(_) => match self.editing_preset_buf.as_ref() {
-                    Some(p) => &p.modules,
-                    None => return false,
-                },
-                _ => &self.game_config.config.modules.authors,
-            };
-            let vars = modules.get(&author).and_then(|e| e.get(&name));
-            (1..=MAX_SLOTS)
-                .filter_map(|i| {
-                    let v = vars
-                        .and_then(|m| m.get(&format!("{PREFIX}{i}")))
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_string)?;
-                    Some((i, v))
-                })
-                .collect()
-        };
-
-        let used: std::collections::HashSet<usize> = active.iter().map(|(i, _)| *i).collect();
-        // Slots with a live buffer but not yet committed (just added).
-        let pending: Vec<usize> = (1..=MAX_SLOTS)
-            .filter(|i| {
-                !used.contains(i) && self.text_buffers.contains_key(&format!("{ext_id}::{PREFIX}{i}"))
-            })
-            .collect();
-
-        ui.add_space(6.0);
-        ui.label(egui::RichText::new("Launch Arguments").heading().size(15.0));
-        ui.separator();
-
-        let mut changed = false;
-        let mut to_delete: Option<usize> = None;
-        let mut to_cancel: Option<usize> = None;
-        let mut commits: Vec<(usize, String)> = Vec::new();
-
-        let row_h = ui.spacing().interact_size.y;
-        let btn_w = row_h + ui.spacing().item_spacing.x;
-        // Compute the field width ONCE: querying ui.available_width() per row makes
-        // it creep wider with each row, so a fixed width keeps every slot identical.
-        let w = (ui.available_width() - btn_w - 4.0).max(40.0);
-
-        let mut render_slot = |ui: &mut egui::Ui, buffers: &mut HashMap<String, String>, slot: usize, init: Option<&str>, cancel: bool| {
-            let buf_key = format!("{ext_id}::{PREFIX}{slot}");
-            let resp = {
-                let buf = buffers
-                    .entry(buf_key.clone())
-                    .or_insert_with(|| init.unwrap_or("").to_string());
-                let mut r = None;
-                ui.horizontal(|ui| {
-                    r = Some(ui.add(
-                        egui::TextEdit::singleline(buf)
-                            .desired_width(w)
-                            .hint_text(egui::RichText::new("argument").color(theme::FAINT)),
-                    ));
-                    if icon_button(ui, row_h, "\u{f467}", theme::COL_GLOBAL).clicked() {
-                        if cancel {
-                            to_cancel = Some(slot);
-                        } else {
-                            to_delete = Some(slot);
-                        }
-                    }
-                });
-                r.unwrap()
-            };
-            if resp.lost_focus() {
-                if let Some(b) = buffers.get(&buf_key) {
-                    commits.push((slot, b.clone()));
-                }
-            }
-        };
-
-        for (slot, cur) in &active {
-            render_slot(ui, &mut self.text_buffers, *slot, Some(cur), false);
-        }
-        for slot in &pending {
-            render_slot(ui, &mut self.text_buffers, *slot, None, true);
-        }
-
-        for (slot, buf) in commits {
-            let buf_key = format!("{ext_id}::{PREFIX}{slot}");
-            let val = buf.trim().to_string();
-            if val.is_empty() {
-                self.text_buffers.remove(&buf_key);
-                self.unset_raw_var(&author, &name, &format!("{PREFIX}{slot}"));
-            } else {
-                self.set_raw_var(&author, &name, &format!("{PREFIX}{slot}"), json!(val));
-            }
-            changed = true;
-        }
-
-        if let Some(slot) = to_delete {
-            self.text_buffers.remove(&format!("{ext_id}::{PREFIX}{slot}"));
-            self.unset_raw_var(&author, &name, &format!("{PREFIX}{slot}"));
-            changed = true;
-        }
-        if let Some(slot) = to_cancel {
-            self.text_buffers.remove(&format!("{ext_id}::{PREFIX}{slot}"));
-        }
-
-        let total = used.len() + pending.len();
-        if total < MAX_SLOTS {
-            ui.add_space(4.0);
-            if ui.button("+ Add").clicked() {
-                if let Some(next) = (1..=MAX_SLOTS).find(|i| {
-                    !used.contains(i) && !self.text_buffers.contains_key(&format!("{ext_id}::{PREFIX}{i}"))
-                }) {
-                    self.text_buffers.insert(format!("{ext_id}::{PREFIX}{next}"), String::new());
-                }
-            }
-        }
-
-        changed
     }
 
     /// Render general app settings (splash timeout, default profile) in the central panel.
@@ -5227,6 +5080,42 @@ fn field_visible(field: &UiField, ext_res: Option<&resolve::ExtResolution>) -> b
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn parse_env_row_splits_on_first_equals() {
+        assert_eq!(parse_env_row("FOO=a=b"), ("FOO".to_string(), "a=b".to_string()));
+        assert_eq!(parse_env_row("FOO=bar"), ("FOO".to_string(), "bar".to_string()));
+        // No `=` at all: whole string is the name, value is empty.
+        assert_eq!(parse_env_row("FOO"), ("FOO".to_string(), String::new()));
+    }
+
+    #[test]
+    fn is_valid_env_name_enforces_posix_charset() {
+        assert!(is_valid_env_name("FOO"));
+        assert!(is_valid_env_name("_FOO_bar9"));
+        // Empty name, leading digit, and non-alnum chars are all invalid.
+        assert!(!is_valid_env_name(""));
+        assert!(!is_valid_env_name("1BAD"));
+        assert!(!is_valid_env_name("FOO-BAR"));
+        assert!(!is_valid_env_name("FOO BAR"));
+    }
+
+    #[test]
+    fn env_row_name_validity_gates_persistence() {
+        // Mirrors the filter `render_env_pair_field` applies before persisting:
+        // an empty or invalid name means the row is dropped.
+        let rows = ["=x", "1BAD=x", "", "GOOD=x"];
+        let kept: Vec<&str> = rows
+            .iter()
+            .filter(|r| {
+                let (n, _) = parse_env_row(r);
+                let n = n.trim();
+                !n.is_empty() && is_valid_env_name(n)
+            })
+            .copied()
+            .collect();
+        assert_eq!(kept, vec!["GOOD=x"]);
+    }
 
     #[test]
     fn cleanup_drops_undeclared_vars_and_prunes_empties() {

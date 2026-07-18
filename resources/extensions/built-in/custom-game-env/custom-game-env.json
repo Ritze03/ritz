@@ -1,0 +1,19 @@
+{
+  "Extension": {
+    "Name": "Custom Game Env",
+    "Author": "Ritze",
+    "Version": "1.0",
+    "Description": "Set custom environment variables applied only to the game process."
+  },
+  "Backend": "custom-game-env",
+  "UI": {
+    "GAME ENV Vars": [
+      {
+        "Type": "multi_string",
+        "Variable": "game_env",
+        "Name": "Game environment variables",
+        "Description": "One NAME=VALUE per row (applied only to the game process)."
+      }
+    ]
+  }
+}

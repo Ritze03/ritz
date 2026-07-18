@@ -163,14 +163,59 @@ fn build_args(inputs: &[ExtInput<'_>]) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// Apply a list-backed custom-env / custom-game-env backend: each non-empty line
+/// of `list` is split on the FIRST `=` into `name=value`, inserted as a
+/// [`EnvAction::Set`]. Lines without `=` or with an empty name are skipped. The
+/// split-on-newline-first guarantees a name can never contain a newline.
+fn apply_list_env(env: &mut IndexMap<String, EnvAction>, list: &str) {
+    for line in list.split('\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
+        }
+        env.insert(name.to_string(), EnvAction::Set(value.to_string()));
+    }
+}
+
 /// Build the full launch command.
 pub fn build(inputs: &[ExtInput<'_>], game_command: &[String]) -> Result<LaunchCommand> {
+    let mut env_vars = build_env_block(inputs, |e| &e.env_vars)?;
+    let wrappers = build_wrappers(inputs)?;
+    let mut game_env_vars = build_env_block(inputs, |e| &e.game_env_vars)?;
+    let mut game_args = build_args(inputs)?;
+
+    // Backend pre-pass: list-backed custom modules expand a single multi_string
+    // scalar (`entries.join("\n")`) into N env vars / args. A module's backend is
+    // a bare string; an empty/unset list var resolves to "" and is a no-op.
+    for input in inputs {
+        match input.spec.backend.as_deref() {
+            Some("custom-env") => apply_list_env(&mut env_vars, input.vars.value("env")),
+            Some("custom-game-env") => {
+                apply_list_env(&mut game_env_vars, input.vars.value("game_env"))
+            }
+            Some("custom-args") => {
+                for line in input.vars.value("args").split('\n') {
+                    if !line.is_empty() {
+                        // Verbatim: no shlex/word-splitting — spaces stay in one arg.
+                        game_args.push(line.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     Ok(LaunchCommand {
-        env_vars: build_env_block(inputs, |e| &e.env_vars)?,
-        wrappers: build_wrappers(inputs)?,
-        game_env_vars: build_env_block(inputs, |e| &e.game_env_vars)?,
+        env_vars,
+        wrappers,
+        game_env_vars,
         game_command: game_command.to_vec(),
-        game_args: build_args(inputs)?,
+        game_args,
     })
 }
 
@@ -489,6 +534,58 @@ mod tests {
         assert_eq!(plan.program, "/steam-wrapper");
         assert_eq!(plan.args, toks(&["--", "/games/cs2"]));
         assert_eq!(plan.env.get("MANGOHUD"), Some(&EnvAction::Set("1".into())));
+    }
+
+    #[test]
+    fn custom_backends_list_expansion() {
+        // custom-env: list scalar (multi_string join) → N env vars, split on FIRST `=`.
+        let env_spec = ext(json!({
+            "Extension": {"Name": "Custom Env", "Author": "Ritze", "Version": "1.0"},
+            "Backend": "custom-env",
+            "UI": {"E": [{"Type": "multi_string", "Variable": "env"}]}
+        }));
+        let mut env_vars = VarStore::new();
+        // Mirrors resolve.rs: multi_string resolves to entries.join("\n").
+        // Includes a no-`=` line, an empty-name line, and an empty line — all skipped.
+        env_vars.insert_local(
+            "env",
+            ResolvedVar::new(true, "FOO=bar\nBAZ=qux=1\nNOEQ\n=nokey\n"),
+        );
+        let lc = build(&[ExtInput { spec: &env_spec, vars: &env_vars }], &[]).unwrap();
+        assert_eq!(lc.env_vars.get("FOO"), Some(&EnvAction::Set("bar".into())));
+        // Split on the FIRST `=`: value keeps its remaining `=`.
+        assert_eq!(lc.env_vars.get("BAZ"), Some(&EnvAction::Set("qux=1".into())));
+        assert_eq!(lc.env_vars.len(), 2, "no-eq/empty-name/empty lines skipped");
+        // No env var name ever contains a newline.
+        assert!(lc.env_vars.keys().all(|k| !k.contains('\n')));
+
+        // custom-game-env: same expansion, into game_env_vars, var `game_env`.
+        let genv_spec = ext(json!({
+            "Extension": {"Name": "Custom Game Env", "Author": "Ritze", "Version": "1.0"},
+            "Backend": "custom-game-env",
+            "UI": {"E": [{"Type": "multi_string", "Variable": "game_env"}]}
+        }));
+        let mut genv = VarStore::new();
+        genv.insert_local("game_env", ResolvedVar::new(true, "MANGOHUD=1"));
+        let lc = build(&[ExtInput { spec: &genv_spec, vars: &genv }], &[]).unwrap();
+        assert_eq!(lc.game_env_vars.get("MANGOHUD"), Some(&EnvAction::Set("1".into())));
+        assert!(lc.env_vars.is_empty());
+
+        // custom-args: one arg per line, literal (no shlex) — spaces preserved.
+        let args_spec = ext(json!({
+            "Extension": {"Name": "Game Launch Args", "Author": "Ritze", "Version": "1.0"},
+            "Backend": "custom-args",
+            "UI": {"A": [{"Type": "multi_string", "Variable": "args"}]}
+        }));
+        let mut args = VarStore::new();
+        args.insert_local("args", ResolvedVar::new(true, "-foo\n--bar baz"));
+        let lc = build(&[ExtInput { spec: &args_spec, vars: &args }], &[]).unwrap();
+        assert_eq!(lc.game_args, toks(&["-foo", "--bar baz"]));
+
+        // Empty/unset list var → no-op.
+        let empty = VarStore::new();
+        let lc = build(&[ExtInput { spec: &env_spec, vars: &empty }], &[]).unwrap();
+        assert!(lc.env_vars.is_empty());
     }
 
     #[test]

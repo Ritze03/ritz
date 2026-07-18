@@ -123,26 +123,48 @@ variable, doesn't light up the icon.
 
 For the selected extension, `GuiApp::ui`'s central-panel closure renders a header
 (name, version, author, description, and an "Editing Game/Profile/Global: X" label
-tinted by `GuiApp::editing_scope_color`), then dispatches on the spec's `backend`:
+tinted by `GuiApp::editing_scope_color`), then iterates `spec.ui` (an
+`IndexMap<section, Vec<UiField>>`, order-preserving so section/field order matches the
+manifest), skips sections with no currently-visible field, and calls
+`crate::gui::GuiApp::render_field` per visible field — including for the `custom-env`,
+`custom-game-env`, and `custom-args` backends, which are plain manifests with a single
+`multi_string` field (`env`, `game_env`, `args` respectively; see
+[bundled-modules.md](bundled-modules.md#notes-per-module)) rather than a special-cased
+dispatch. `render_field` special-cases `FieldType::MultiString`, and within that
+special-cases the two env backends' field once more for its two-column widget:
 
-- **`backend: "custom-env"`** → `crate::gui::GuiApp::render_custom_env_backend`, two
-  16-slot NAME=value sections (`env_N_name`/`env_N_value`, then the game-scoped
-  `game_env_N_*` set) via `crate::gui::GuiApp::render_custom_env_section`.
-- **`backend: "custom-args"`** → `crate::gui::GuiApp::render_custom_args_backend`, one
-  16-slot `arg_N` list, no NAME=value split.
-- **Everything else** → iterate `spec.ui` (an `IndexMap<section, Vec<UiField>>`,
-  order-preserving so section/field order matches the manifest), skip sections with no
-  currently-visible field, and call `crate::gui::GuiApp::render_field` per visible field.
+- **`custom-env` / `custom-game-env`'s `env`/`game_env` field** →
+  `crate::gui::GuiApp::render_env_pair_field`, a growing list of **Name | Value** row
+  pairs. Each stored entry (a `"NAME=VALUE"` string) is split on its first `=`
+  (`crate::gui::parse_env_row`) into the two boxes and reassembled as `"{name}={value}"`
+  on write. The Name box is live-validated against the POSIX env-var charset
+  (`crate::gui::is_valid_env_name`, `^[A-Za-z_][A-Za-z0-9_]*$`): an invalid name gets a
+  red outline, and a row with an empty/invalid name is dropped when the list is
+  persisted, so a bad pair can never reach a stored env var. The Value box is
+  unrestricted (may itself contain `=`).
+- **`custom-args`'s `args` field** (and every other `multi_string` field) →
+  `crate::gui::GuiApp::render_multi_string_field`, a single-column growing list of text
+  rows (one literal argument per row, no NAME=value split), each with a delete icon
+  plus a `+ Add` button that appends an empty row.
+- **Everything else** → the normal one-row-per-field layout described below.
 
-*Why custom-env/custom-args get dedicated render paths instead of going through the
-generic `UiField` loop:* their manifests declare a fixed bank of numbered slots
-(`arg_1..arg_16`, `env_N_name`/`env_N_value`, doubled for the game-scoped set) because
-the schema has no variable-length/add-remove-row UI primitive — see
-[bundled-modules.md](bundled-modules.md#notes-per-module). The custom backends add
-that missing add/remove/commit behavior in Rust instead: each slot's `NAME=value` text
-box only commits to config on `lost_focus()`, and a fresh `+ Add` slot lives only in
-`text_buffers` (a "pending" slot, not yet in `used`) until it's typed into and loses
-focus, so an empty just-added row doesn't get written to disk.
+Both list widgets store their working copy in `entries`/`multi_edit`, persist the
+non-empty, trimmed entries as a JSON array at the current scope on any change, and drop
+the field entirely when the list empties out.
+
+At launch-command build time, `crates/ritz-core/src/builder.rs`'s backend pre-pass
+expands each of these single `multi_string` values (`entries.join("\n")`) into N
+outputs: `custom-env` splits each non-empty line on its first `=` into one chain-wide
+`ENV_VARS` entry, `custom-game-env` does the same into `GAME_ENV_VARS`, and
+`custom-args` appends each non-empty line verbatim (no shell word-splitting) as one
+`GAME_LAUNCH_ARGS` entry.
+
+*Why list-backed replaced the old fixed numbered-slot renderers* (deleted
+`render_custom_env_backend`/`render_custom_args_backend`, `MAX_SLOTS`): those slots
+existed only because the schema had no variable-length list UI primitive, capping
+free-form args/env at 16. `multi_string` is that primitive now — no cap, and no new
+manifest concept was needed: the backend pre-pass just expands one `multi_string` list
+into N vars/args at build time instead of the GUI faking the list with numbered fields.
 
 ### Field rendering — `render_field`
 

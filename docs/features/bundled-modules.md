@@ -18,8 +18,9 @@ page is the "what does each shipped module do" reference.
 | Misc | `resources/extensions/default/misc.json` | Steam runtime / GameMode / desktop env | Clear LD_PRELOAD/VK_INSTANCE_LAYERS, force X11 SDL backend, keyboard layout, GameMode wrapper |
 | PulseAudio | `resources/extensions/default/pulse.json` | PulseAudio / PipeWire-pulse | Client latency, output sink routing, `media.role=game` tagging |
 | Scripts | `resources/extensions/default/scripts/scripts.json` | User shell commands | Pre-launch (blocking), post-spawn (background), post-exit (blocking) command hooks |
-| Game Launch Args | `resources/extensions/built-in/custom-args/custom-args.json` | The game's own argv | 16 free-text launch argument slots, appended after the game command |
-| Custom Env | `resources/extensions/built-in/custom-env/custom-env.json` | Process environment | 16 free-form name/value env var pairs, plus a second set of 16 scoped to the game process only |
+| Game Launch Args | `resources/extensions/built-in/custom-args/custom-args.json` | The game's own argv | Uncapped list of free-text launch arguments, appended verbatim after the game command |
+| Custom Env | `resources/extensions/built-in/custom-env/custom-env.json` | Process environment (chain-wide) | Uncapped list of free-form `NAME=VALUE` env var pairs |
+| Custom Game Env | `resources/extensions/built-in/custom-game-env/custom-game-env.json` | Process environment (game only) | Uncapped list of free-form `NAME=VALUE` env var pairs, game-scoped only (same shape as Custom Env, emitted into `GAME_ENV_VARS` instead of `ENV_VARS`) |
 | Hypr-Monctl | `resources/extensions/built-in/hypr-monctl/hypr-monctl.json` | Hyprland monitor color pipeline | Per-game saturation, brightness, temperature applied while the game window is focused |
 | LSFG-VK | `resources/extensions/built-in/lsfg-vk/lsfg-vk.json` | Lossless Scaling frame generation | Enable, multiplier (2x-8x), flow scale, performance mode, HDR mode, present-mode override, activation delay |
 
@@ -43,11 +44,22 @@ page is the "what does each shipped module do" reference.
   wired to `resources/extensions/default/scripts/pre.sh`, `post.sh`, `exit.sh`, with
   `PostSpawn` marked `Background: true` so it doesn't block game start. Each hook's UI
   field is a `multi_string` command entered by the user, not the shell script itself.
-- **Game Launch Args / Custom Env** — Both are "escape hatch" modules with a fixed bank of
-  16 numbered slots (`arg_1`..`arg_16`, or `env_N_name`/`env_N_value` pairs, doubled for a
-  game-scoped set) rather than a dynamic list, since the manifest format has no
-  add/remove-row primitive. *Why:* simplest way to give free-form args/env within a
-  static-schema JSON UI without inventing a variable-length UI element type.
+- **Game Launch Args / Custom Env / Custom Game Env** — "Escape hatch" modules, each a
+  single `multi_string` UI field (`args`, `env`, `game_env` respectively) rather than a
+  fixed bank of numbered slots. A `crates/ritz-core/src/builder.rs` backend pre-pass
+  (`Backend: "custom-args"` / `"custom-env"` / `"custom-game-env"`) expands the list at
+  launch-command build time: `custom-args` appends each non-empty line verbatim (no
+  shell word-splitting) as one launch arg; `custom-env`/`custom-game-env` split each
+  non-empty line on its *first* `=` into one `NAME=VALUE` env var, chain-wide for
+  `custom-env` and game-only for `custom-game-env`. In the GUI, the two env modules'
+  field renders as a two-column Name | Value row list
+  (`crate::gui::GuiApp::render_env_pair_field`, name validated against
+  `^[A-Za-z_][A-Za-z0-9_]*$`); `custom-args` renders as a single-column growing list
+  (`crate::gui::GuiApp::render_multi_string_field`). *Why:* `multi_string` is a
+  variable-length list UI primitive the schema already has for other modules (e.g.
+  Scripts' hooks) — no cap, and no new manifest concept needed, replacing the earlier
+  fixed 16-slot (`arg_1`..`arg_16` / `env_N_name`+`env_N_value`) numbered-field
+  workaround from before `multi_string`-backed lists existed.
 - **Hypr-Monctl / LSFG-VK** — These two declare a `Backend` field (`"hypr-monctl"`,
   `"lsfg-vk"`) instead of only `ENV_VARS`/`WRAPPERS`, meaning their options are consumed by
   a native Rust backend rather than the generic env/wrapper builder. See
