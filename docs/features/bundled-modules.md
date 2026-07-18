@@ -68,6 +68,37 @@ page is the "what does each shipped module do" reference.
   `"RequiresDesktop": "Hyprland"`, gating it out of the extension list entirely on other
   desktops (see the RequiresDesktop project memory / `AppContext::load` filter).
 
+## Applied config migrations
+
+Dated record of one-time migrations applied to a live `~/.config/ritz` — that directory
+is outside git, so this is the only durable trace that they happened. Newest first.
+
+### 2026-07-18 — 16-slot Custom-Env/Args retirement, applied to live config
+
+Phase 4 of the custom-module editor work (see
+[Custom Module Editor](../brainstorm/custom-module-editor.md)) retired the old
+fixed-slot Custom-Env/Custom-Args scheme in favor of the uncapped `multi_string`-backed
+modules described above. Once the new manifests shipped, a one-time migration was
+**applied on 2026-07-18** to the user's live `~/.config/ritz`:
+
+- Games `244210` and `2483190` — the old Custom-Env `env_1_name`/`env_1_value` slot pair
+  was migrated to `Ritze/PulseAudio/latency_msec` = `100` (game `244210`) and `= 80`
+  (game `2483190`).
+- Games `730` and `240` — old `arg_1`..`arg_N` slot keys were converted to a single
+  `Ritze/"Game Launch Args"/args` JSON list.
+- Stale exported copies of `custom-env`/`custom-args` were deleted from
+  `~/.config/ritz/extensions/built-in/` so the new list-backed manifests would
+  re-export on next launch (resource bootstrap exports with `overwrite=false`, so a
+  stale file at that path would otherwise silently persist instead of being replaced by
+  the new manifest).
+- A backup of the pre-migration config tree was taken at
+  `~/.config/ritz.backup-2026-07-18`.
+
+*Why recorded here:* this was a one-time user-config migration outside version control
+— nothing in the repo tracks `~/.config/ritz` — so this note is the only durable record
+that the migration ran, what it touched, and where the backup lives, for anyone later
+wondering "what happened to the numbered slots?".
+
 ## Adding or extending options
 
 New option fields for these modules are tracked in `MODULE-OPTIONS-BACKLOG.md` at the repo

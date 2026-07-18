@@ -18,12 +18,16 @@ sections below to find the doc you need.
 - [Hooks & Scripts](features/hooks-and-scripts.md) — lifecycle hooks and user scripts.
 - [Launch Command Assembly](features/launch-command-assembly.md) — `%command%` and launch block assembly.
 - [Bundled Modules](features/bundled-modules.md) — reference for modules shipped with Ritz.
-- [Runtime Backends](features/runtime-backends.md) — LSFG and hypr-monctl backends.
+- [Runtime Backends](features/runtime-backends.md) — the LSFG-VK and Hypr-Monctl `Backend`-trait handlers (the list-backed `custom-env`/`custom-game-env`/`custom-args` `Backend` values are a builder pre-pass, documented in Launch Command Assembly instead).
 - [Resource Export](features/resource-export.md) — exporting embedded resources (e.g. bundled plugin binaries).
 
 ## ui/ — interface conventions
 
 - [Styling Guide](ui/STYLING-GUIDE.md) — egui styling conventions and reusable helpers.
+
+## brainstorm/ — design plans & decision logs
+
+- [Custom Module Editor](brainstorm/custom-module-editor.md) — design plan and decision log for the GUI custom-module editor feature (branch `feat/custom-module-editor`).
 
 ## claude-instructions/ — mandatory rules for agents
 

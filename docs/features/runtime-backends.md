@@ -1,11 +1,25 @@
 # Runtime Backends — stateful handlers behind the LSFG-VK and Hypr-Monctl modules
 
-Most modules resolve straight into env vars, wrapper commands, or launch args via the
-generic builder (see [extension-system.md](extension-system.md)). LSFG-VK and
-Hypr-Monctl instead declare a `"Backend"` field in their manifest and are consumed by a
-native Rust handler implementing `crates/ritz-app/src/backends/mod.rs:Backend` — because
-what they do (write an external tool's own config file, drive a Hyprland plugin over
-IPC) can't be expressed as env vars or argv at all.
+`Extension.Backend` (`crates/ritz-core/src/schema.rs:Extension.backend`) currently has
+five meaningful values, and they split into two unrelated mechanisms:
+
+- **`lsfg-vk`, `hypr-monctl`** — real runtime backend handlers, each a native Rust type
+  implementing `crates/ritz-app/src/backends/mod.rs:Backend`. This page covers those two.
+- **`custom-env`, `custom-game-env`, `custom-args`** — *not* `Backend`-trait impls at
+  all. They're a pre-pass in the generic builder that expands one `multi_string` list
+  variable into N env vars / launch args at build time. See
+  [launch-command-assembly.md](launch-command-assembly.md#backend-pre-pass) for how that
+  pre-pass works, and [bundled-modules.md](bundled-modules.md) for the three list-backed
+  modules themselves.
+
+*Why the split:* the list-backed trio need no persistent runtime handler — no lifecycle,
+no external process/file to drive — they only reshape a list into blocks the generic
+builder already assembles (`ENV_VARS`/`GAME_ENV_VARS`/`GAME_LAUNCH_ARGS`), so a builder
+pre-pass is enough and a `Backend`-trait impl would be pure overhead. LSFG-VK and
+Hypr-Monctl instead declare the same `"Backend"` field but are consumed by a native Rust
+handler implementing `crates/ritz-app/src/backends/mod.rs:Backend` — because what they do
+(write an external tool's own config file, drive a Hyprland plugin over IPC) can't be
+expressed as env vars or argv at all.
 
 ## How it works
 
@@ -105,6 +119,10 @@ Hyprland already has mapped untouched.
 ## Related links
 
 - [extension-system.md](extension-system.md) — how a manifest's `UI` fields resolve
-  into the variable values these backends read via `ResolvedGame::value`/`truthy`.
+  into the variable values these backends read via `ResolvedGame::value`/`truthy`; also
+  documents the `Backend` field's five values and `ForkedFrom` metadata.
+- [launch-command-assembly.md](launch-command-assembly.md#backend-pre-pass) — the
+  list-backed `custom-env`/`custom-game-env`/`custom-args` builder pre-pass (the *other*
+  `Backend` mechanism, not a trait impl).
 - [bundled-modules.md](bundled-modules.md) — the shipped-module reference tour,
   including where LSFG-VK and Hypr-Monctl sit among the other modules.

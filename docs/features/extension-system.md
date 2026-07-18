@@ -18,7 +18,10 @@ Field names match the JSON verbatim (`Extension`, `UI`, `ENV_VARS`, …) and unk
 keys are ignored for forward-compatibility. `UI` is an `IndexMap` so section and field
 order is preserved for deterministic GUI rendering. Each extension has a stable identity
 `<Author>::<Name>::<Version>` via `crates/ritz-core/src/schema.rs:Extension::id` — that
-id keys both variable scoping and config storage.
+id keys both variable scoping and config storage. An extension created by forking
+another in the GUI editor may carry `ForkedFrom` (`"Author::Name"` of the parent) in its
+metadata; it's provenance/display only and never participates in `id` or config lookup,
+so a fork's manifest round-trips identically to a hand-written one.
 
 A module contributes to five ordered blocks (see
 `crates/ritz-core/src/builder.rs:LaunchCommand`):
@@ -135,9 +138,9 @@ Top-level JSON keys of one module file:
 
 | Key | Meaning |
 | --- | --- |
-| `Extension` | Metadata: `Name`, `Author`, `Version`, optional `Description`. Identity is `Author::Name::Version`. |
+| `Extension` | Metadata: `Name`, `Author`, `Version`, optional `Description`, optional `ForkedFrom` (`crates/ritz-core/src/schema.rs:ExtensionMeta.forked_from`). Identity is `Author::Name::Version`. |
 | `AppIds` | Optional list of Steam AppIds; omit = applies to all games. |
-| `Backend` | Optional built-in runtime backend handler (e.g. `lsfg-vk`). |
+| `Backend` | Optional built-in backend, one of five values across two mechanisms: `lsfg-vk` / `hypr-monctl` route to a real runtime handler implementing `crates/ritz-app/src/backends/mod.rs:Backend` (see [runtime-backends.md](runtime-backends.md)); `custom-env` / `custom-game-env` / `custom-args` are *not* trait impls — they're a builder pre-pass that expands a `multi_string` list into env vars/args (see [launch-command-assembly.md](launch-command-assembly.md#backend-pre-pass)). |
 | `RequiresDesktop` | Optional desktop gate matched against `$XDG_CURRENT_DESKTOP`. |
 | `UI` | Ordered sections → fields (`Type`, `Variable`, `Default`, `Options`, `Requires`, …). |
 | `ENV_VARS` | Whole-chain env vars, each a `Set`/`Append`/`Unset` builder. |

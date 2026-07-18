@@ -82,6 +82,35 @@ either to `exec` directly or to print for inspection.
   produces the same shape as a shell-quoted string (via `crates/ritz-core/src/builder.rs:shq`)
   for human display — used by both the GUI preview and `--print`.
 
+### Backend pre-pass
+
+`crates/ritz-core/src/builder.rs:build` runs one more step after the four blocks above
+are assembled and before `LaunchCommand` is returned: a `match input.spec.backend.as_deref()`
+(~L196) over every active extension's `Backend` value, expanding the three list-backed
+values into the blocks they belong to:
+
+- `Backend: "custom-env"` — that extension's `env` list variable (a `multi_string`,
+  already newline-joined by resolve) expands into `ENV_VARS` (chain-wide).
+- `Backend: "custom-game-env"` — its `game_env` list variable expands into
+  `GAME_ENV_VARS` (game-only).
+- `Backend: "custom-args"` — its `args` list variable expands into `GAME_LAUNCH_ARGS`.
+
+For the two env cases, each non-empty line is split on the **first** `=` into
+`NAME=VALUE` (`crates/ritz-core/src/builder.rs:apply_list_env`, ~L166) and inserted as a
+`Set`; a line with no `=` or an empty name is skipped, so a name can never contain a
+newline. For `custom-args`, each non-empty line is pushed **verbatim** as one launch
+arg — no `shlex`/word-splitting, so a value containing spaces stays one argument, unlike
+the regular `GAME_LAUNCH_ARGS` builder above. An empty/unset list resolves to `""` and
+the pre-pass is a no-op for that extension.
+
+*Why a pre-pass here and not a `Backend`-trait handler:* these three don't need any
+runtime lifecycle or external state — they only reshape one list into blocks this
+builder already produces — so folding them in here avoids a `Backend` impl that would do
+nothing but the env/argv work the builder does anyway. See
+[runtime-backends.md](runtime-backends.md) for the real, stateful `Backend`-trait
+handlers (`lsfg-vk`, `hypr-monctl`) this is *not* one of, and
+[bundled-modules.md](bundled-modules.md) for the three list-backed modules themselves.
+
 ## Using it
 
 - Steam launch options are set to `ritz %command%` (see the project `README.md` for
