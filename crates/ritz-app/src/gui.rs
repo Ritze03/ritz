@@ -2196,7 +2196,18 @@ fn icon_button(
                 .layout_no_wrap(label.to_owned(), font.clone(), Color32::PLACEHOLDER)
         });
         let text_w = text.as_ref().map_or(0.0, |g| g.size().x);
-        let h = ui.spacing().interact_size.y.max(font.size + pad.y * 2.0);
+        // Height must match plain `egui::Button`'s own formula
+        // (`interact_size.y.max(galley.size().y + pad.y*2)`, see
+        // `egui::widgets::Button::ui`), or a labelled `icon_button` (e.g. "Edit")
+        // ends up a different height than a same-row `theme::secondary_button`
+        // (e.g. "Fork") — `font.size` is the font's nominal point size, not the
+        // laid-out glyph height a real button measures, so using it here for
+        // labelled buttons under-measured and let interact_size.y win when the
+        // sibling button's actual galley was taller. Icon-only buttons keep the
+        // old `font.size` fallback (`text` is `None`), so `ICON_BTN_SIDE`/
+        // `ACTION_COL_W` are untouched.
+        let text_h = text.as_ref().map_or(font.size, |g| g.size().y);
+        let h = ui.spacing().interact_size.y.max(text_h + pad.y * 2.0);
         // Icon-only buttons drop the horizontal padding and allocate a square
         // cell (width == height) instead of `pad.x * 2 + ICON_CELL`, which used
         // to leave them wider than tall. Labelled buttons are unchanged.
