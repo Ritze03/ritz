@@ -2119,13 +2119,23 @@ impl GuiApp {
 /// Fixed label-column width for an editor row — `render_field`'s 260px reserve
 /// at editor scale.
 const EDITOR_LABEL_W: f32 = 96.0;
+/// Side of the square a glyph-only [`icon_button`] allocates: `interact_size.y`
+/// (== `font.size + button_padding.y * 2` at the editor's theme values —
+/// `13.0 + 5.0*2 == 23.0`, set in `theme.rs`). Kept as its own constant, rather
+/// than re-derived at each call site, so [`ACTION_COL_W`] can reference the same
+/// number `icon_button` actually draws at. If `theme.rs` ever changes
+/// `interact_size.y`, `button_padding.y`, or the Button font size, update this
+/// literal to match (`icon_button_width` computes the live value from
+/// `ui.spacing()`, so a mismatch here only affects the const-derived
+/// [`ACTION_COL_W`], not the buttons themselves).
+const ICON_BTN_SIDE: f32 = 23.0;
 /// Fixed width reserved for a row's `[↑][↓][🗑]` cluster. Constant so every
-/// cluster in a card pins to the same right edge whatever precedes it.
-/// Must cover what the cluster actually draws, or a control sized with this as
-/// its `reserve` slides under the leftmost button: three glyph-only
-/// `icon_button`s (`button_padding.x * 2 + ICON_CELL` = 9*2+18 = 36 each) plus
-/// two `item_spacing.x` gaps (7) = 122 at the theme's spacing.
-const ACTION_COL_W: f32 = 122.0;
+/// cluster in a card pins to the same right edge whatever precedes it. Must
+/// cover what the cluster actually draws, or a control sized with this as its
+/// `reserve` slides under the leftmost button: three square, glyph-only
+/// `icon_button`s ([`ICON_BTN_SIDE`] each) plus two `item_spacing.x` gaps
+/// (7.0, `theme.rs`) = `3 * 23.0 + 2 * 7.0` = 83.
+const ACTION_COL_W: f32 = 3.0 * ICON_BTN_SIDE + 2.0 * 7.0;
 /// Floor for a row control, so a narrow window shrinks but never collapses it.
 const MIN_CONTROL_W: f32 = 80.0;
 /// Side of the square cell an [`icon_button`] reserves for its glyph.
@@ -2186,8 +2196,11 @@ fn icon_button(
                 .layout_no_wrap(label.to_owned(), font.clone(), Color32::PLACEHOLDER)
         });
         let text_w = text.as_ref().map_or(0.0, |g| g.size().x);
-        let w = pad.x * 2.0 + ICON_CELL + gap + text_w;
         let h = ui.spacing().interact_size.y.max(font.size + pad.y * 2.0);
+        // Icon-only buttons drop the horizontal padding and allocate a square
+        // cell (width == height) instead of `pad.x * 2 + ICON_CELL`, which used
+        // to leave them wider than tall. Labelled buttons are unchanged.
+        let w = if label.is_empty() { h } else { pad.x * 2.0 + ICON_CELL + gap + text_w };
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
         if ui.is_rect_visible(rect) {
             let vis = ui.style().interact(&resp).clone();
@@ -2209,8 +2222,9 @@ fn icon_button(
             };
             let fg = if enabled { fg } else { theme::FAINT };
             ui.painter().rect(rect, egui::Rounding::same(8.0), fill, stroke);
+            let cell_x = if label.is_empty() { (rect.width() - ICON_CELL) / 2.0 } else { pad.x };
             let cell = egui::Rect::from_min_size(
-                egui::pos2(rect.min.x + pad.x, rect.min.y),
+                egui::pos2(rect.min.x + cell_x, rect.min.y),
                 egui::vec2(ICON_CELL, rect.height()),
             );
             let pos = cache.centered_pos(ui, icon, &font, cell.center());
@@ -2271,10 +2285,13 @@ fn editor_card(
     act
 }
 
-/// Width a glyph-only [`icon_button`] occupies. Callers that reserve room for the
+/// Width a glyph-only [`icon_button`] occupies: it's square, so this is the
+/// same cell height the button allocates. Callers that reserve room for the
 /// button before laying out the flexible part of a row need this up front.
 fn icon_button_width(ui: &egui::Ui) -> f32 {
-    ui.spacing().button_padding.x * 2.0 + ICON_CELL
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let pad = ui.spacing().button_padding;
+    ui.spacing().interact_size.y.max(font.size + pad.y * 2.0)
 }
 
 /// A short leading label placed before an editor textbox so the user knows what
