@@ -1096,8 +1096,9 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   the duplicate it is.
 - **Save and Rename are independent operations** (2026-07-19) — **Save writes the body
   and only the body; Rename writes the identity and only the identity.** Either can be
-  pressed with the other's work still pending, in either order, with no prompt, no
-  coupling gate and nothing discarded.
+  pressed with the other's work still pending, in either order, with no coupling gate
+  and nothing discarded. Save additionally *notifies* about a staged rename before
+  writing — an advisory prompt, not a coupling; see "the advisory rename notice" below.
 
   *Why (the user's reasoning, verbatim):* "Pressing the Rename button currently also
   saves the whole config, which is wrong. Those two should be independent, like rename
@@ -1114,37 +1115,76 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
     `dirty() == false`, `has_pending_identity() == true`, `has_unsaved_work() == true`.
     With nothing staged, Save keeps its historical outcome (drop draft, reload, close).
   - **Rename** (`GuiApp::perform_rename`) — see the next bullet.
-  - The Save button and Ctrl+S still share one entry point,
-    **`GuiApp::request_save_module`**, but it is no longer a router: all it carries is
-    the "not while a modal is up" guard (the dialog backdrop eats pointer input but not
-    key presses, so a held Ctrl+S would otherwise write under an open confirmation).
+  - The Save button and Ctrl+S share one entry point,
+    **`GuiApp::request_save_module`**, which carries both the "not while a modal is up"
+    guard (the dialog backdrop eats pointer input but not key presses, so a held Ctrl+S
+    would otherwise write under an open confirmation) and the rename notice below. *Why
+    one funnel:* the button and the shortcut diverging was a real bug once — whatever
+    Save has to say, it must say from both.
   - Config mode is unaffected: `focused_module` is only ever set under `Mode::Ide`, so
     `draft()` is `None` and `save_module` returns immediately.
   - Regressions: `save_with_a_staged_rename_writes_the_body_and_leaves_the_identity_staged`,
+    `save_with_a_valid_staged_rename_prompts_instead_of_writing`,
+    `confirming_the_rename_prompt_applies_the_rename_and_not_the_body`,
+    `cancelling_the_rename_prompt_leaves_both_edits_pending`,
     `save_with_an_invalid_staged_rename_still_writes_only_the_body`,
     `save_without_a_staged_rename_does_not_prompt`,
     `rename_writes_the_new_identity_and_leaves_the_body_edit_pending`,
     `rename_succeeds_with_an_invalid_body_in_progress`,
-    `rename_with_an_invalid_identity_does_nothing_and_keeps_the_editor_open` (the first
-    four use real files in a scratch base dir — the point of the split is what lands on
-    disk, so a mocked writer would only re-assert the mock).
+    `rename_with_an_invalid_identity_does_nothing_and_keeps_the_editor_open` (all but
+    the last two use real files in a scratch base dir — the point of the split is what
+    lands on disk, so a mocked writer would only re-assert the mock).
 
-  **Superseded: the `SaveWithPendingRename` prompt** (also 2026-07-19, earlier the same
-  day; kept here because the hazard it named is real and the new design must keep
-  answering it). Because `PendingIdentity` sits outside `snapshot()`, the Save gate is
-  opened purely by *body* edits — so `save_module` wrote the body under the **old**
-  identity and then `drafts.shift_remove(&manifest)` deleted the draft, taking the
-  staged rename with it, **silently**. That was patched with a confirmation
-  (`ConfirmAction::SaveWithPendingRename { blocked }`, two arms: "Rename & Save" when
-  the identity was committable, "Save Without Renaming" when it was not) plus a
-  `GuiApp::rename_and_save` helper. The variant, both arms, the helper and the prompt's
-  three tests are **deleted**. *Why the hazard is gone rather than merely unasked:* the
-  prompt existed to decide what happens to a staged rename that Save was about to
-  destroy. Save no longer destroys it — it keeps the draft — so there is no decision
-  left to put to the user, and asking anyway would be a modal on the editor's most
-  common gesture. The `confirm_label` / `destructive` overrides in
-  `render_confirm_dialog` (added for that prompt's non-destructive "Rename & Save"
-  button) survive as defaults; no current variant overrides them.
+  **The advisory rename notice** (`ConfirmAction::SaveWithPendingRename`, 2026-07-19) —
+  pressing Save while `ModuleDraft::identity` holds a staged Author/Name/`Variable` edit
+  raises a modal instead of writing:
+
+  - **Committable staged rename** → non-destructive **"Apply Rename"**, which runs
+    `GuiApp::perform_rename` and **stops there**. The body edits stay pending and the
+    user presses Save themselves. *Why not a rename-then-save combo:* that combo
+    (`GuiApp::rename_and_save`, deleted) is exactly the coupling the user rejected. The
+    user's acceptance criterion, verbatim: "you got to first save your rename and then
+    you can save your changes".
+  - **Uncommittable staged rename** (`identity_error.is_some()` — empty Author/Name, an
+    Author+Name collision, a bad var rename) → the affirmative becomes **"Save
+    Changes"**, a body-only `save_module`, and the dialog names the blocking reason.
+    *Why the affirmative flips rather than being disabled:* `perform_rename` filters on
+    `identity_error.is_none()`, so an "Apply Rename" button here would appear to work
+    and silently do nothing — worse than no button. Flipping it also keeps the
+    **body-only escape reachable**: a user with an unresolved name collision staged must
+    never be locked out of saving legitimate body work. It is not destructive — the
+    staged rename survives the save, ready to fix.
+  - **Cancel** → nothing happens; the staged rename and the body edits both stay exactly
+    as they were.
+  - **No staged identity** → no dialog at all; Save writes immediately. The notice is
+    about one specific situation, not a new confirmation on the editor's commonest
+    gesture.
+  - **No `blocked` payload.** The variant is a unit variant; `identity_error` is read
+    **live** off the draft at render *and* at confirm time (`GuiApp::apply_save_with_pending_rename`,
+    shared by the renderer and the tests so the two cannot drift). *Why:* the ancestor
+    variant captured it as `SaveWithPendingRename { blocked }`, and captured values going
+    stale is a known hazard here — `DiscardEdits` reads its module names live for the same
+    reason. The modal backdrop means nothing can move between render and confirm anyway,
+    so a copy buys nothing and can only be wrong.
+
+  *Why the prompt exists at all now that it guards nothing (2026-07-19):* it is
+  **advisory, not protective**. Its ancestor prevented real data loss — Save wrote the
+  body under the **old** identity and then `drafts.shift_remove(&manifest)` deleted the
+  draft, taking the staged rename with it, *silently* (`PendingIdentity` sits outside
+  `snapshot()`, so the Save gate is opened purely by *body* edits and never sees it).
+  That hazard is gone: `save_module` now keeps the draft. The prompt was briefly deleted
+  along with it, and the user asked for it back — verbatim: "It should still behave the
+  same way when I press save and there is a rename open, it should notify me, you got to
+  first save your rename and then you can save your changes, just like before. The only
+  part that I didn't like was when I press rename it also automatically saved, and
+  that's gone now." So only the *auto-save coupling* was unwanted; the *notification*
+  was wanted. The reason it still earns its place: because the identity edit lives
+  outside `snapshot()`, a Save that silently ignores it looks — to someone who just
+  typed a new name — like the rename went out with it. The modal keeps the user oriented
+  about which of their two pending edits this button commits.
+
+  The `confirm_label` / `destructive` overrides in `render_confirm_dialog` exist for this
+  arm: it is the one variant whose button is neither "Confirm" nor red.
 - **Rename / identity migration** (Phase 3 stage 2b, `GuiApp::perform_rename`) — a **Rename**
   header button, enabled only when `has_pending_identity() && identity_error.is_none()`.
   `identity_error` rejects an empty/colliding (Author, Name) (`name_collides`, Version-blind,
@@ -1841,9 +1881,9 @@ Not every variant need be destructive: the renderer lets an arm override two thi
 `theme::danger_button` over `theme::primary_button`). *Why an override and not a second
 dialog renderer:* the modal chrome, backdrop and Cancel wiring are byte-identical — such
 an arm differs in one word on one button and in whether that button should read as red.
-The one arm that used it, `ConfirmAction::SaveWithPendingRename`, was deleted on
-2026-07-19 (see "Save and Rename are independent operations"), so every *current* variant
-takes the destructive defaults.
+The one arm that uses it is `ConfirmAction::SaveWithPendingRename`, whose "Apply
+Rename" / "Save Changes" affirmatives destroy nothing (see "Save and Rename are
+independent operations"); every other variant takes the destructive defaults.
 
 ## Using it
 

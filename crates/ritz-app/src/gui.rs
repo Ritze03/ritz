@@ -328,6 +328,27 @@ enum ConfirmAction {
     /// so Confirm completes it instead of merely discarding. See
     /// [`DiscardThen`] for the three destinations and why they share one variant.
     DiscardEdits { then: DiscardThen },
+    /// Save was pressed while the open draft holds a **staged identity change**
+    /// (Author / Name / an existing field's `Variable`) in `ModuleDraft::identity`.
+    ///
+    /// *Why this prompt exists — and why it is no longer protective (2026-07-19):*
+    /// its ancestor guarded real data loss — Save used to write the body under the
+    /// old identity and then drop the draft, taking the staged rename with it.
+    /// That is fixed: [`GuiApp::save_module`] now leaves a staged identity exactly
+    /// where it is. The prompt came back at the user's explicit request as an
+    /// **advisory** one: "it should notify me, you got to first save your rename
+    /// and then you can save your changes". With the identity edit living outside
+    /// `snapshot()`, a Save that silently ignores it looks — from the seat of
+    /// someone who just typed a new name — like the rename went out with it. The
+    /// prompt keeps the user oriented about which of their two pending edits this
+    /// button actually commits.
+    ///
+    /// **Carries no payload.** The one thing the arm branches on,
+    /// `ModuleDraft::identity_error`, is refreshed on the draft every frame and is
+    /// therefore read *live* at render and at confirm time. A captured copy could
+    /// only ever go stale, and stale captures are a known hazard here (same
+    /// reasoning as `DiscardEdits`, which reads its module names live).
+    SaveWithPendingRename,
 }
 
 /// The Fork / Create-new module dialog. Both share the same Author/Name form;
@@ -1759,24 +1780,60 @@ impl GuiApp {
         });
     }
 
-    /// The **only** entry point for the Save button and Ctrl+S.
+    /// The **only** entry point for the Save button and Ctrl+S. Saves directly
+    /// when nothing is staged, and otherwise raises
+    /// [`ConfirmAction::SaveWithPendingRename`] instead of writing.
     ///
-    /// *Why a wrapper in front of [`Self::save_module`] at all (2026-07-19):* it
-    /// holds the one thing a keyboard shortcut needs and a button does not — a
+    /// *Why one shared entry point:* the button and the shortcut diverging was a
+    /// real bug once — whatever Save has to say, it must say from both. It also
+    /// holds the one thing a keyboard shortcut needs and a button does not: a
     /// guard against acting while a modal is up. Ctrl+S is not swallowed by the
     /// dialog's backdrop (that only eats pointer input), so a user holding it
     /// down would otherwise write under an open confirmation.
     ///
-    /// It used to also route to a `SaveWithPendingRename` confirmation when an
-    /// identity edit was staged. That prompt is **gone** (2026-07-19): Save and
-    /// Rename are now fully independent operations — Save writes the body and
-    /// leaves the staged identity exactly where it is — so there is nothing left
-    /// to ask about. See [`Self::save_module`] and [`Self::perform_rename`].
+    /// *Why the ask lives here and not in [`Self::save_module`]:* it leaves
+    /// `save_module` a plain "write what you're told" primitive, which is what
+    /// the prompt's own confirmed body-only arm calls back into.
+    ///
+    /// The Save gate is checked **first**, so a draft that could not be saved
+    /// anyway never raises a dialog — pressing a disabled Save stays a no-op.
     fn request_save_module(&mut self) {
         if self.confirm.is_some() {
             return;
         }
+        let Some(draft) = self.draft() else {
+            return;
+        };
+        if !draft.save_enabled() {
+            return;
+        }
+        if draft.has_pending_identity() {
+            self.confirm = Some(ConfirmAction::SaveWithPendingRename);
+            return;
+        }
         self.save_module();
+    }
+
+    /// What the [`ConfirmAction::SaveWithPendingRename`] dialog's affirmative
+    /// button runs. Shared by the renderer and the tests so the two cannot drift.
+    ///
+    /// The branch is on live `identity_error`, the *same* read the dialog labelled
+    /// its button from one frame earlier — and the backdrop makes a change in
+    /// between impossible:
+    /// - **committable** → apply the rename, and *only* the rename. The body edits
+    ///   stay pending and the user presses Save themselves, which is precisely the
+    ///   "first your rename, then your changes" they asked for. Deliberately **not**
+    ///   a rename-then-save combo: that coupling is the thing they rejected.
+    /// - **not committable** → [`Self::perform_rename`] would filter itself out and
+    ///   silently do nothing, so the affirmative offers the only action that is
+    ///   actually available: write the body. Non-destructive now — the unappliable
+    ///   rename stays staged for the user to fix.
+    fn apply_save_with_pending_rename(&mut self) {
+        if self.draft().is_some_and(|d| d.identity_error.is_none()) {
+            self.perform_rename();
+        } else {
+            self.save_module();
+        }
     }
 
     /// Serialize the draft's **body** and write it to its manifest via
@@ -1792,9 +1849,16 @@ impl GuiApp {
     ///
     /// That independence is what decides the two exit paths below. With a staged
     /// identity still pending, dropping the draft would destroy it (the exact
-    /// silent loss the old confirmation prompt existed to prevent), so the draft
-    /// is re-based **in place** and the editor stays open on the still-pending
-    /// rename. With nothing staged, Save keeps its historical outcome.
+    /// silent loss the original confirmation prompt existed to prevent), so the
+    /// draft is re-based **in place** and the editor stays open on the
+    /// still-pending rename. With nothing staged, Save keeps its historical
+    /// outcome.
+    ///
+    /// **Not a UI entry point.** Reached only through
+    /// [`Self::request_save_module`], or from the body-only arm of
+    /// [`ConfirmAction::SaveWithPendingRename`] when the staged rename cannot be
+    /// applied. Keeping it a plain "write what you're told" primitive is what
+    /// lets that arm exist at all.
     fn save_module(&mut self) {
         let Some(draft) = self.draft() else {
             return;
@@ -2546,9 +2610,9 @@ impl GuiApp {
             // staged and stays put for.
             //
             // Routes through `request_save_module` — the *same* entry point as
-            // `TopAction::Save` — so the keyboard cannot bypass its modal guard.
-            // `save_module` re-checks the Save gate itself; `save_ok` stays only
-            // to skip the input poll.
+            // `TopAction::Save` — so the keyboard can bypass neither its modal
+            // guard nor the staged-rename notice. `request_save_module` re-checks
+            // the Save gate itself; `save_ok` stays only to skip the input poll.
             let save_ok = self.draft().is_some_and(|d| d.save_enabled());
             if save_ok && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
                 self.request_save_module();
@@ -3054,13 +3118,14 @@ impl GuiApp {
         let Some(action) = self.confirm.clone() else {
             return false;
         };
-        // Every surviving variant is destructive and reads "Confirm" in a red
-        // danger button. These stay named (rather than being inlined) because the
-        // renderer is written to let a non-destructive hazard arm override them —
-        // the shape the removed `SaveWithPendingRename` arm used, and the shape any
-        // future one would.
-        let confirm_label = "Confirm";
-        let destructive = true;
+        // `confirm_label` / `destructive` default to the historical "Confirm" in a
+        // red danger button; only the pending-rename arm overrides them.
+        // *Why an override and not a second dialog:* the modal chrome, backdrop
+        // and Cancel wiring are identical — the arm differs in one word on one
+        // button, plus whether that button should read as destructive at all
+        // (neither "Apply Rename" nor "Save Changes" destroys anything).
+        let mut confirm_label = "Confirm";
+        let mut destructive = true;
         let (title, msg) = match &action {
             ConfirmAction::DeleteGame(_) => (
                 "Delete Game",
@@ -3115,6 +3180,58 @@ impl GuiApp {
                     }
                 },
             ),
+            ConfirmAction::SaveWithPendingRename => {
+                // Both the label and the blocking reason are read **live** off the
+                // draft rather than captured into the action — see the variant's
+                // doc comment. The backdrop means nothing can move under us.
+                let (label, blocked) = self
+                    .draft()
+                    .map(|d| {
+                        (
+                            format!(
+                                "{}::{}",
+                                d.identity.staged_author(),
+                                d.identity.staged_name()
+                            ),
+                            d.identity_error.clone(),
+                        )
+                    })
+                    .unwrap_or_default();
+                destructive = false;
+                match &blocked {
+                    // Committable: point the user at the rename, and do only that.
+                    // They press Save again themselves — the two operations stay
+                    // independent, which is the whole point of the split.
+                    None => {
+                        confirm_label = "Apply Rename";
+                        (
+                            "Rename Pending",
+                            format!(
+                                "This module has an unapplied rename to \"{label}\".\n\n\
+                                 Apply the rename first, then press Save again to \
+                                 write your changes. Nothing is lost either way — \
+                                 Cancel leaves both the rename and your changes \
+                                 pending."
+                            ),
+                        )
+                    }
+                    // Not committable: Rename cannot run, so the affirmative offers
+                    // the escape instead — saving the body alone, which no longer
+                    // costs the staged rename anything.
+                    Some(reason) => {
+                        confirm_label = "Save Changes";
+                        (
+                            "Rename Pending",
+                            format!(
+                                "This module has an unapplied rename to \"{label}\", \
+                                 but it cannot be applied yet: {reason}.\n\n\
+                                 You can still save your changes now — the rename \
+                                 stays staged, ready to apply once you have fixed it."
+                            ),
+                        )
+                    }
+                }
+            }
         };
 
         // Modal backdrop: dim everything and swallow clicks meant for the panels
@@ -3179,6 +3296,7 @@ impl GuiApp {
                     self.delete_module_purge = false;
                 }
                 ConfirmAction::DiscardEdits { then } => self.apply_discard_edits(then),
+                ConfirmAction::SaveWithPendingRename => self.apply_save_with_pending_rename(),
             }
             self.confirm = None;
             return true;
@@ -3722,7 +3840,8 @@ impl GuiApp {
     fn dispatch_top_action(&mut self, action: TopAction, id: &str, unsaved: bool, editable: bool) {
         match action {
             // `request_save_module`, not `save_module`: one entry point shared
-            // with Ctrl+S, carrying the "not while a modal is up" guard.
+            // with Ctrl+S, carrying the "not while a modal is up" guard and the
+            // staged-rename notice.
             TopAction::Save => self.request_save_module(),
             // Close doubles as Discard: warn before dropping unsaved edits.
             TopAction::Close => {
@@ -11052,13 +11171,18 @@ mod tests {
     // leaves a staged identity staged; Rename writes the identity and leaves body
     // edits pending. Both pending → two clicks, either order, no prompt.
     //
-    // The data-loss path this replaced: `PendingIdentity` sits outside
+    // Independent, but not silent: pressing Save with an identity staged raises
+    // `ConfirmAction::SaveWithPendingRename` first, at the user's request — "it
+    // should notify me, you got to first save your rename and then you can save
+    // your changes". Its affirmative applies the rename and stops; the body is
+    // still the user's own second press. Advisory, not protective.
+    //
+    // The data-loss path that is genuinely gone: `PendingIdentity` sits outside
     // `snapshot()`, so a staged Author/Name edit neither dirties the draft nor
     // opens the Save gate. `save_module` wrote the body under the old identity and
     // then `drafts.shift_remove(&manifest)` deleted the draft, taking the staged
-    // rename with it, with no message. That was patched with a
-    // `SaveWithPendingRename` confirmation, now deleted: Save no longer drops a
-    // draft that holds a staged rename, so there is nothing to ask about.
+    // rename with it, with no message. `save_module` now keeps the draft, so the
+    // prompt no longer guards anything — it only orients.
 
     /// Scratch-dir variant of the module-editor fixture: real files, a real
     /// draft, one body edit and one staged rename. Returns `(app, base, manifest)`;
@@ -11086,22 +11210,91 @@ mod tests {
         serde_json::from_str(&std::fs::read_to_string(manifest).unwrap()).unwrap()
     }
 
-    /// Save writes the **body only**. The staged identity is not committed, not
-    /// cleared, not discarded — it is still there afterwards, in an editor that
-    /// stayed open so it can still be committed with Rename.
+    /// A dirty, saveable draft with a *valid* staged rename must raise the
+    /// prompt instead of writing, and must leave both pending edits intact so
+    /// Cancel loses nothing.
     ///
-    /// Verified to bite: restoring `save_module`'s unconditional
-    /// `drafts.shift_remove` + `close_focused_draft` fails the `draft must
-    /// survive` expect, which is the silent loss the deleted prompt guarded.
+    /// Verified to bite: routing `TopAction::Save`/Ctrl+S back to `save_module`
+    /// leaves `app.confirm` at `None` and this fails on the first assert.
     #[test]
-    fn save_with_a_staged_rename_writes_the_body_and_leaves_the_identity_staged() {
-        let (mut app, base, manifest) = app_with_pending_body_and_rename("save-pending", "New");
+    fn save_with_a_valid_staged_rename_prompts_instead_of_writing() {
+        let (mut app, base, manifest) = app_with_pending_body_and_rename("save-prompt", "New");
         assert!(app.draft().unwrap().save_enabled(), "the body edit must open the Save gate");
         assert_eq!(app.draft().unwrap().identity_error, None, "the staged rename is valid");
 
         app.request_save_module();
 
-        assert!(app.confirm.is_none(), "Save must not prompt about a staged rename any more");
+        assert!(
+            matches!(app.confirm, Some(ConfirmAction::SaveWithPendingRename)),
+            "Save with a staged rename must notify, not write; got {:?}",
+            app.confirm
+        );
+        // Nothing written, nothing dropped: the prompt is a question, not an act.
+        let after = manifest_json(&manifest);
+        assert_eq!(after["Extension"]["Name"], "Old");
+        assert!(after["Extension"].get("Description").is_none(), "the prompt must not write");
+        assert_eq!(app.draft().unwrap().identity.staged_name(), "New");
+        assert_eq!(app.draft().unwrap().ext.meta.description.as_deref(), Some("body edit"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The affirmative applies the **rename only**. This is the user's acceptance
+    /// criterion: "you got to first save your rename and then you can save your
+    /// changes" — control comes back to them with the body still pending, and
+    /// they press Save themselves.
+    ///
+    /// Verified to bite: making the arm run a rename-then-save combo (the deleted
+    /// `rename_and_save`, the coupling the user rejected) writes
+    /// `"Description": "body edit"` and fails the absence assert.
+    #[test]
+    fn confirming_the_rename_prompt_applies_the_rename_and_not_the_body() {
+        let (mut app, base, manifest) = app_with_pending_body_and_rename("prompt-confirm", "New");
+        app.request_save_module();
+        assert!(matches!(app.confirm, Some(ConfirmAction::SaveWithPendingRename)));
+
+        // Exactly what the dialog's Confirm arm runs.
+        app.confirm = None;
+        app.apply_save_with_pending_rename();
+
+        let after = manifest_json(&manifest);
+        assert_eq!(after["Extension"]["Name"], "New", "the rename must land");
+        assert!(
+            after["Extension"].get("Description").is_none(),
+            "and the body must NOT ride along with it: {after}"
+        );
+        let d = app.draft().expect("the editor stays open on the renamed module");
+        assert!(!d.has_pending_identity(), "the identity landed");
+        assert!(d.dirty(), "the body did not, so it is still pending");
+        assert!(d.save_enabled(), "and Save — the user's own second press — is lit");
+
+        // That second press: no rename staged any more, so it writes directly.
+        app.request_save_module();
+        assert!(app.confirm.is_none(), "nothing left to notify about");
+        assert_eq!(manifest_json(&manifest)["Extension"]["Description"], "body edit");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The primitive **underneath** the prompt: `save_module` writes the body
+    /// only and leaves a staged identity staged — not committed, not cleared, not
+    /// discarded — in an editor that stayed open, because the draft *is* where the
+    /// staged rename lives.
+    ///
+    /// Tested one layer down on purpose: through the UI a *valid* staged rename
+    /// now routes to the prompt, whose affirmative renames instead. This pins the
+    /// non-destructiveness the prompt's advisory-not-protective framing rests on.
+    ///
+    /// Verified to bite: restoring `save_module`'s unconditional
+    /// `drafts.shift_remove` + `close_focused_draft` fails the `draft must
+    /// survive` expect — the original silent loss.
+    #[test]
+    fn save_with_a_staged_rename_writes_the_body_and_leaves_the_identity_staged() {
+        let (mut app, base, manifest) = app_with_pending_body_and_rename("save-pending", "New");
+        assert_eq!(app.draft().unwrap().identity_error, None, "the staged rename is valid");
+
+        app.save_module();
+
         let after = manifest_json(&manifest);
         assert_eq!(after["Extension"]["Description"], "body edit", "the body must land");
         assert_eq!(
@@ -11119,9 +11312,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// An *invalid* staged rename no longer blocks, prompts about, or is destroyed
-    /// by a Save: the body lands and the broken identity edit stays exactly where
-    /// the user left it, to be fixed at leisure.
+    /// Cancel is a genuine no-op: no write, no draft dropped, both the staged
+    /// rename and the body edits exactly where the user left them.
+    #[test]
+    fn cancelling_the_rename_prompt_leaves_both_edits_pending() {
+        let (mut app, base, manifest) = app_with_pending_body_and_rename("prompt-cancel", "New");
+        app.request_save_module();
+        assert!(matches!(app.confirm, Some(ConfirmAction::SaveWithPendingRename)));
+
+        app.confirm = None; // what the dialog's Cancel button does, in full
+
+        let after = manifest_json(&manifest);
+        assert_eq!(after["Extension"]["Name"], "Old");
+        assert!(after["Extension"].get("Description").is_none());
+        let d = app.draft().expect("Cancel must not drop the draft");
+        assert_eq!(d.identity.staged_name(), "New");
+        assert!(d.has_pending_identity());
+        assert_eq!(d.ext.meta.description.as_deref(), Some("body edit"));
+        assert!(d.dirty());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// An *invalid* staged rename still prompts — `perform_rename` would filter
+    /// itself out and do nothing, so the affirmative offers the only action
+    /// available: the **body-only save**. That escape is what keeps a user with an
+    /// unresolvable rename staged (a name collision, say) from being locked out of
+    /// saving legitimate body work.
+    ///
+    /// The reason is read live off `identity_error` at render time rather than
+    /// captured into the action, so this pins that it is *readable* there.
     #[test]
     fn save_with_an_invalid_staged_rename_still_writes_only_the_body() {
         // Staging an empty Name is a pending-but-uncommittable identity.
@@ -11129,13 +11349,27 @@ mod tests {
         assert!(app.draft().unwrap().identity_error.is_some(), "premise: the rename is invalid");
 
         app.request_save_module();
+        assert!(
+            matches!(app.confirm, Some(ConfirmAction::SaveWithPendingRename)),
+            "a blocked rename is still worth notifying about"
+        );
+        assert!(
+            app.draft().unwrap().identity_error.is_some(),
+            "and its reason must still be live-readable when the dialog renders"
+        );
 
-        assert!(app.confirm.is_none(), "no prompt, blocked identity or not");
+        app.confirm = None;
+        app.apply_save_with_pending_rename();
+
         let after = manifest_json(&manifest);
-        assert_eq!(after["Extension"]["Description"], "body edit");
-        assert_eq!(after["Extension"]["Name"], "Old");
+        assert_eq!(after["Extension"]["Description"], "body edit", "the body must land");
+        assert_eq!(after["Extension"]["Name"], "Old", "under the unchanged identity");
         let d = app.draft().expect("the draft must survive");
-        assert_eq!(d.identity.name, "   ", "the invalid buffer is left untouched");
+        assert_eq!(d.identity.name, "   ", "the invalid buffer is left untouched, to be fixed");
+        assert!(d.has_pending_identity(), "still staged — the save cost it nothing");
+        assert!(!d.dirty(), "the body landed, so it is clean against the new baseline");
+        assert!(d.has_unsaved_work(), "but the staged rename is still unsaved work");
+        assert!(app.focused_module.is_some(), "and the editor stays open on it");
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -11230,8 +11464,9 @@ mod tests {
         assert_eq!(app.drafts.len(), 1, "and must not have dropped it yet");
     }
 
-    /// A draft with **no** staged rename must not gain a prompt either — Save is
-    /// unconditionally promptless now, in both directions.
+    /// A draft with **no** staged rename must not gain a prompt: the router
+    /// notifies about one specific situation, it is not a new confirmation on
+    /// every Save.
     #[test]
     fn save_without_a_staged_rename_does_not_prompt() {
         let mut app = test_app();
