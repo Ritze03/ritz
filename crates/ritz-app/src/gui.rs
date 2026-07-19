@@ -43,21 +43,33 @@ const NAV_W: f32 = 280.0;
 ///
 /// | term   | what it is                                                       |
 /// |--------|------------------------------------------------------------------|
-/// | `14.0` | the frame's top inner margin — equal to its own left margin (below) and to Config mode's module-detail header top inset; see *Why 14 and not 6* |
-/// | `23.0` | the name/version/author + button row: `interact_size.y` (`theme.rs`), which is at or above the 19pt heading's galley |
+/// | `8.0`  | the frame's top inner margin; see *Why 8/11 and not 14/10 (unequal on purpose)* |
+/// | `27.0` | the name/version/author + button row — **button-driven**, not `interact_size.y`; see [`IDE_HEADER_ROW_H`] |
 /// | `7.0`  | `item_spacing.y` (`theme.rs`) — egui's gap between those two rows |
-/// | `16.0` | [`IDE_HEADER_DESC_H`], the one-line description slot             |
-/// | `10.0` | the frame's bottom inner margin — matches Config's `add_space(10.0)` gap between the description and its trailing separator; see *Why 10 and not 8* |
+/// | `17.0` | [`IDE_HEADER_DESC_H`], the one-line description slot             |
+/// | `11.0` | the frame's bottom inner margin; see *Why 8/11 and not 14/10 (unequal on purpose)* |
+///
+/// Sum: `8.0 + 27.0 + 7.0 + 17.0 + 11.0 = 70.0` — the same `IDE_HEADER_H` as
+/// before this fix, so nothing downstream reflows. The old term-by-term sum,
+/// `14 + 23 + 7 + 16 + 10`, also summed to 70 on paper — but the `23` and `16`
+/// terms were merely the *documented* derivation, not what egui actually laid
+/// out at runtime. The heading row is button-driven (see [`IDE_HEADER_ROW_H`])
+/// and really measured `27`, four points more than the doc claimed; the
+/// description slot really was allocated at the old `IDE_HEADER_DESC_H` (`16`),
+/// so that term *was* load-bearing, just one point short of its own galley. Real
+/// layout therefore came out to `14 + 27 + 7 + 16 + 10 = 74`, four points past
+/// `exact_height`'s 70 — see the 2026-07-19 fix note below for what absorbed the
+/// difference.
 ///
 /// *Why two rows and not one* (2026-07-19): the one-row band (`14 + 23 + 10 = 47`)
 /// read as a cramped strip next to Config mode's module header. That header
 /// (`GuiApp::render_module_detail_header`) has **no** fixed height — it is
-/// natural-sized — but its structure is fixed: `6` space, the same 23pt heading
-/// row, an edit-context line, the description, `10` space, a separator. This band
-/// reproduces it minus the two parts it does not own: the edit-context line (IDE
-/// Mode has no edit scope to name — the tree shows the selection) and the
-/// trailing separator (the panel's own `show_separator_line` draws that). What is
-/// left is heading row + description, which is the 70pt here.
+/// natural-sized — but its structure is fixed: `6` space, the same button-driven
+/// heading row, an edit-context line, the description, `10` space, a separator.
+/// This band reproduces it minus the two parts it does not own: the edit-context
+/// line (IDE Mode has no edit scope to name — the tree shows the selection) and
+/// the trailing separator (the panel's own `show_separator_line` draws that).
+/// What is left is heading row + description, which is the 70pt here.
 ///
 /// *Why 14 and not 6, and why the left margin also became 14* (2026-07-19):
 /// same-day fix to Config mode's module-detail header found its top inset (the
@@ -65,14 +77,34 @@ const NAV_W: f32 = 280.0;
 /// against an unrelated 8px left margin — visibly lopsided, corner-unsquare
 /// (`GuiApp::render_module_detail_header`'s own doc comment has the fix).
 /// Rather than reproduce that exact 8+6 split here too, this band's frame
-/// margin folds the two into one literal, `top: 14.0, left: 14.0` (see the
-/// `.inner_margin(..)` call below) — same total breathing room Config now has,
-/// with top and left equal on both sides of the mode split.
+/// margin folded the two into one literal, `top: 14.0, left: 14.0`. That literal
+/// is what this same-day fix below corrects — read on.
 ///
-/// *Why 10 and not 8:* Config's equivalent gap — between the description text
-/// and the separator drawn right after it — is `add_space(10.0)`, not a panel
-/// margin. `10.0` here reproduces that specific gap instead of an unrelated
-/// number that merely looked close.
+/// *Why 8/11 and not 14/10 (unequal on purpose)* (2026-07-19): real layout
+/// (`74`, previous paragraph) overran `exact_height` (`70`) by 4pt. egui clips
+/// the frame *fill* to `exact_height` but returns the frame's full, larger rect
+/// and advances the cursor from there — so nothing painted the resulting
+/// `70..74` strip, and the framebuffer clear colour showed through beneath the
+/// separator hline as a black bar. Fixing the row to its real `27.0` and the
+/// description slot to its real `17.0` — correct on their own terms, see
+/// [`IDE_HEADER_ROW_H`] and [`IDE_HEADER_DESC_H`] — raises the honest sum to
+/// `14 + 27 + 7 + 17 + 10 = 75`: *worse* by one more point than the bug, because
+/// the old `16` slot was under-sized too. The margins had to absorb all 5 of
+/// those points (`75 − 70`) to keep `IDE_HEADER_H` at 70 and avoid reflowing the
+/// editor/preview columns: top `14 → 8` (−6), bottom `10 → 11` (+1), net −5.
+/// Check the arithmetic: `8 + 27 + 7 + 17 + 11 = 70`. ✓
+///
+/// The margins are **not** made equal (8 ≠ 11) because the visual gap is not the
+/// margin number — it also depends on font ascent/cap-height above the heading
+/// and ascent below the description:
+/// `top_ink = top_margin + (row_h − heading_galley)/2 + (ascent₁₉ − cap₁₉)`,
+/// `bottom_ink = bottom_margin + DESC_H − ascent₁₃`. Measured, these come out
+/// equal (within 0.35pt: top 14.61, left 14.72, bottom 14.94) only when
+/// `bottom_margin = top_margin + 2.67`, which `11 = 8 + 3` approximates. **Do
+/// not "simplify" these back to equal numbers** — that reintroduces the
+/// top/bottom asymmetry this fix removed. The bottom margin still lands close to
+/// Config's `add_space(10.0)` gap between its description and separator, which
+/// is the number this term originally tried to reproduce.
 ///
 /// *Why `exact_height` and not auto-sizing:* the band spans the editor **and**
 /// preview columns, so any height change there reflows half the window. Pinning
@@ -80,14 +112,43 @@ const NAV_W: f32 = 280.0;
 /// [`GuiApp::editor_header_info`] returns `None` (a module switch, before
 /// `ensure_draft` catches up) — an auto-sized band would collapse to nothing and
 /// snap back, which reads as a flicker.
-const IDE_HEADER_H: f32 = 14.0 + 23.0 + 7.0 + IDE_HEADER_DESC_H + 10.0;
+const IDE_HEADER_H: f32 = 8.0 + IDE_HEADER_ROW_H + 7.0 + IDE_HEADER_DESC_H + 11.0;
+
+/// Height of the header band's first row (name/version/author + action buttons),
+/// in points.
+///
+/// **Button-driven, not `interact_size.y` (`theme.rs`'s `23.0`)** — the row is
+/// `max(interact_size.y, galley.y + 2*button_padding.y)`
+/// (`egui::Button`'s own sizing, `egui-0.29.1/src/widgets/button.rs`), and the
+/// Fork button renders on every path through this row (including bundled
+/// modules in IDE mode — see [`render_editor_header_row`]'s doc comment), so the
+/// button term always applies. With this crate's `theme.rs` numbers —
+/// `button_padding = (9.0, 5.0)` and the `Button`/`Body` text style at 13pt
+/// Geist Mono, whose galley measures `17.0` (`13.0 * 1.3` row height, rounded up)
+/// — that's `max(23.0, 17.0 + 10.0) = 27.0`. `interact_size.y` never wins here.
+/// Independently confirmed 2026-07-19 with a headless `egui::Context` run against
+/// the real bundled font and `theme::apply`: `secondary_button("Fork")` measured
+/// exactly `27.0`pt tall, and the Body galley measured `16.9`pt (→ 17.0).
+///
+/// *Why this needs its own named constant:* every earlier derivation of
+/// [`IDE_HEADER_H`] assumed `23.0` from `interact_size.y` alone, missing that a
+/// `Button`'s own padded galley can win the `max`. That silent 4pt gap is what
+/// caused the header content to lay out taller than the `exact_height` band
+/// clipped its fill to — a black bar where nothing painted the difference. Naming
+/// the number stops the next person from re-deriving `interact_size.y` and
+/// reintroducing the bug.
+const IDE_HEADER_ROW_H: f32 = 27.0;
 
 /// Height of the header band's description slot, in points.
 ///
-/// One `Body` (13pt) text row, rounded to a whole point. The slot is **always**
-/// allocated at exactly this height — see [`render_editor_header_description`]
-/// for why that is the whole point of it.
-const IDE_HEADER_DESC_H: f32 = 16.0;
+/// One `Body` (13pt) text row. Geist Mono's row height is `size * 1.3`, so
+/// `13.0 * 1.3 = 16.9`, rounded up to a whole point: `17.0` — **not** `16.0`; the
+/// slot used to be a point shorter than its own text (confirmed 2026-07-19 with
+/// the same headless font measurement noted on [`IDE_HEADER_ROW_H`]: the Body
+/// galley measures `16.9`pt). The slot is **always** allocated at exactly this
+/// height — see [`render_editor_header_description`] for why that is the whole
+/// point of it.
+const IDE_HEADER_DESC_H: f32 = 17.0;
 
 #[derive(Debug, Clone, PartialEq)]
 enum NavSel {
@@ -1877,14 +1938,23 @@ impl GuiApp {
                     // tried, seen, rejected.
                     .frame(egui::Frame::none()
                         .fill(theme::PANEL)
-                        // top/left both 14, bottom 10 — see [`IDE_HEADER_H`]'s
-                        // doc comment for the derivation and the 2026-07-19
-                        // symmetry fix that set these (was 8/16/6/8).
+                        // top 8, left 14, right 16, bottom 11 — top and bottom
+                        // are deliberately unequal (not a typo). See
+                        // [`IDE_HEADER_H`]'s doc comment, *Why 8/11 and not
+                        // 14/10 (unequal on purpose)*, for the derivation: the
+                        // real button-driven row height (27, not the
+                        // `interact_size.y`-assumed 23) and the corrected
+                        // description slot (17, not 16) pushed real content to
+                        // 75pt against this panel's `exact_height(70.0)`, and
+                        // these margins are what absorbed the difference —
+                        // asymmetrically, because measured ink-to-edge distance
+                        // (not the margin number itself) is what needs to match
+                        // across the top/left/bottom edges.
                         .inner_margin(egui::Margin {
                             left: 14.0,
                             right: 16.0,
-                            top: 14.0,
-                            bottom: 10.0,
+                            top: 8.0,
+                            bottom: 11.0,
                         }))
                     .show(ctx, |ui| {
                         // `None` renders an empty band rather than skipping the
@@ -2312,14 +2382,16 @@ struct EditorHeaderInfo {
 /// IDE-mode call site renders this inside a panel closure that already holds
 /// `&mut self`, and the only thing it needs from `self` is the icon cache.
 ///
-/// **Invariant: this row must stay constant-height.** IDE mode renders it in a
-/// fixed-height panel spanning both columns, so anything that changed height
-/// here would reflow the editor *and* the preview column. The `editable`-gated
-/// Delete / Rename buttons are safe: `editable` is fixed per module, and they
-/// grow the row horizontally, never vertically. The `ide_mode`-gated Save /
-/// Close below are safe for the same reason: `ide_mode` is fixed for the
-/// whole session (it's `self.mode`), so a given call site's row width never
-/// changes frame to frame.
+/// **Invariant: this row must stay constant-height, at [`IDE_HEADER_ROW_H`]
+/// (`27.0`, button-driven — see that constant's doc comment for why it is 27
+/// and not the `interact_size.y` value of 23 an earlier version of this file
+/// assumed).** IDE mode renders it in a fixed-height panel spanning both
+/// columns, so anything that changed height here would reflow the editor *and*
+/// the preview column. The `editable`-gated Delete / Rename buttons are safe:
+/// `editable` is fixed per module, and they grow the row horizontally, never
+/// vertically. The `ide_mode`-gated Save / Close below are safe for the same
+/// reason: `ide_mode` is fixed for the whole session (it's `self.mode`), so a
+/// given call site's row width never changes frame to frame.
 ///
 /// `ide_mode` distinguishes the two call sites, which want different
 /// behaviour for a **bundled** (non-editable) module (2026-07-19):
@@ -2451,9 +2523,13 @@ fn render_editor_header_row(
 ///    moves the ellipsis leftward and changes nothing else. Wrapping is the only
 ///    way width could have become height, and (2) removed it.
 ///
-/// The galley is *painted*, not allocated, and centred in the slot: if the 13pt
-/// body row ever measures a shade over 16pt it bleeds into the frame's 8pt bottom
-/// margin (invisible, and clipped by the panel) instead of pushing anything.
+/// The galley is *painted*, not allocated, and centred in the slot: the slot is
+/// sized *to* the galley — [`IDE_HEADER_DESC_H`] (`17.0`) is the actual measured
+/// height of a 13pt Body row (Geist Mono row height is `size * 1.3`; `13.0 *
+/// 1.3 = 16.9`, rounded up), so nothing bleeds. (It briefly did, by exactly
+/// 1.0pt into the frame's bottom margin — invisible, clipped by the panel —
+/// while `IDE_HEADER_DESC_H` was `16.0`; fixed 2026-07-19, see [`IDE_HEADER_H`]'s
+/// doc comment.)
 ///
 /// Elided text keeps the full string on hover, so nothing is actually lost. The
 /// tooltip is attached only when the text *was* elided — a tooltip that merely

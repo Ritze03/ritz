@@ -193,25 +193,54 @@ decouples the editor column's width from the button row outright, rather than mo
 the problem somewhere else.
 
 - **`exact_height(IDE_HEADER_H)`**, where
-  `IDE_HEADER_H = 14.0 + 23.0 + 7.0 + 16.0 + 10.0 = 70.0` — top inset, the
-  `interact_size.y` heading/button row, one `item_spacing.y`, the
-  `IDE_HEADER_DESC_H` description slot, bottom inset. The frame's `inner_margin` is
-  `{ left: 14.0, right: 16.0, top: 14.0, bottom: 10.0 }`. *Where 70 comes from*
+  `IDE_HEADER_H = 8.0 + IDE_HEADER_ROW_H + 7.0 + IDE_HEADER_DESC_H + 11.0 = 70.0` — top
+  inset, the heading/button row, one `item_spacing.y`, the `IDE_HEADER_DESC_H`
+  description slot, bottom inset. The frame's `inner_margin` is
+  `{ left: 14.0, right: 16.0, top: 8.0, bottom: 11.0 }`. *Where 70 comes from*
   (2026-07-19): the first cut was one row (`6 + 23 + 8 = 37`), then two rows at
   `6 + 23 + 7 + 16 + 8 = 60` (top/bottom inset `6`/`8`) — both read as cramped beside
   Config mode's module header. That header (`render_module_detail_header`) is **not**
   fixed-height — it is natural-sized — but its structure is: `6` space (on top of the
-  enclosing `CentralPanel`'s own 8px margin — 14 total), the same 23pt heading row, an
-  edit-context line, the description, `10` space, a separator. The band reproduces it
-  minus the two pieces it does not own — the edit-context line (IDE Mode has no edit
-  scope to name; the tree shows the selection) and the trailing separator
+  enclosing `CentralPanel`'s own 8px margin — 14 total), the same button-driven heading
+  row, an edit-context line, the description, `10` space, a separator. The band
+  reproduces it minus the two pieces it does not own — the edit-context line (IDE Mode
+  has no edit scope to name; the tree shows the selection) and the trailing separator
   (`show_separator_line` draws that) — which leaves heading row + description, now at
   the same 14px top inset as Config's fixed same-day fix (see "Header top/left
   symmetry" under the manifest editor's "Module editor" section). The frame's *left*
   margin was raised from 8 to 14 to match, for the same top-vs-left symmetry reason,
   and the *bottom* margin was raised from 8 to 10 to match Config's `add_space(10.0)`
   gap between the description and its trailing separator — the closest analogue to
-  this frame's own bottom margin. *Why pinned rather than auto-sized:*
+  this frame's own bottom margin.
+
+  *Same-day black-bar fix* (2026-07-19, later the same day): the `14 + 23 + 7 + 16 + 10`
+  version above turned out to have two wrong terms. The heading/button row is
+  **button-driven** — `max(interact_size.y, Body galley + 2*button_padding.y)`
+  (`egui::Button`'s own sizing) — and with this app's `theme.rs` numbers and the
+  bundled Geist Mono font that comes out to `27.0`, not the `interact_size.y` value of
+  `23.0` the original derivation assumed (the Fork button renders on every path
+  through the row, so the button term always applies; confirmed with a headless
+  `egui::Context` render of `secondary_button("Fork")`, which measured exactly
+  `27.0`pt). The description slot was also a point short of its own text: Geist
+  Mono's row height is `size * 1.3`, so a 13pt Body row measures `16.9` → `17.0`, not
+  the `16.0` `IDE_HEADER_DESC_H` had. Because `exact_height` clips the panel's *fill*
+  to `70.0` but egui still returns the frame's full (larger) laid-out rect and
+  advances the cursor from there, the real `74.0`pt of content (using the wrong `27`
+  row but still the old `16` slot) left a `70..74` strip nothing painted — the
+  framebuffer clear colour showed through as a black bar under the separator hairline.
+  Naming the row height `IDE_HEADER_ROW_H = 27.0` and correcting
+  `IDE_HEADER_DESC_H` to `17.0` fixed the content itself, but their honest sum
+  (`14 + 27 + 7 + 17 + 10 = 75`) is one point taller than the original bug, not
+  shorter — so to hold `IDE_HEADER_H` at `70.0` (no reflow of the editor/preview
+  columns) the frame's margins absorbed the full 5-point difference:
+  `top: 14.0 → 8.0`, `bottom: 10.0 → 11.0`. The two are **deliberately unequal**, not a
+  rounding accident — the visual gap a margin produces also depends on font
+  ascent/cap-height above the heading and ascent below the description, and measured
+  ink-to-edge distance only comes out even (top 14.61, left 14.72, bottom 14.94, within
+  0.35pt) when the bottom margin is about 2.67pt more than the top. Do not "simplify"
+  these back to equal numbers.
+
+  *Why pinned rather than auto-sized:*
   the band spans half the window, so any height change reflows both columns; and on the
   frames where `GuiApp::editor_header_info` returns `None` (a module switch, before
   `ensure_draft` catches up) an auto-sized band would collapse to nothing and snap back,
@@ -563,9 +592,16 @@ top, i.e. not square in its corner. Fixed with a local `egui::Frame` (6px left-o
 inner margin) wrapped around just the header + settings-body call in `GuiApp::ui`,
 bringing the left inset to 14px too — without touching the shared `CentralPanel` frame
 the General Settings and Config-mode module-editor branches render through, which were
-never part of the complaint. `IDE_HEADER_H`, below, imports this same left = top = 14
-spacing to give IDE mode's header band the same breathing room the fix gave Config
-mode's.
+never part of the complaint. `IDE_HEADER_H`, below, originally imported this same
+left = top = 14 spacing to give IDE mode's header band the same breathing room the fix
+gave Config mode's, and the *left* margin still is 14 today. Its *top* margin is not,
+though: a same-day-later fix (2026-07-19, see the `exact_height(IDE_HEADER_H)` bullet
+below) found the band's real content laid out four points taller than `exact_height`
+assumed, painting a black bar of framebuffer clear colour under the panel's separator
+line. Correcting that dropped the band's top margin to 8 (and raised its bottom to 11) —
+deliberately unequal to the 14/10 pair this paragraph describes, because matching
+*measured ink-to-edge distance* across the band's edges needs different margin numbers
+than matching Config mode's did.
 
 ### Field rendering — `render_field`
 
