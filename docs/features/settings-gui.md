@@ -113,7 +113,7 @@ selected — General Settings has no modules to browse), a bottom
 editor. *Why hide the module list for General Settings:* that screen edits app-wide
 preferences, not extension variables, so a module tree would have nothing to select.
 
-### Layout: `Mode::Ide` — module tree | manifest editor | read-only preview
+### Layout: `Mode::Ide` — module tree | manifest editor | interactive preview
 
 ```
 ┌───────────── titlebar (render_title_bar) ─────────────────────────┐
@@ -121,14 +121,16 @@ preferences, not extension variables, so a module tree would have nothing to sel
 │ ┌────────────┐ │ ide_module_header — name v… by …   [Fork][🗑][✕][Save] │
 │ │Prof·IDE·Set│ │   description, one line, elided…                       │
 │ └────────────┘ ├──────────────────────┬─────────────────────────┤
-│                │  manifest editor      │  PREVIEW (read-only)     │
+│                │  manifest editor      │  PREVIEW (interactive)   │
 │ ⚠ errors banner│  (render_module_      │  (render_module_settings │
-│ [module tree,  │   editor, full-width) │   _body, read_only=true) │
+│ [module tree,  │   editor, full-width) │   _body → preview_config)│
 │  all_specs]    │←──── exactly half ───→│←──── exactly half ──────→│
 ├────────────────┼──────────────────────┼─────────────────────────┤
 │ Group by Author│  ide_editor_band      │  ide_launch_band         │
-│ [+ New Module ]│  (198px, declared     │  (launch command, nested │
-│ [Open Folder →]│   but empty)          │   inside the preview)    │
+│ Preview against│  (198px, declared     │  (launch command, nested │
+│ [ None      ▾ ]│   but empty)          │   inside the preview)    │
+│ [+ New Module ]│                       │                          │
+│ [Open Folder →]│                       │                          │
 │  extensions/   │                       │                          │
 └────────────────┴──────────────────────┴─────────────────────────┘
 ```
@@ -149,7 +151,7 @@ start from `ctx.available_rect()`), so `GuiApp::ui` declares, in this order: tit
 
 ### IDE-mode header band (`ide_module_header`)
 
-The module header — name, version, author, and the `[Fork] [Delete] [✕ Close] [Save]`
+The module header — name, version, author, and the `[Fork] [Delete] [✕ Discard] [Save]`
 (+ `Rename`) cluster — spans the **full width right of the nav**, above both columns.
 Rendered by the free function `render_editor_header_row`; see "Header / status / body
 split" under the manifest editor for how the state reaches it across panel closures.
@@ -158,7 +160,8 @@ split" under the manifest editor for how the state reaches it across panel closu
 takes an `ide_mode: bool` (`true` from this band, `false` from Config mode's inline call in
 `render_module_editor`) and skips Save and Close entirely when `!info.editable && ide_mode`
 — leaving only `[Fork]`. Save can never be enabled on a bundled module (nothing to save —
-the fields render disabled) and, in IDE mode specifically, Close is not "leave the editor":
+the fields render disabled) and, in IDE mode specifically, that button is not "leave the
+editor":
 the `Mode::Ide` invariant (`nav_sel` is always `NavSel::ModuleEditor(_)`) reopens whatever
 the tree has selected on the very next frame (the guard in `GuiApp::ui` right after the
 draft-drop guard), so Close in IDE mode only ever discards-and-reloads the current
@@ -168,6 +171,16 @@ that did nothing observable. **Config mode keeps both for bundled modules, uncha
 Close there genuinely returns to the previous view (`editor_exit_target`), and Save's
 disabled "Fork to edit" tooltip is the established way Config teaches the fork gesture —
 this fix does not touch that path.
+
+*The button is labelled **Discard** in IDE mode and **Close** in Config mode*
+(2026-07-19, S5): both raise the same `TopAction::Close` and run the same
+`GuiApp::dispatch_top_action` arm, including the dirty-draft confirmation — only the
+wording differs, because only the meaning does. `TopAction::Close` calls
+`exit_module_editor`, but the `Mode::Ide` invariant reopens the tree's selected module on
+the next frame, so in IDE mode it can only ever mean "throw away my edits and reload the
+draft". Labelling it Close there promised an exit that structurally cannot happen.
+`render_editor_header_row` picks the label from its existing `ide_mode` parameter; no
+behaviour changed.
 
 *Why full-width and not inside the editor column* (2026-07-19): the action cluster plus
 the heading needs roughly 500pt of row. Inside the editor's half — `(window − 280) / 2`
@@ -911,44 +924,148 @@ does with the resolved fields.
 ## IDE-mode preview column (`GuiApp::render_ide_preview_panel`)
 
 The right-hand `ide_preview` `SidePanel` in `Mode::Ide`: a WYSIWYG render of the module
-under edit — `render_module_settings_body(.., full_width = true, read_only = true)` —
-over a nested `TopBottomPanel::bottom("ide_launch_band")`. The band is declared **before**
+under edit — `render_module_settings_body(.., full_width = true, read_only = false,
+show_legend = preview_game.is_some())` — over a nested
+`TopBottomPanel::bottom("ide_launch_band")`. The band is declared **before**
 the inner `CentralPanel`; nested panels obey declaration order exactly like top-level
 ones. *Why nest it here instead of a full-width footer:* the launch string belongs to the
 preview, and the space under the editor column is the reserved diagnostics band.
 
-- **Strictly read-only.** `read_only = true` gates every write at the `editable` flag in
-  `render_field` / `render_value_editor` / `render_multi_string_field` /
-  `render_env_pair_field` (including the `window_class` **Detect** button), so nothing
-  from this column can reach `set_scoped` — whose `ModuleEditor(_)` arm writes the *real*
-  game config. A `debug_assert!` on the returned `changed` bool guards the invariant.
-- **One spec list for both halves.** `ide_specs` = `cur_specs` with the draft snapshot
-  spliced over its entry, or **appended** when the module isn't in `cur_specs` at all.
-  *Why the append:* the IDE tree browses the unfiltered `all_specs`, so opening a module
-  that doesn't apply to the ambient game would otherwise show a preview that silently
-  ignores everything you type. The body resolves via
-  `GuiApp::resolve_specs_for_editing(&ide_specs)` and the band assembles from the same
-  list, so the two can never disagree.
-- **`resolve_specs_for_editing`** (new in S3b) is `resolve_for_editing` with the spec list
-  as a parameter; `resolve_for_editing` delegates to it with `cur_specs`. *Why it was
-  needed:* every arm previously said `&self.cur_specs` literally, ignoring any list the
-  caller had in hand — inert while the only consumers used `cur_specs`, but it silently
-  blanks badges and whole preview bodies for any module outside it. `render_ext_tree` now
-  resolves against its own `specs` parameter for the same reason.
-- **No "Previewing against: {game}" line**, unlike the Config-mode footer: IDE Mode is
-  specified to resolve against nothing by default, so naming a game would advertise a
-  binding the design doesn't want. (The empty scratch-layer `preview_config` that makes
-  that literally true is S5; S3b still resolves against the ambient game underneath.)
-- **`ui.push_id("ide_preview", ..)` wraps the entire body.** The editor and preview
-  columns render the same module in the same frame, and the body mints position-derived
-  auto-ids — plus `ComboBox::from_id_salt(&field.variable)`, salted by variable name
-  *alone* — so without a namespace the two columns fight over widget state. It must wrap
-  the whole body, not just the combo: the multi_string and env-pair renderers auto-id
-  their `TextEdit`s, `+ Add` buttons and `icon_button`s too. This is the only `push_id`
-  in `gui.rs`; S4 replaces the per-widget salts properly.
-- If the module resolves to no `ExtResolution`, the column renders an **explicit notice**
-  rather than staying blank — a blank column reads as "this module has no settings",
-  which is a very different (and wrong) message.
+### Interactive, into a scratch layer that never reaches disk (S5a)
+
+The column is **fully editable**, and every write it makes lands in
+`GuiApp::preview_config` — an ordinary `GameConfig` (`"__preview__"` / `"None"`) handed to
+the resolver as the game layer, exactly the way `preset_as_fake_game` does for profiles.
+Nothing persists it: no code path hands it to `save_game`, and `persist()` has no arm that
+can reach it.
+
+The routing flag is `GuiApp::write_target: WriteTarget { Scope, Preview }`. **It is a
+second, orthogonal axis and not a `NavSel` arm, deliberately.** In IDE mode `nav_sel` is
+always `NavSel::ModuleEditor(_)` — the *same* value whether the manifest editor column or
+the preview column is rendering — so `nav_sel` structurally cannot tell "editor writing
+config" from "preview writing scratch". `set_scoped`, `unset_scoped` and
+`current_scope_value` therefore branch on `write_target` **before** their `nav_sel` match.
+(Same reasoning that made `Mode` a separate axis from `NavSel`.)
+
+Three guards keep a preview toggle off the user's disk, and all three are load-bearing:
+
+1. **`GuiApp::with_preview_writes`** wraps the body call and restores
+   `WriteTarget::Scope` after it. *Why a closure rather than an assignment after the
+   call:* the restore lives inside the wrapper, so no `return` in the caller's closure
+   body can skip it — and both `render_module_settings_body` and the `push_id` block
+   around it contain early returns. A `write_target` stuck on `Preview` would be the
+   worst failure mode: the *next* Config-mode edit would silently vanish into scratch.
+2. **The `changed` bool from the preview call is explicitly discarded.** In Config mode
+   that bool feeds `ui()`'s `changed`, which calls `persist()` — which maps
+   `NavSel::ModuleEditor(_)` onto `save_game`. Letting it escape would rewrite
+   `games/<appid>.json` on every preview toggle.
+3. **A snapshot assertion.** `serde_json::to_value(&game_config.config.modules)` is taken
+   before the body call and `debug_assert_eq!`d after. This replaces the old
+   `debug_assert!(!changed)` (which could not survive an interactive preview) with an
+   assertion of the property that actually matters — it checks the *destination*, not the
+   messenger, so it stays meaningful however the write path is later refactored.
+
+`poll_detect` is the one writer outside that wrapped region: it runs at the frame tail,
+after the restore, so `Detect` captures the `write_target` in force when the detection
+started and `poll_detect` re-establishes it for the write. It also returns `changed` only
+for `WriteTarget::Scope`, for guard #2's reason. Without this, the `window_class`
+**Detect** button — which becomes live along with the rest of the preview — would land its
+result in the real game config, bypassing all three guards.
+
+### Buffer-key namespacing (`GuiApp::buffer_scope_tag`)
+
+`text_buffers` keys used to be `"{spec.id()}::{var}"` with **no** scope tag, and both
+`multi_edit` scope-tag sites mapped `NavSel::ModuleEditor(_)` onto `"game:{appid}"` — so
+the IDE preview and Config mode's Game view computed **identical** keys for the same
+module/variable, over two different resolution bases. That was inert only while the
+preview never wrote; making it interactive fires it. Every `text_buffers` / `multi_edit`
+key now goes through `buffer_scope_tag()`, which returns `"preview"` when
+`write_target == Preview` and the old value otherwise. Sites: the `String` arm of
+`render_value_editor` (insert *and* `entry`), `render_multi_string_field`,
+`render_env_pair_field`, `poll_detect`, and `unset_current`.
+
+The same change also fixes an `egui::Id`: the `String` arm mints
+`egui::Id::new(("text_edit", &key))`, an **absolute** id that `push_id` does not
+namespace and that becomes reachable the moment the preview's fields turn editable.
+Folding the tag into `key` fixes the id and the buffer key in one move.
+
+### `show_legend` is its own parameter, not `!read_only`
+
+The scope legend and the trailing colour-hint footer used to ride on `!read_only`.
+Flipping `read_only` to `false` would have **silently resurrected them**, so
+`render_module_settings_body` takes a separate `show_legend: bool`. Config mode passes
+`true`; the preview passes `preview_game.is_some()` — the colours describe layers that are
+only actually participating once a real game is selected, so with **None** the palette
+would be decorative.
+
+### Preview game selector (S5b)
+
+A `ComboBox` in the **IDE nav footer** (`GuiApp::render_ide_nav_footer`), in the space
+above Open Folder / New Module, labelled "Preview against". It lists **None** (first, and
+the default) plus every configured game from `self.games`, refreshed by `refresh_games()`
+on entry to IDE mode (`select_nav_category`'s `NavCategory::Ide` arm). Picks are collected
+as a deferred `Option<Option<String>>` intent and applied after the panel closure, which
+already holds `&mut self`.
+
+- **Never remembered.** There is deliberately no `GeneralConfig` field behind it and
+  nothing written to disk; every app start begins at None. (User requirement, stated
+  twice.)
+- `GuiApp::set_preview_game` **seeds from** the game — `preview_config` becomes a *clone*
+  of `paths.load_game(appid)` (empty `GameConfig` if absent), so the preview opens showing
+  that game's real settings and every edit mutates only the clone. It is never written
+  back. The game's preset (`config.modules.preset`, else `default_preset`) is loaded and
+  merged with its parent chain via `collect_parent_chain` + `merge_modules` and cached in
+  `preview_preset` — presets are **not** re-read from disk inside the render path, which
+  runs every frame.
+- **It does not call `switch_game`.** That overwrites `appid`, `game_config`, `preset` and
+  rebuilds `cur_specs` — it would change what Config mode edits and what would actually
+  launch, as a side effect of moving a preview dropdown. The two jobs share shape, not
+  state.
+- Either way it drops the `"preview"`-tagged `text_buffers` / `multi_edit` entries, since
+  the resolution base changed underneath them.
+
+### Resolution and the launch band
+
+- **`GuiApp::resolve_specs_for_preview`** = `resolve::resolve(specs, Some(&preview_config),
+  preview_preset.as_ref(), Some(&global_config))`. Both halves of the column — the form
+  body and the launch band — resolve through it, so they can never disagree. The real
+  `global_config` is included because it is a genuine layer of the launch being predicted;
+  only the game/profile layers are scratch. `resolve_specs_for_editing` is left untouched
+  (a `nav_sel` arm there could not have distinguished the two columns anyway).
+- **One spec list for both halves.** `ide_specs` is `all_specs` filtered by
+  `applies_to(preview_appid)` when a preview game is selected, and `cur_specs` otherwise,
+  with the draft snapshot spliced over its entry or **appended** when the module isn't in
+  the list at all. *Why the preview-game filter:* with a game selected, filtering by the
+  *ambient* `appid` would silently omit modules gated to the previewed game and include
+  modules gated to the ambient one. *Why the append:* the IDE tree browses the unfiltered
+  `all_specs`, so opening a module that doesn't apply would otherwise show a preview that
+  silently ignores everything you type.
+- **`resolve_specs_for_editing`** (S3b) is `resolve_for_editing` with the spec list as a
+  parameter; `resolve_for_editing` delegates to it with `cur_specs`. *Why it was needed:*
+  every arm previously said `&self.cur_specs` literally, ignoring any list the caller had
+  in hand — inert while the only consumers used `cur_specs`, but it silently blanks badges
+  and whole preview bodies for any module outside it. `render_ext_tree` now resolves
+  against its own `specs` parameter for the same reason.
+- **No "Previewing against: {game}" line** inside the band, unlike the Config-mode footer:
+  the nav footer's selector both shows *and* chooses the binding, so a second,
+  non-interactive statement of the same fact three columns away would only be a thing that
+  can go stale.
+
+### Widget ids
+
+`ui.push_id("ide_preview", ..)` wraps the entire body. It must wrap the whole body, not
+just the combo: the multi_string and env-pair renderers auto-id their `TextEdit`s,
+`+ Add` buttons and `icon_button`s too. This is the only `push_id` in `gui.rs`; S4
+replaces the per-widget salts properly. Note that in IDE mode
+`render_module_settings_body` runs **once per frame** — the editor column renders
+`render_module_editor` (the manifest editor), not a second settings body — so `push_id`
+guards against Config-mode id reuse and future S4 layouts, not a same-frame collision.
+The one id that `push_id` cannot cover is the absolute `("text_edit", key)`, handled by
+`buffer_scope_tag` above.
+
+If the module resolves to no `ExtResolution`, the column renders an **explicit notice**
+rather than staying blank — a blank column reads as "this module has no settings", which
+is a very different (and wrong) message.
 
 ## General Settings panel
 

@@ -122,6 +122,30 @@ enum Mode {
     Ide,
 }
 
+/// Where a module-field write lands: the real config scope `nav_sel` names, or
+/// the IDE preview's throw-away scratch config.
+///
+/// *Why an orthogonal flag and not a `NavSel` variant* (S5a): in IDE mode
+/// `nav_sel` is **always** `NavSel::ModuleEditor(_)` — it is IDE mode's "which
+/// module is open" carrier, and it is the *same* value whether the manifest
+/// editor column or the preview column is the one rendering. So `nav_sel` cannot
+/// distinguish "editor writing config" from "preview writing scratch"; adding an
+/// `"ide"` arm to the `nav_sel` matches (which is what the brainstorm plan
+/// proposed) would have sent Config-mode Game writes and preview writes down the
+/// same arm. Only a second, independent axis can tell them apart — exactly the
+/// same reasoning that made [`Mode`] a separate axis from [`NavSel`].
+///
+/// Set to [`WriteTarget::Preview`] for the duration of one
+/// `render_module_settings_body` call and nothing else; see
+/// [`GuiApp::with_preview_writes`], which is the only place that flips it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteTarget {
+    /// Write to whichever config store `nav_sel` names (global / profile / game).
+    Scope,
+    /// Write to `GuiApp::preview_config`, which is never persisted.
+    Preview,
+}
+
 /// A click on one of the three rows in the nav's GENERAL category box. Collected
 /// during render and applied afterwards (the render closure already holds
 /// `&mut self`).
@@ -264,6 +288,30 @@ pub struct GuiApp {
     /// Which top-level area is showing (see [`Mode`]). Orthogonal to `nav_sel`;
     /// in-memory only, never written to any config file.
     mode: Mode,
+    /// Which store module-field writes land in *right now* — see [`WriteTarget`].
+    /// Always [`WriteTarget::Scope`] except inside the one
+    /// `render_module_settings_body` call the IDE preview column makes.
+    write_target: WriteTarget,
+    /// The IDE preview's scratch game layer. A real [`GameConfig`] handed to the
+    /// resolver as the game scope, exactly like `preset_as_fake_game` does for
+    /// profiles — so `render_field` / `current_scope_value` / `apply_tri` work
+    /// verbatim against it. **Never written to disk**: nothing maps it to a
+    /// `save_game`, and `persist()` has no arm that can reach it.
+    ///
+    /// Seeded empty (`__preview__` / "None") so the preview resolves against
+    /// nothing by default; [`GuiApp::set_preview_game`] swaps in a *clone* of a
+    /// real game's config when the preview game selector picks one.
+    preview_config: GameConfig,
+    /// Profile layer that goes under `preview_config`, pre-merged with its parent
+    /// chain. Cached by [`GuiApp::set_preview_game`] rather than re-read from disk
+    /// inside the render path — resolution runs every frame, preset loads are file
+    /// reads.
+    preview_preset: Option<Preset>,
+    /// AppID of the game the IDE preview resolves against, or `None` for the empty
+    /// scratch layer. **Deliberately not persisted and not in `GeneralConfig`**:
+    /// the user asked twice that this never be remembered, so every app start
+    /// begins at None. Only the selector reads it back.
+    preview_game: Option<String>,
     /// Index into `all_specs` of the module the IDE column has selected. Kept
     /// separate from `selected_ext` (which indexes `cur_specs`) because the IDE
     /// tree browses the *unfiltered* module set — the two lists have different
@@ -651,6 +699,17 @@ struct Detect {
     /// has moved on by the time the 3s timer fires, the detection is cancelled
     /// rather than applied — see [`GuiApp::cancel_stale_detect`].
     nav: NavSel,
+    /// The write target in force when the detection was *started*.
+    ///
+    /// *Why this has to be captured* (S5a): `nav_sel` alone does not identify the
+    /// store — see [`WriteTarget`] — and `poll_detect` runs at the tail of the
+    /// frame, long after `GuiApp::with_preview_writes` has restored
+    /// [`WriteTarget::Scope`]. Making the preview's fields editable also makes its
+    /// "Detect window class" button live, so without this a Detect started in the
+    /// preview column would land its result in the **real** game config: a write
+    /// that bypasses all three of the preview's guards, because it happens outside
+    /// the render call they wrap.
+    target: WriteTarget,
 }
 
 impl GuiApp {
@@ -696,6 +755,10 @@ impl GuiApp {
             detect: None,
             nav_sel: NavSel::Game(appid.to_string()),
             mode: Mode::Config,
+            write_target: WriteTarget::Scope,
+            preview_config: GameConfig::new("__preview__", "None"),
+            preview_preset: None,
+            preview_game: None,
             ide_selected: 0,
             all_presets,
             preset_pins: HashMap::new(),
@@ -744,6 +807,70 @@ impl GuiApp {
         self.rebuild_cur_specs();
         self.text_buffers.clear();
         self.multi_edit.clear();
+    }
+
+    /// Point the IDE preview's scratch layer at a real game (`Some(appid)`) or at
+    /// nothing (`None`, the default and the state every app start begins in).
+    ///
+    /// **Seed-from-game, not overlay-on-game.** `preview_config` becomes a *clone*
+    /// of the game's stored config, so the preview opens showing that game's real
+    /// settings and every edit made in the preview mutates only the clone. It is
+    /// never written back — `set_preview_game` is the only thing that ever
+    /// assigns `preview_config`, and no code path hands it to `save_game`.
+    ///
+    /// *Why not `switch_game`, which already does most of this:* `switch_game`
+    /// overwrites `appid`, `game_config`, `preset` and rebuilds `cur_specs`. That
+    /// would change which game Config mode is editing, and which game would
+    /// actually launch, as a side effect of moving a preview dropdown. The two
+    /// jobs share shape, not state.
+    ///
+    /// *Why the preset chain is merged here rather than in the resolver:*
+    /// resolution runs every frame; `load_preset` is a file read. Mirrors the
+    /// `NavSel::Game(_)` arm of [`Self::resolve_specs_for_editing`].
+    fn set_preview_game(&mut self, appid: Option<&str>) {
+        match appid {
+            None => {
+                self.preview_game = None;
+                self.preview_config = GameConfig::new("__preview__", "None");
+                self.preview_preset = None;
+            }
+            Some(id) => {
+                self.preview_game = Some(id.to_string());
+                // A game with no file yet is a legitimate pick (it exists in
+                // `self.games` only if a file exists, but a delete could race a
+                // stale list) — fall back to an empty config rather than bailing.
+                self.preview_config = self
+                    .paths
+                    .load_game(id)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| GameConfig::new(id, id));
+                let preset_name = self
+                    .preview_config
+                    .config
+                    .modules
+                    .preset
+                    .clone()
+                    .or_else(|| self.default_preset.clone());
+                let direct = preset_name.and_then(|n| self.paths.load_preset(&n).ok().flatten());
+                // Parent chain merges UNDER the direct preset (parent = lower
+                // priority) — same order as `resolve_specs_for_editing`.
+                self.preview_preset = direct.map(|p| match p.parent.as_ref() {
+                    Some(pname) => {
+                        let mut base = collect_parent_chain(&self.paths, pname);
+                        merge_modules(&mut base.modules, &p.modules);
+                        base
+                    }
+                    None => p,
+                });
+            }
+        }
+        // The resolution base just changed underneath every in-progress preview
+        // edit buffer, so drop them. Only the `"preview"`-tagged ones: Config
+        // mode's buffers describe a scope this selector does not touch. See
+        // `buffer_scope_tag` for why the namespaces are separable at all.
+        self.text_buffers.retain(|k, _| !k.starts_with("preview::"));
+        self.multi_edit.retain(|k, _| !k.starts_with("preview::"));
     }
 
     /// Rebuild `cur_specs` (the modules applicable to the current game) from
@@ -902,6 +1029,79 @@ impl GuiApp {
                 }
                 None => resolve::resolve(specs, None, None, global),
             },
+        }
+    }
+
+    /// Resolution for the IDE preview column and its launch band: the scratch
+    /// `preview_config` as the game layer, its cached preset chain under it, and
+    /// the real global config at the bottom.
+    ///
+    /// *Why a separate method rather than another arm in
+    /// [`Self::resolve_specs_for_editing`]:* that one dispatches on `nav_sel`,
+    /// which in IDE mode is `ModuleEditor(_)` for **both** columns — so an arm
+    /// there could not tell the manifest editor's resolution from the preview's.
+    /// Same reasoning as [`WriteTarget`]. `resolve_specs_for_editing` is left
+    /// byte-for-byte alone so Config mode cannot be perturbed.
+    ///
+    /// *Why the real `global_config` is included* even with no preview game
+    /// selected: it is a genuine layer of the launch the user is trying to
+    /// predict. Only the game/profile layers are scratch.
+    fn resolve_specs_for_preview(&self, specs: &[Extension]) -> Resolution {
+        resolve::resolve(
+            specs,
+            Some(&self.preview_config),
+            self.preview_preset.as_ref(),
+            Some(&self.global_config),
+        )
+    }
+
+    /// Run `f` with every module-field write redirected to the scratch
+    /// `preview_config`, restoring [`WriteTarget::Scope`] afterwards.
+    ///
+    /// **Guard #1 of three.** *Why a closure and not a bare
+    /// `self.write_target = …` around the call:* the restore lives after `f(self)`
+    /// *inside this wrapper*, so no `return` written in the caller's closure body
+    /// can skip it — a caller can only return from its own closure, which returns
+    /// into this function. `render_module_settings_body` and the `push_id` block
+    /// that wraps it both contain early returns, and a bare assignment placed
+    /// after the call would be trivially bypassed by adding one more. Leaving
+    /// `write_target` stuck on `Preview` would be the worst possible failure: the
+    /// *next* Config-mode edit would silently land in the scratch layer and be
+    /// discarded.
+    fn with_preview_writes<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.write_target = WriteTarget::Preview;
+        let out = f(self);
+        self.write_target = WriteTarget::Scope;
+        out
+    }
+
+    /// The scope prefix for `text_buffers` / `multi_edit` keys.
+    ///
+    /// *Why this must exist* (S5a): `text_buffers` keys were `"{spec.id()}::{var}"`
+    /// with **no** scope tag, and both `multi_edit` scope-tag sites mapped
+    /// `NavSel::ModuleEditor(_)` onto `"game:{appid}"`. So the IDE preview and
+    /// Config mode's Game view computed **identical** keys for the same
+    /// module/variable — two different resolution bases sharing one text buffer.
+    /// That was inert only for as long as the preview never wrote; making the
+    /// preview interactive fires it. Routing every key site through here gives the
+    /// preview its own `"preview"` namespace.
+    ///
+    /// It also fixes an `egui::Id`: the `String` field arm mints
+    /// `egui::Id::new(("text_edit", &key))`, an **absolute** id that `push_id`
+    /// does not namespace and that becomes reachable the moment the preview's
+    /// fields turn editable. Folding the tag into `key` fixes the id and the
+    /// buffer key in one move.
+    fn buffer_scope_tag(&self) -> String {
+        if self.write_target == WriteTarget::Preview {
+            return "preview".to_string();
+        }
+        match &self.nav_sel {
+            NavSel::GlobalSettings => "global".to_string(),
+            NavSel::Profile(n) => format!("profile:{n}"),
+            NavSel::Game(a) => format!("game:{a}"),
+            // Not a real edit scope — behave like the ambient game.
+            NavSel::ModuleEditor(_) => format!("game:{}", self.appid),
+            NavSel::GeneralSettings => "general".to_string(),
         }
     }
 
@@ -1513,8 +1713,23 @@ impl GuiApp {
         // unfiltered `all_specs`: without it, opening a module that doesn't apply to
         // this game would show a preview that silently ignores everything you type.
         // Empty (and never used) outside IDE mode, so Config mode is untouched.
+        //
+        // S5b: the applicability filter follows the **preview** game when one is
+        // selected, not the ambient one. `cur_specs` is `all_specs` filtered by
+        // `self.appid`; with a preview game chosen, that is the wrong filter —
+        // modules gated to the previewed game would be missing from the launch
+        // string, and modules gated to the ambient game would be in it, both
+        // silently. `None` keeps `cur_specs` verbatim (the pre-S5 behaviour).
         let ide_specs: Vec<Extension> = if self.mode == Mode::Ide {
-            let mut specs = self.cur_specs.clone();
+            let mut specs: Vec<Extension> = match self.preview_game.clone() {
+                Some(pid) => self
+                    .all_specs
+                    .iter()
+                    .filter(|s| s.applies_to(&pid))
+                    .cloned()
+                    .collect(),
+                None => self.cur_specs.clone(),
+            };
             if let NavSel::ModuleEditor(id) = self.nav_sel.clone() {
                 let snap = self
                     .module_draft
@@ -1538,7 +1753,13 @@ impl GuiApp {
         // draft over its on-disk entry so the preview reflects unsaved edits, and
         // lint for set/set env collisions across modules.
         let (preview, collisions): (String, Vec<String>) = if self.mode == Mode::Ide {
-            let res = self.resolve_specs_for_game(&ide_specs);
+            // S5b: resolve the band through the scratch layer, the same way
+            // `render_ide_preview_panel` resolves its form. `resolve_specs_for_game`
+            // would assemble against the ambient game's stored config, so the band
+            // would ignore both the preview game selection and every value the user
+            // set in the preview column — actively misleading, since predicting the
+            // launch string is what the band is for.
+            let res = self.resolve_specs_for_preview(&ide_specs);
             let text = context::assemble_launch(&ide_specs, &res, &self.game_command)
                 .map(|lc| lc.to_string())
                 .unwrap_or_else(|e| format!("<error: {e}>"));
@@ -1770,7 +1991,9 @@ impl GuiApp {
                     let ext_id = spec.id();
                     let ext_res = edit_resolution.exts.get(&ext_id);
                     let full_width = self.general_config.full_width;
-                    if self.render_module_settings_body(ui, &spec, ext_res, full_width, false) {
+                    // `show_legend: true` — Config mode always wants the legend;
+                    // it used to be implied by `!read_only`.
+                    if self.render_module_settings_body(ui, &spec, ext_res, full_width, false, true) {
                         changed = true;
                     }
                 });
@@ -2074,8 +2297,9 @@ struct EditorHeaderInfo {
 ///   genuinely returns to the previous view (`GuiApp::exit_module_editor` via
 ///   `editor_exit_target`), useful regardless of editability.
 /// - **IDE mode** (the `ide_module_header` panel): hides both for a bundled
-///   module. Save can never be enabled there (nothing to save — the fields
-///   render disabled). Close is not "leave the editor": IDE mode's
+///   module, and labels the Close button **Discard**. Save can never be
+///   enabled there (nothing to save — the fields
+///   render disabled). Discard is not "leave the editor": IDE mode's
 ///   `nav_sel == NavSel::ModuleEditor(_)` invariant reopens whatever the tree
 ///   has selected the next frame (see the guard right after the doc comment
 ///   on `Mode::Ide`, and `GuiApp::dispatch_top_action`'s `TopAction::Close`
@@ -2108,11 +2332,28 @@ fn render_editor_header_row(
                 if save.clicked() {
                     action = TopAction::Save;
                 }
-                // Doubles as Discard: with unsaved edits it asks for
-                // confirmation first, otherwise it just leaves (Config mode)
-                // or discards-and-reloads (IDE mode).
-                if icon_button(ui, cache, "\u{f00d}", "Close", IconBtn::Secondary, true)
-                    .on_hover_text("Leave the editor (discards unsaved edits)")
+                // Same `TopAction::Close` on both sides — only the wording
+                // differs, because only the *meaning* differs (2026-07-19).
+                //
+                // *Why IDE mode says Discard:* `TopAction::Close` calls
+                // `GuiApp::exit_module_editor`, but the `Mode::Ide` invariant at
+                // the top of `GuiApp::ui` ("a module is ALWAYS open") reopens the
+                // tree's selected module on the very next frame. So in IDE mode
+                // this button can never mean "leave" — it can only mean "throw
+                // away my edits and reload the draft from disk". Labelling it
+                // Close there promised an exit that structurally cannot happen.
+                // Config mode keeps Close, where it genuinely returns to the
+                // remembered view via `editor_exit_target`.
+                //
+                // Behaviour is untouched on both paths, including the dirty-draft
+                // confirmation `dispatch_top_action` puts in front of it.
+                let (close_label, close_hover) = if ide_mode {
+                    ("Discard", "Discard unsaved edits and reload this module")
+                } else {
+                    ("Close", "Leave the editor (discards unsaved edits)")
+                };
+                if icon_button(ui, cache, "\u{f00d}", close_label, IconBtn::Secondary, true)
+                    .on_hover_text(close_hover)
                     .clicked()
                 {
                     action = TopAction::Close;
@@ -3677,7 +3918,13 @@ impl GuiApp {
         // two halves of the column can never disagree. Resolving over `cur_specs`
         // (what `resolve_for_editing` hardwired before S3b) would return `None` for
         // any module that doesn't apply to the ambient game and blank the body.
-        let resolution = self.resolve_specs_for_editing(ide_specs);
+        //
+        // S5a: `resolve_specs_for_preview`, not `..._for_editing` — the body must
+        // show the scratch layer it now writes into, and the launch band a few
+        // lines down resolves the same way. Using the editing resolution here would
+        // make the form show the ambient game's values while the launch string
+        // showed the scratch ones.
+        let resolution = self.resolve_specs_for_preview(ide_specs);
         let spec = ide_specs.iter().find(|s| s.id() == id).cloned();
         let touch = self.general_config.touch_mode;
         // ── Column split ────────────────────────────────────────────────────
@@ -3723,10 +3970,12 @@ impl GuiApp {
                 }
                 band.show_inside(ui, |ui| {
                     ui.label(theme::header_label("Launch command preview"));
-                    // No "Previewing against: {game}" line here, unlike Config mode:
-                    // IDE Mode is specified to resolve against nothing by default, so
-                    // naming a game would advertise a binding the design doesn't want
-                    // (the real scratch-layer resolution lands in S5).
+                    // No "Previewing against: {game}" line here, unlike Config mode.
+                    // IDE Mode resolves against the scratch layer, whose game
+                    // binding is now shown — and *chosen* — by the nav footer's
+                    // "Preview against" selector (S5b). A second, non-interactive
+                    // statement of the same fact three columns away would just be a
+                    // thing that can go stale.
                     for var in collisions {
                         ui.label(
                             egui::RichText::new(format!(
@@ -3809,19 +4058,54 @@ impl GuiApp {
                                 );
                                 return;
                             };
+                            // ── The interactive preview, and its three guards ──
+                            //
                             // `full_width = true`: the 743px clamp exists for Config
                             // mode's narrow column and would leave a dead gutter here.
-                            let changed = self.render_module_settings_body(
-                                ui,
-                                spec,
-                                Some(ext_res),
-                                true,
-                                true,
+                            // `read_only = false` (S5a): the fields are now live —
+                            // but every write they make is redirected into the
+                            // scratch `preview_config`, which nothing persists.
+                            // `show_legend`: only with a real preview game selected,
+                            // because only then do the scope colours describe layers
+                            // that are actually participating.
+                            //
+                            // Guard #3: snapshot the REAL game config's module map
+                            // across the call and assert it is untouched. This
+                            // repurposes the old `debug_assert!(!changed)` — which
+                            // could not survive an interactive preview — into an
+                            // assertion of the property that actually matters. It
+                            // checks the destination, not the messenger, so it stays
+                            // meaningful no matter how the write path is refactored.
+                            let before = serde_json::to_value(&self.game_config.config.modules)
+                                .unwrap_or(Value::Null);
+                            let show_legend = self.preview_game.is_some();
+                            // Guard #1: `with_preview_writes` restores
+                            // `WriteTarget::Scope` on every path out — see its doc.
+                            let changed = self.with_preview_writes(|s| {
+                                s.render_module_settings_body(
+                                    ui,
+                                    spec,
+                                    Some(ext_res),
+                                    true,
+                                    false,
+                                    show_legend,
+                                )
+                            });
+                            let after = serde_json::to_value(&self.game_config.config.modules)
+                                .unwrap_or(Value::Null);
+                            debug_assert_eq!(
+                                before, after,
+                                "IDE preview edit reached the real game config"
                             );
-                            // Zero write-path risk is the entire point of this stage:
-                            // any write from here would reach `set_scoped`, whose
-                            // `ModuleEditor(_)` arm writes the REAL game config.
-                            debug_assert!(!changed, "read-only preview reported a change");
+                            // Guard #2: DROP `changed` on the floor, deliberately.
+                            // In Config mode this bool feeds `ui()`'s `changed`,
+                            // which calls `persist()` — and `persist()` maps
+                            // `NavSel::ModuleEditor(_)` (which is what `nav_sel` is
+                            // in IDE mode, always) onto `save_game`. Letting it
+                            // escape this closure would rewrite `games/<appid>.json`
+                            // on every preview toggle. Nothing outside the scratch
+                            // layer changed, so there is nothing to report upward.
+                            let _ = changed;
                         });
                     });
             });
@@ -3875,12 +4159,20 @@ impl GuiApp {
     /// trailing colour-hint footer. Returns whether any field changed (mirrors the
     /// old inline `changed` bool this replaced).
     ///
-    /// `read_only` forces every field to render non-editable and suppresses the
-    /// scope legend and colour-hint footer — neither makes sense on a read-only
-    /// preview. It is threaded through to `render_field`/`render_value_editor`
-    /// rather than relying on `ui.add_enabled_ui`; see `render_value_editor`'s doc
-    /// comment for why. Every call site in this stage (S3a) passes `false`, so
-    /// behaviour is unchanged — a second call with `read_only: true` is S3b's job.
+    /// `read_only` forces every field to render non-editable. It is threaded
+    /// through to `render_field`/`render_value_editor` rather than relying on
+    /// `ui.add_enabled_ui`; see `render_value_editor`'s doc comment for why.
+    ///
+    /// `show_legend` gates the scope legend and the trailing colour-hint footer.
+    ///
+    /// *Why that is its own parameter and not `!read_only`* (S5a): it used to ride
+    /// on `!read_only`, which was fine while the only read-only caller was the
+    /// inert IDE preview. Making that preview writable flips `read_only` to
+    /// `false`, and the legend would have come back **silently** — with colours
+    /// that lie, because with no preview game selected the palette describes
+    /// layers that aren't participating. Config mode passes `true`; the preview
+    /// passes `preview_game.is_some()`, so the colours appear exactly when they
+    /// are truthful.
     fn render_module_settings_body(
         &mut self,
         ui: &mut egui::Ui,
@@ -3888,6 +4180,7 @@ impl GuiApp {
         ext_res: Option<&resolve::ExtResolution>,
         full_width: bool,
         read_only: bool,
+        show_legend: bool,
     ) -> bool {
         let mut changed = false;
         egui::ScrollArea::vertical()
@@ -3915,7 +4208,7 @@ impl GuiApp {
                         ui.add_space(12.0);
                         ui.horizontal(|ui| {
                             ui.label(theme::section_label(section));
-                            if !read_only {
+                            if show_legend {
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     scope_legend(ui);
                                 });
@@ -3961,7 +4254,7 @@ impl GuiApp {
                             }
                         }
                     }
-                    if any_section && !read_only {
+                    if any_section && show_legend {
                         ui.add_space(10.0);
                         ui.label(egui::RichText::new(
                             "Colours mark where each value resolves from — Global, Profile, or this Game. \
@@ -4108,15 +4401,9 @@ impl GuiApp {
         let hover = field.description.clone().unwrap_or_default();
 
         // Per scope+field working copy of the list, seeded from the stored array.
-        let scope_tag = match &self.nav_sel {
-            NavSel::GlobalSettings => "global".to_string(),
-            NavSel::Profile(n) => format!("profile:{n}"),
-            NavSel::Game(a) => format!("game:{a}"),
-            // Not a real edit scope — behave like the ambient game.
-            NavSel::ModuleEditor(_) => format!("game:{}", self.appid),
-            NavSel::GeneralSettings => "general".to_string(),
-        };
-        let key = format!("{scope_tag}::{author}::{name}::{var}");
+        // Tag via `buffer_scope_tag` so the IDE preview gets its own namespace —
+        // see that method for the collision this closes.
+        let key = format!("{}::{author}::{name}::{var}", self.buffer_scope_tag());
         let stored: Vec<String> = self
             .current_scope_value(&author, &name, &var)
             .and_then(|v| v.as_array())
@@ -4216,15 +4503,8 @@ impl GuiApp {
         let label = field.name.clone().unwrap_or_else(|| var.clone());
         let hover = field.description.clone().unwrap_or_default();
 
-        let scope_tag = match &self.nav_sel {
-            NavSel::GlobalSettings => "global".to_string(),
-            NavSel::Profile(n) => format!("profile:{n}"),
-            NavSel::Game(a) => format!("game:{a}"),
-            // Not a real edit scope — behave like the ambient game.
-            NavSel::ModuleEditor(_) => format!("game:{}", self.appid),
-            NavSel::GeneralSettings => "general".to_string(),
-        };
-        let key = format!("{scope_tag}::{author}::{name}::{var}");
+        // See `render_multi_string_field` / `buffer_scope_tag`.
+        let key = format!("{}::{author}::{name}::{var}", self.buffer_scope_tag());
         let stored: Vec<String> = self
             .current_scope_value(&author, &name, &var)
             .and_then(|v| v.as_array())
@@ -4331,7 +4611,16 @@ impl GuiApp {
     }
 
     /// The raw stored value for a variable at the scope currently being edited.
+    ///
+    /// The read twin of [`Self::set_scoped`]'s routing, and it has to branch on
+    /// `write_target` first for the same reason: while the preview column renders,
+    /// "what is stored here" means "what is in the scratch layer". Reading
+    /// `game_config` instead would make a multi_string card compare its edited
+    /// list against the *real* game's stored list and persist the difference.
     fn current_scope_value(&self, author: &str, name: &str, var: &str) -> Option<&Value> {
+        if self.write_target == WriteTarget::Preview {
+            return self.preview_config.get_value(author, name, var);
+        }
         match &self.nav_sel {
             NavSel::GlobalSettings => self.global_config.get_value(author, name, var),
             NavSel::Profile(_) => self.editing_preset_buf.as_ref()?.get_value(author, name, var),
@@ -4489,7 +4778,11 @@ impl GuiApp {
 
                 let tw = (ui.available_width() - 4.0).max(40.0);
                 if editable {
-                    let key = format!("{}::{}", spec.id(), field.variable);
+                    // Scope-tagged: the tag is what keeps the IDE preview's buffer
+                    // AND its absolute `("text_edit", key)` `egui::Id` distinct from
+                    // Config mode's for the same module/variable — `push_id` does
+                    // not namespace an explicitly-minted Id. See `buffer_scope_tag`.
+                    let key = format!("{}::{}::{}", self.buffer_scope_tag(), spec.id(), field.variable);
                     let id = egui::Id::new(("text_edit", &key));
                     // Sync the buffer from the resolved value whenever the field isn't
                     // actively focused. This prevents stale values after a profile switch
@@ -4526,6 +4819,16 @@ impl GuiApp {
     /// every writer must route through here, or it silently lands in the wrong scope
     /// (see `poll_detect`, which used to write `game_config` unconditionally).
     fn set_scoped(&mut self, a: &str, n: &str, var: &str, value: Value) {
+        // Checked BEFORE the `nav_sel` match, not as an arm inside it — see
+        // [`WriteTarget`] for why `nav_sel` structurally cannot carry this
+        // distinction. This is guard #1 of the three that keep a preview toggle
+        // off the user's disk: the write never reaches `game_config` at all, so
+        // `persist()`'s `ModuleEditor(_) -> save_game` mapping has nothing new to
+        // write even if it fires.
+        if self.write_target == WriteTarget::Preview {
+            self.preview_config.set_value(a, n, var, value);
+            return;
+        }
         match &self.nav_sel.clone() {
             NavSel::GlobalSettings => {
                 self.global_config.set_value(a, n, var, value);
@@ -4569,6 +4872,11 @@ impl GuiApp {
     /// currently being edited — the unset twin of [`Self::set_scoped`], and the
     /// only place `nav_sel` maps onto a config store for removals.
     fn unset_scoped(&mut self, a: &str, n: &str, var: &str) {
+        // Same pre-match preview branch as [`Self::set_scoped`] — see there.
+        if self.write_target == WriteTarget::Preview {
+            self.preview_config.unset_value(a, n, var);
+            return;
+        }
         match &self.nav_sel.clone() {
             NavSel::GlobalSettings => {
                 self.global_config.unset_value(a, n, var);
@@ -4617,6 +4925,7 @@ impl GuiApp {
             name: spec.meta.name.clone(),
             var: field.variable.clone(),
             nav: self.nav_sel.clone(),
+            target: self.write_target,
         });
     }
 
@@ -4656,12 +4965,13 @@ impl GuiApp {
                     d.author.clone(),
                     d.name.clone(),
                     d.var.clone(),
+                    d.target,
                     class,
                 )),
             },
             None => None,
         };
-        let Some((ext_id, author, name, var, class)) = done else {
+        let Some((ext_id, author, name, var, target, class)) = done else {
             return false;
         };
         self.detect = None;
@@ -4672,9 +4982,30 @@ impl GuiApp {
             // not the ambient game. Writing `game_config` here meant the value never
             // reached the edited scope (persist() saves by scope) while the text
             // buffer below still showed it — a silent wrong-scope write.
+            //
+            // The same argument extends to the write *target* (S5a): restore the
+            // one the detection was started under for the duration of the write, so
+            // a Detect begun in the interactive preview lands in the scratch layer
+            // and under the `"preview"` buffer tag — not in the real game config,
+            // which is where it would otherwise go, since `poll_detect` runs at the
+            // frame tail with `write_target` already back to `Scope`. Restored
+            // immediately, so nothing downstream sees a flipped flag.
+            let prev = self.write_target;
+            self.write_target = target;
             self.set_scoped(&author, &name, &var, json!(c.clone()));
-            self.text_buffers.insert(format!("{ext_id}::{var}"), c);
-            return true;
+            // Same tagged key shape as the `String` arm of `render_value_editor`,
+            // or the detected value would be written under a key nothing reads.
+            self.text_buffers
+                .insert(format!("{}::{ext_id}::{var}", self.buffer_scope_tag()), c);
+            self.write_target = prev;
+            // Report "changed" only for a real scope. This bool feeds `ui()`'s
+            // `changed`, which calls `persist()` — and `persist()` maps IDE mode's
+            // `NavSel::ModuleEditor(_)` onto `save_game`. A preview detection
+            // changed nothing persistable, so saying so would rewrite
+            // `games/<appid>.json` for a scratch edit. `ctx.request_repaint()`
+            // above already gets the new value on screen. Same reasoning as
+            // guard #2 at the preview render site.
+            return target == WriteTarget::Scope;
         }
         false
     }
@@ -4684,7 +5015,10 @@ impl GuiApp {
     /// the caller's `spec`, for the reason given on [`Self::set_current`].
     fn unset_current(&mut self, spec: &Extension, field: &UiField) {
         let (a, n) = (spec.meta.author.clone(), spec.meta.name.clone());
-        self.text_buffers.remove(&format!("{}::{}", spec.id(), field.variable));
+        // Tagged to match what `render_value_editor` inserted — an untagged remove
+        // would miss, leaving a stale buffer that re-shows the value it just unset.
+        self.text_buffers
+            .remove(&format!("{}::{}::{}", self.buffer_scope_tag(), spec.id(), field.variable));
         self.unset_scoped(&a, &n, &field.variable);
     }
 
@@ -5258,6 +5592,11 @@ impl GuiApp {
             }
             NavCategory::Ide => {
                 self.mode = Mode::Ide;
+                // The preview game selector lists `self.games`, which is otherwise
+                // only refreshed on create/delete/rename. Re-read here so entering
+                // IDE mode always offers the current set — the list is a directory
+                // scan, run once per mode entry, not per frame.
+                self.refresh_games();
                 // IDE mode is only coherent with a module open — `nav_sel ==
                 // ModuleEditor(_)` is the invariant every IDE column relies on.
                 if let Some(spec) = self.all_specs.get(self.ide_selected) {
@@ -5311,6 +5650,59 @@ impl GuiApp {
     fn render_ide_nav_footer(&mut self, ui: &mut egui::Ui) -> bool {
         let mut open_create = false;
         styled_checkbox(ui, &mut self.group_by_author, "Group by Author");
+
+        // ── Preview game selector (S5b) ─────────────────────────────────────
+        // *Why here and not under the tab bar:* the user placed it in the nav
+        // footer, in the space above Open Folder / New Module. It sits in the
+        // top-down flow above the `bottom_up` button block below, which pins the
+        // two buttons to the band's floor regardless of what precedes them.
+        //
+        // Deferred intent (`Option<Option<String>>`: outer = "a pick happened",
+        // inner = the appid or None): `set_preview_game` needs `&mut self` and
+        // this whole footer already runs inside a panel closure holding one. Same
+        // pattern as `open_create` right here and `nav_action` in
+        // `render_nav_panel`.
+        let mut preview_pick: Option<Option<String>> = None;
+        let cur_label = match &self.preview_game {
+            None => "None".to_string(),
+            Some(id) => self
+                .games
+                .iter()
+                .find(|(a, _)| a == id)
+                .map(|(_, n)| n.clone())
+                // A game deleted out from under the selector still has a live
+                // scratch config; name it by appid rather than showing "None",
+                // which would misdescribe what the launch band is resolving.
+                .unwrap_or_else(|| id.clone()),
+        };
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new("Preview against")
+                .color(theme::FAINT)
+                .small(),
+        );
+        ui.add_space(2.0);
+        egui::ComboBox::from_id_salt("ide_preview_game")
+            .width(ui.available_width())
+            .selected_text(cur_label)
+            .show_ui(ui, |ui| {
+                // None first and default — the preview resolves against nothing
+                // unless the user opts in. Never remembered across app starts:
+                // there is deliberately no `GeneralConfig` field behind this.
+                if ui.selectable_label(self.preview_game.is_none(), "None").clicked() {
+                    preview_pick = Some(None);
+                }
+                for (appid, name) in &self.games {
+                    let sel = self.preview_game.as_deref() == Some(appid.as_str());
+                    if ui.selectable_label(sel, name).clicked() {
+                        preview_pick = Some(Some(appid.clone()));
+                    }
+                }
+            });
+        if let Some(pick) = preview_pick {
+            self.set_preview_game(pick.as_deref());
+        }
+
         let sep = icon_sep(self.general_config.mono_ui);
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
             // bottom_up: first added sits at the bottom, so Open Folder ends up

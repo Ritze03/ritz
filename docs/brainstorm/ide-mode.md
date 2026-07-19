@@ -350,6 +350,63 @@ renames in the scratch preview."
 
 ## Applied
 
+### 2026-07-19 — S5 shipped (interactive preview + preview game selector)
+
+`WriteTarget { Scope, Preview }`, `preview_config` / `preview_preset` / `preview_game`,
+`resolve_specs_for_preview`, `with_preview_writes`, `buffer_scope_tag`,
+`set_preview_game`, the nav-footer "Preview against" `ComboBox`, and the IDE-mode
+Close → **Discard** relabel. Behaviour and rationale live in
+[`../features/settings-gui.md`](../features/settings-gui.md) ("IDE-mode preview column",
+"IDE-mode header band"); only the corrections to *this* plan are recorded here.
+
+**Corrections to the plan above:**
+
+- **Seed-from-game, not overlay-on-game.** The "Scratch layer" section describes
+  `preview_config` as starting empty and only ever holding values the user sets *inside*
+  the preview. With the S5b selector, picking a game makes `preview_config` a **clone of
+  that game's stored config** — the preview opens showing the game's real settings, and
+  edits mutate the clone. *Why:* the worked example below needs the *other* modules'
+  existing values present to interact with; an overlay over an empty base would show the
+  new module appending to nothing. `None` still gives the empty scratch layer the plan
+  describes, and that is still the default.
+
+- **S5 does NOT depend on S4.** The staging table says "**Depends on S1 and S4**". It
+  does not. Nothing in the interactive preview or the selector touches the draft model:
+  `write_target` is orthogonal to `nav_sel`, and the single `Option<ModuleDraft>` is
+  spliced into `ide_specs` exactly as before. The only consequence of shipping S5 first
+  is the pre-existing S4 limitation — unsaved *manifest* edits do not survive navigating
+  to another module. Preview *values* are unaffected: they live in `preview_config` and
+  persist across module navigation already, which is what the worked example needs.
+
+- **The plan's `"ide"` match arm would have been wrong.** The staging entry says to add
+  an `"ide"` arm to four `nav_sel` matches. `nav_sel` is `NavSel::ModuleEditor(_)` for
+  **both** IDE columns, so such an arm cannot distinguish "editor writing config" from
+  "preview writing scratch" — it would have routed them identically. The orthogonal
+  `write_target` flag, checked *before* each `nav_sel` match, is what actually separates
+  them.
+
+- **The same-frame widget-id collision the plan warns about does not exist.** In IDE mode
+  the editor column renders `render_module_editor` (the manifest editor), so
+  `render_module_settings_body` runs **once per frame**, not twice. `push_id("ide_preview")`
+  is still kept — it guards against Config-mode id reuse and future S4 layouts — but the
+  collision it was introduced for was never live. The id that genuinely *did* need fixing
+  is the absolute `egui::Id::new(("text_edit", key))`, which `push_id` cannot namespace at
+  all; folding the scope tag into `key` handles it.
+
+- **A leak path the plan does not mention:** making the preview editable also makes the
+  `window_class` **Detect** button live, and `poll_detect` writes at the frame tail —
+  after `with_preview_writes` has restored `WriteTarget::Scope`. `Detect` now captures the
+  write target at start and `poll_detect` re-establishes it, and returns `changed` only
+  for a real scope.
+
+- **`show_legend` had to be split off `read_only`.** The legend and colour-hint footer
+  were suppressed by `!read_only`, so flipping that flag would have resurrected them
+  silently. They now ride a separate parameter, and the preview shows them only when a
+  preview game is selected — with `None` the scope palette would be decorative.
+
+- **Selector placement:** the IDE **nav footer**, above Open Folder / New Module — not
+  below the tab bar. User-specified. Also never persisted, by explicit request.
+
 ### 2026-07-19 — S3b shipped (the IDE shell)
 
 `Mode { Config, Ide }`, the GENERAL category box, the mode-swapped nav body/footer, the
