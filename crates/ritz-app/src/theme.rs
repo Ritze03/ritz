@@ -91,6 +91,35 @@ pub const COL_GAME: Color32 = Color32::from_rgb(0x4D, 0x9D, 0xE0);
 pub const COL_DEFAULT: Color32 = Color32::from_rgb(0x46, 0x4D, 0x57);
 /// Empty (off) checkbox outline — light so it reads on any scope tint.
 pub const CHECK_OUTLINE: Color32 = Color32::from_rgb(0xE1, 0xE3, 0xE6);
+// ---- Diagnostic severity -------------------------------------------------
+// Roles, not scopes: what a diagnostics message *ranks* as. Kept next to the
+// scope colours because `COL_ERROR` is deliberately the same red.
+
+/// Warning — something unfinished or lossy, but nothing is being refused.
+///
+/// *Why this exact amber* (2026-07-19, issue #39): it is [`COL_GLOBAL`] with the
+/// green channel lifted and the other two held **byte-identical** (`0xE1` red,
+/// `0x54` blue). That is not a coincidence of taste — it puts the amber at
+/// HSL ≈ (36°, 70%, 61%) against `COL_GLOBAL`'s (0°, 68%, 61%): the same
+/// lightness, effectively the same saturation, one hue step away. The whole
+/// scope family already sits in a narrow L 55–61% / S 50–70% band
+/// (`COL_PROFILE` 104°/50%/55%, `COL_GAME` 209°/70%/59%), so a generic
+/// `#FFA500`-style orange — far brighter and fully saturated — would have been
+/// the one colour in the app shouting over everything else. Deriving it from
+/// the red also means a future retune of `COL_GLOBAL` is a visible, deliberate
+/// divergence rather than a silent mismatch.
+pub const COL_WARN: Color32 = Color32::from_rgb(0xE1, 0xA8, 0x54);
+
+/// Error — the reason an action is refused.
+///
+/// **Exactly [`COL_GLOBAL`]'s red, on purpose.** That red is already the app's
+/// established danger colour (`docs/ui/STYLING-GUIDE.md`, "Why the Global/danger
+/// overlap" — Delete, Cancel, `danger_button`), so an error introducing a
+/// *second* red would be a distinction with no meaning. This alias exists so
+/// call sites can say which of the two roles they mean, and so the pair can
+/// diverge later by editing one line.
+pub const COL_ERROR: Color32 = COL_GLOBAL;
+
 /// Pin-slot id (`[1]`…`[10]`) trailing a pinned profile's row in the nav tree.
 ///
 /// Deliberately its own token rather than [`FAINT`]: this label sits *inside* a
@@ -264,6 +293,24 @@ mod tests {
     /// no-op at the pixel level; if `COL_GLOBAL` is ever retuned this test is
     /// *expected* to be updated alongside it — that update is the signal that the
     /// danger border moved with the palette, which is the behaviour we wanted.
+    /// `COL_ERROR` must stay the danger red, and `COL_WARN` must stay
+    /// *derived from* it rather than hand-picked.
+    ///
+    /// *Why assert the derivation and not just the literal:* the amber's whole
+    /// justification (see its doc comment) is that it shares `COL_GLOBAL`'s red
+    /// and blue channels, which is what keeps it in the palette's lightness /
+    /// saturation band. Pinning only the hex would let a future retune of
+    /// `COL_GLOBAL` silently break that relationship while this test still
+    /// passed.
+    #[test]
+    fn severity_colors_derive_from_the_danger_red() {
+        assert_eq!(COL_ERROR, COL_GLOBAL, "an error is the established danger red");
+        assert_eq!(COL_WARN, Color32::from_rgb(0xE1, 0xA8, 0x54));
+        assert_eq!((COL_WARN.r(), COL_WARN.b()), (COL_GLOBAL.r(), COL_GLOBAL.b()));
+        assert!(COL_WARN.g() > COL_GLOBAL.g(), "the amber is the red with green lifted");
+        assert_ne!(COL_WARN, COL_ERROR, "warning and error must be tellable apart");
+    }
+
     #[test]
     fn danger_border_matches_col_global() {
         assert_eq!(danger_border(), Color32::from_rgba_unmultiplied(0xE1, 0x55, 0x54, 82));

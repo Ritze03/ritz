@@ -67,7 +67,7 @@ const NAV_W: f32 = 280.0;
 ///
 /// **So the status lines now render in the diagnostics band**
 /// ([`render_ide_diagnostics_band`]) instead. That band is already
-/// `exact_height(198.0)`, always visible, and already contains a *scrolling*
+/// `exact_height(BOTTOM_BAND_H)`, always visible, and already contains a *scrolling*
 /// list — so any number of messages costs zero height and nothing reflows, which
 /// is strictly better than either the fixed reservation (dead space) or a
 /// growing band (reflow mid-keystroke). It is also where they belong on the
@@ -162,6 +162,28 @@ const IDE_HEADER_H: f32 = IDE_HEADER_MARGIN.top
     + 7.0
     + IDE_HEADER_DESC_H
     + IDE_HEADER_MARGIN.bottom;
+
+/// Height of every **bottom band** in the window, in points: the nav column's
+/// footer (`nav_settings`), Config mode's modules-column footer
+/// (`group_toggle`) and launch-preview band (`preview`), and IDE mode's
+/// diagnostics band (`ide_editor_band`) and launch band (`ide_launch_band`).
+///
+/// *Why one shared constant* (2026-07-19, issue #39): all five are
+/// `exact_height` panels along the bottom edge of the window, and the reason
+/// they carry the same number is that their bottom edges must line up across
+/// the columns — every mode puts two or three of them side by side, so a
+/// mismatch is visible as a step in the seam. That requirement was previously
+/// expressed as the literal `198.0` written out five times with comments at
+/// some of the sites *asserting* the others agreed. Comments are not a
+/// mechanism: nothing would have caught four-of-five being retuned, and the
+/// comments themselves had already drifted (they said four). Same reasoning as
+/// [`IDE_HEADER_MARGIN`]'s, one layout axis over.
+///
+/// *Why the two launch bands still apply it conditionally:* under
+/// `dynamic_preview` the launch band is allowed to size to its content, which is
+/// a deliberate opt-out of the alignment (the user asked for a preview box that
+/// grows). The constant is what they opt out *of*, so it still belongs here.
+const BOTTOM_BAND_H: f32 = 198.0;
 
 /// The `ide_module_header` panel frame's inner margin.
 ///
@@ -2216,7 +2238,29 @@ impl GuiApp {
     ///   rename stays staged for the user to fix.
     fn apply_save_with_pending_rename(&mut self) {
         if self.draft().is_some_and(|d| d.identity_error.is_none()) {
-            self.perform_rename();
+            // Deliberately ignored, with a reason (issue #30). This branch has
+            // exactly one thing to do and no alternative to fall back to:
+            //
+            // - `Err(NotApplicable)` cannot be acted on. It would mean the gate
+            //   disagreed with the `identity_error.is_none()` check one line up
+            //   — i.e. nothing is staged after all — so there is no rename to
+            //   retry and no body write to substitute (that is the *other* arm,
+            //   chosen by the condition above).
+            // - The two "tried and broke" variants have already told the user,
+            //   through the banner and stderr respectively. Doing anything more
+            //   here would be a second report of one event.
+            //
+            // The value is matched rather than `let _ =`'d so that a future
+            // variant is a compile error here instead of silently joining the
+            // ignored set.
+            match self.perform_rename() {
+                Ok(())
+                | Err(
+                    RenameError::NotApplicable
+                    | RenameError::Migration(_)
+                    | RenameError::ManifestWrite(_),
+                ) => {}
+            }
         } else {
             self.save_module();
         }
@@ -2714,7 +2758,27 @@ impl GuiApp {
     /// possibly invalid) body edits behind the user's back. Rename no longer
     /// writes the body, so a dirty or even invalid body is not a reason to refuse
     /// a rename. Renaming with a half-finished field in progress must work.
-    fn perform_rename(&mut self) {
+    ///
+    /// # Return value
+    ///
+    /// `Ok(())` exactly when the manifest was rewritten and the draft re-based;
+    /// [`RenameError`] otherwise, one variant per failure mode (2026-07-19,
+    /// issue #30). Before that, this returned `()` and signalled failure only by
+    /// writing [`Self::carryover_report`] — so the one caller that needed to
+    /// know the outcome inferred it from how the draft happened to be left
+    /// afterwards. That inference worked, but it was a coincidence of the
+    /// implementation rather than a contract, and it did not survive `075183b`
+    /// changing how the draft is left.
+    ///
+    /// **The banner is not the return value's job and vice versa.** The
+    /// `carryover_report` writes below stay exactly as they were: they are the
+    /// *user-visible* channel, and every failure still reaches the user through
+    /// the same surface it always did. `RenameError` is the *caller-visible*
+    /// channel, and it distinguishes "refused" ([`RenameError::NotApplicable`],
+    /// nothing was attempted, nothing was touched) from "tried and broke" (the
+    /// other two) — a distinction a caller may reasonably want and could not
+    /// previously make at all.
+    fn perform_rename(&mut self) -> Result<(), RenameError> {
         // Snapshot everything we need out of the draft so the immutable borrow is
         // released before we touch `self.paths` / reload.
         let Some((mut ext, manifest, old_author, old_name, new_author, new_name, var_rename)) = self
@@ -2737,7 +2801,13 @@ impl GuiApp {
                 ))
             })
         else {
-            return;
+            // The gate: no draft, not editable, nothing staged, or a staged
+            // identity that does not validate. Nothing has been touched at this
+            // point — not the manifest, not stored config, not even the banner —
+            // so this is a *refusal*, categorically different from the two
+            // failures below. `apply_save_with_pending_rename` documents the one
+            // production path that can legitimately land here.
+            return Err(RenameError::NotApplicable);
         };
 
         self.carryover_report = None;
@@ -2749,9 +2819,12 @@ impl GuiApp {
             match core_config::migrate_renamed_module(&self.paths, from, to, &var_rename) {
                 Ok(r) => r,
                 Err(e) => {
-                    self.carryover_report =
-                        Some(format!("Rename aborted: config migration failed: {e}"));
-                    return;
+                    // Banner unchanged — this is still exactly how the user
+                    // learns the rename was aborted. The `Err` beside it is for
+                    // callers, not instead of the banner.
+                    let msg = format!("config migration failed: {e}");
+                    self.carryover_report = Some(format!("Rename aborted: {msg}"));
+                    return Err(RenameError::Migration(msg));
                 }
             };
 
@@ -2779,16 +2852,24 @@ impl GuiApp {
         apply_var_renames(&mut ext, &var_rename);
 
         // Step 4: write the manifest LAST, in place, only after the sweep succeeded.
+        //
+        // Both failures below keep their `eprintln!` — that is the surface these
+        // two have always reported on, and issue #30 was about giving callers a
+        // return value, not about relocating anything the user sees. They are
+        // reported as one `ManifestWrite` variant because they are one event to
+        // a caller: the scope sweep has already landed and the manifest has not,
+        // which is the documented crash-safe intermediate state (re-pressing
+        // Rename re-runs cleanly).
         let json = match serde_json::to_string_pretty(&ext) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("ritz: failed to serialize renamed module: {e:#}");
-                return;
+                return Err(RenameError::ManifestWrite(e.to_string()));
             }
         };
         if let Err(e) = core_config::write_atomic(&manifest, json.as_bytes()) {
             eprintln!("ritz: failed to write renamed module: {e:#}");
-            return;
+            return Err(RenameError::ManifestWrite(e.to_string()));
         }
 
         // Step 5: report dropped vars, reload, keep focus on the new id. `nav_sel`
@@ -2872,6 +2953,7 @@ impl GuiApp {
             d.identity_error = None;
         }
         self.refresh_unsaved_drafts();
+        Ok(())
     }
 
     /// Write a minimal valid template module (meta + one empty UI section) to the
@@ -3131,7 +3213,7 @@ impl GuiApp {
                 });
             // Toggles + Open Folder pinned to the bottom footer band.
             egui::TopBottomPanel::bottom("group_toggle")
-                .exact_height(198.0)
+                .exact_height(BOTTOM_BAND_H)
                 .show_separator_line(true)
                 .frame(egui::Frame::none()
                     .fill(theme::PANEL2)
@@ -3390,7 +3472,7 @@ impl GuiApp {
             }
             self.render_ide_preview_panel(ctx, &ide_specs, &preview, dynamic_preview);
             // The diagnostics band under the editor column — no longer empty as of
-            // 2026-07-19, but still `exact_height(198.0)`: the same band height as
+            // 2026-07-19, but still `exact_height(BOTTOM_BAND_H)`: the same band height as
             // the nav footer and the launch band beside it, so all three bottom
             // edges align across the window. It must stay fixed even as content
             // grows, because a variable height here would reflow the editor column
@@ -3400,7 +3482,7 @@ impl GuiApp {
             // many appear as the user types, the band does not move a pixel.
             let mono = self.general_config.mono_ui;
             egui::TopBottomPanel::bottom("ide_editor_band")
-                .exact_height(198.0)
+                .exact_height(BOTTOM_BAND_H)
                 .show_separator_line(true)
                 .frame(egui::Frame::none()
                     .fill(theme::PANEL2)
@@ -3424,7 +3506,7 @@ impl GuiApp {
                     .fill(theme::PANEL2)
                     .inner_margin(egui::Margin::same(16.0)));
             if !dynamic_preview {
-                panel = panel.exact_height(198.0);
+                panel = panel.exact_height(BOTTOM_BAND_H);
             }
             panel.show(ctx, |ui| {
                 // General Settings has no launch command — show repo link + credits
@@ -3902,6 +3984,13 @@ impl GuiApp {
 /// runs, which is what lets the header move to its own full-width panel at all.
 /// Every field is cheap (a few `String`s + `bool`s); the two `Option<String>`
 /// diagnostics are the only allocations that aren't already being made.
+/// `Debug` is derived (2026-07-19, issue #39) purely so failures that mention
+/// this struct can print it. The 256-combination status-line test used to
+/// hand-format its own case description field by field, which is a maintenance
+/// trap: adding a flag to the struct silently drops it from every failure
+/// message. Every field is a `String`/`bool`/`Option<String>`, so the derive
+/// costs nothing and leaks nothing.
+#[derive(Debug)]
 struct EditorHeaderInfo {
     name: String,
     version: String,
@@ -4354,7 +4443,16 @@ impl GuiApp {
                 }
             }
             TopAction::Fork => self.open_fork_dialog(id),
-            TopAction::Rename => self.perform_rename(),
+            TopAction::Rename => {
+                // The interactive Rename button. Ignored deliberately (issue
+                // #30): this is the path the banner and the diagnostics band
+                // were built for, so every outcome is already on screen —
+                // `NotApplicable` is unreachable from here in practice (the
+                // button is only offered for an editable draft with a valid
+                // staged identity), and both failures self-report. There is no
+                // second action a button dispatcher could take.
+                let _: Result<(), RenameError> = self.perform_rename();
+            }
             TopAction::Delete => {
                 if let Some(d) = self.draft() {
                     let label = format!("{}::{}", d.ext.meta.author, d.ext.meta.name);
@@ -6197,6 +6295,40 @@ fn preview_lints(specs: &[Extension], res: &Resolution) -> Vec<DiagEntry> {
     out
 }
 
+/// Why a [`GuiApp::perform_rename`] did not land (2026-07-19, issue #30).
+///
+/// *Why three variants and not `Result<(), String>`:* the suggested direction on
+/// the issue was a plain string, but the three cases are not interchangeable and
+/// a caller can reasonably branch on which it got. `NotApplicable` means the
+/// operation was **refused before anything happened** — no file written, no
+/// scope swept, not even the banner cleared, so the world is byte-for-byte
+/// untouched and retrying is free. The other two mean the operation **started
+/// and broke**, leaving the documented crash-safe intermediate state (scopes
+/// migrated, manifest still on the old identity). "Refused" versus "tried and
+/// broke" is exactly the distinction a caller deciding whether to fall back to
+/// some other action needs, and a `String` cannot carry it without the caller
+/// matching on prose.
+///
+/// The payload strings are the underlying error's own text, kept for a caller
+/// that wants to log or re-render it. They are **not** how the user finds out —
+/// each variant's construction site leaves the existing banner or `eprintln!`
+/// exactly as it was.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RenameError {
+    /// The gate at the top of `perform_rename` rejected: no focused draft, the
+    /// module is not editable, no identity is staged, or the staged identity has
+    /// a validation error. Nothing was attempted.
+    NotApplicable,
+    /// `core_config::migrate_renamed_module` failed. The manifest was
+    /// deliberately not touched — the sweep runs first precisely so this case
+    /// aborts cleanly.
+    Migration(String),
+    /// Serializing or writing the renamed manifest failed, *after* the scope
+    /// sweep had already succeeded. Idempotent: re-pressing Rename re-runs the
+    /// (already-applied, no-op) sweep and retries the write.
+    ManifestWrite(String),
+}
+
 /// How serious one entry in the IDE diagnostics band is.
 ///
 /// *Why a three-level vocabulary* (2026-07-19, issue #26): the band used to hold
@@ -6209,17 +6341,17 @@ fn preview_lints(specs: &[Extension], res: &Resolution) -> Vec<DiagEntry> {
 /// and gives the ok/warning/error tally the heading row was built as a growth
 /// point for something real to count.
 ///
-/// *Why `Warning` and `Error` share [`theme::COL_GLOBAL`]:* `theme.rs` has no
-/// amber. Its palette is scope colours (global red / profile green / game blue)
-/// plus chrome, and `COL_GLOBAL` already doubles as the danger colour
-/// (`docs/ui/STYLING-GUIDE.md`), which is what the band's warnings have always
-/// been drawn in. Inventing a `Color32` literal here would violate the styling
-/// guide's top-level rule, so the two ranks are distinguished by **icon** — a
-/// triangle for a warning, a filled circle for an error — and share the colour.
-/// **A dedicated `COL_WARN` (amber) / `COL_ERROR` (red) pair in `theme.rs` is
-/// the right fix** and would let this `color()` split cleanly; it is deliberately
-/// not done here because adding palette tokens is a theme decision, not a
-/// diagnostics-band one.
+/// *Why `Warning` and `Error` now have separate colours* (2026-07-19, issue
+/// #39): they used to share [`theme::COL_GLOBAL`] and be told apart by **icon**
+/// alone, because `theme.rs` had no amber and inventing a `Color32` literal here
+/// would have violated the styling guide's top-level rule. That was tolerable
+/// while the band held one or two warnings. It stopped being tolerable when
+/// 60a56b3 added three lints that all rank as `Warning`: a draft with a few
+/// undeclared references painted the entire band danger-red, so a screen with
+/// nothing refused read exactly like a screen where Save was blocked. The fix
+/// was the one this comment always pointed at — [`theme::COL_WARN`] /
+/// [`theme::COL_ERROR`] as real palette tokens, chosen in `theme.rs` where
+/// palette decisions belong, and routed through here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DiagSeverity {
     /// State, not a problem: the draft's dirty/clean/read-only line. Always
@@ -6235,18 +6367,19 @@ enum DiagSeverity {
 }
 
 impl DiagSeverity {
-    /// The text colour for this rank. Info is the accent blue; see the type's
-    /// doc comment for why the other two are the same red.
+    /// The text colour for this rank: accent blue, amber, danger red.
     fn color(self) -> egui::Color32 {
         match self {
             DiagSeverity::Info => theme::ACCENT,
-            DiagSeverity::Warning | DiagSeverity::Error => theme::COL_GLOBAL,
+            DiagSeverity::Warning => theme::COL_WARN,
+            DiagSeverity::Error => theme::COL_ERROR,
         }
     }
 
-    /// The leading Nerd Font glyph. This is the *only* thing separating a
-    /// warning from an error visually, so the three must stay distinct shapes:
-    /// circled `i`, triangle `!`, circled `!`.
+    /// The leading Nerd Font glyph. No longer the *only* thing separating a
+    /// warning from an error (colour does that too as of issue #39), but still
+    /// the accessible half of the distinction — the three must stay distinct
+    /// shapes: circled `i`, triangle `!`, circled `!`.
     fn icon(self) -> &'static str {
         match self {
             DiagSeverity::Info => "\u{f05a}",
@@ -6358,9 +6491,14 @@ fn render_ide_diagnostics_band(
                 .map(|(n, word)| format!("{n} {word}{}", if *n == 1 { "" } else { "s" }))
                 .collect();
             if !parts.is_empty() {
+                // Colour the summary by the WORST rank it is summarising, not
+                // unconditionally red (2026-07-19, issue #39). "3 warnings" in
+                // danger red was the same misread the entries themselves had:
+                // the row claimed something was refused when nothing was.
+                let tally_color = if errors > 0 { theme::COL_ERROR } else { theme::COL_WARN };
                 ui.label(
                     egui::RichText::new(parts.join(" \u{b7} "))
-                        .color(theme::COL_GLOBAL)
+                        .color(tally_color)
                         .size(11.0)
                         .strong(),
                 );
@@ -6623,7 +6761,7 @@ impl GuiApp {
                         .fill(theme::PANEL2)
                         .inner_margin(egui::Margin::same(16.0)));
                 if !dynamic_preview {
-                    band = band.exact_height(198.0);
+                    band = band.exact_height(BOTTOM_BAND_H);
                 }
                 band.show_inside(ui, |ui| {
                     ui.label(theme::header_label("Launch command preview"));
@@ -6743,8 +6881,31 @@ impl GuiApp {
                             // `GameConfig` is already `Serialize` (derived in
                             // `ritz-core`), so this costs nothing but a wider
                             // `to_value` call.
-                            let before =
-                                serde_json::to_value(&self.game_config).unwrap_or(Value::Null);
+                            //
+                            // *Why ALL THREE stores and not `game_config` alone*
+                            // (2026-07-19, issue #39): `game_config` is only the
+                            // destination a field write takes when `nav_sel` is
+                            // `NavSel::Game(_)`. But the whole premise of S4b is
+                            // that IDE mode leaves `nav_sel` wherever the user
+                            // last had it — so this preview legitimately renders
+                            // with `GlobalSettings` or `Profile(_)` selected, and
+                            // a leak would then land in `global_config` or
+                            // `editing_preset_buf` and sail straight past a
+                            // game-only snapshot. Worse, it would not stay
+                            // in-memory: the next unrelated edit anywhere calls
+                            // `persist()`, which writes `global.json`. Snapshot
+                            // every store a field write can reach, so the guard
+                            // does not silently depend on which scope happens to
+                            // be selected.
+                            let stores = |s: &Self| {
+                                serde_json::to_value((
+                                    &s.game_config,
+                                    &s.global_config,
+                                    &s.editing_preset_buf,
+                                ))
+                                .unwrap_or(Value::Null)
+                            };
+                            let before = stores(self);
                             let show_legend = self.preview_game.is_some();
                             // Guard #1: `with_preview_writes` restores the caller's
                             // prior `WriteTarget` on every path out — see its doc.
@@ -6758,11 +6919,11 @@ impl GuiApp {
                                     show_legend,
                                 )
                             });
-                            let after =
-                                serde_json::to_value(&self.game_config).unwrap_or(Value::Null);
+                            let after = stores(self);
                             debug_assert_eq!(
                                 before, after,
-                                "IDE preview edit reached the real game config"
+                                "IDE preview edit reached a real config store \
+                                 (game_config / global_config / editing_preset_buf)"
                             );
                             // Guard #2: DROP `changed` on the floor, deliberately.
                             // Outside IDE mode this bool feeds `ui()`'s `changed`,
@@ -6828,6 +6989,28 @@ impl GuiApp {
     /// `read_only` forces every field to render non-editable. It is threaded
     /// through to `render_field`/`render_value_editor` rather than relying on
     /// `ui.add_enabled_ui`; see `render_value_editor`'s doc comment for why.
+    ///
+    /// **No production caller passes `true`** — Config mode and the IDE preview
+    /// both pass `false` (the preview has been deliberately interactive since
+    /// S5a). Issue #39 asked whether to delete the parameter or pin it.
+    /// **Kept, and pinned** by
+    /// [`read_only_true_makes_the_body_inert`] (2026-07-19). *Why kept:*
+    ///
+    /// - It is **not a redundant guard**. The preview's live protection is
+    ///   `WriteTarget::Preview`, which redirects writes to the scratch layer —
+    ///   it controls the *destination*. `read_only` controls *interactivity*:
+    ///   greyed widgets, no write-back at all. Deleting it would not remove a
+    ///   duplicate of an existing mechanism, it would remove the only way to
+    ///   render this form genuinely inert — a capability with an obvious future
+    ///   claimant (inspecting a bundled, un-forkable module).
+    /// - The deletion is **wide and delicate**: the flag reaches eight functions
+    ///   plus `scope_checkbox`, through the most intricate rendering code in the
+    ///   file, for zero runtime benefit. S5a deliberately *split* it from
+    ///   `editable` so the two could not be confused; unpicking that is a real
+    ///   risk against a hypothetical tidiness gain.
+    ///
+    /// The rot the issue rightly worried about is what the test addresses: it
+    /// exercises the guards with no live caller to do so.
     ///
     /// `show_legend` gates the scope legend and the trailing colour-hint footer.
     ///
@@ -8187,7 +8370,7 @@ impl GuiApp {
 
         // Always show the bottom band (it's empty for General Settings/Global Profile).
         egui::TopBottomPanel::bottom("nav_settings")
-            .exact_height(198.0)
+            .exact_height(BOTTOM_BAND_H)
             .show_separator_line(true)
             .frame(egui::Frame::none()
                 .fill(theme::PANEL2)
@@ -10396,18 +10579,13 @@ mod tests {
                                     };
                                     let lines = editor_status_lines(&info);
                                     let n = lines.len();
-                                    // Spelled out rather than `{info:?}`:
-                                    // `EditorHeaderInfo` is production state and
-                                    // does not derive `Debug` just to serve a
-                                    // test's failure message.
-                                    let case = format!(
-                                        "editable={editable} dirty={dirty} \
-                                         unsaved={unsaved} \
-                                         sections_unique={sections_unique} \
-                                         validate_err={validate_err} req_ok={req_ok} \
-                                         has_identity={has_identity} \
-                                         identity_err={identity_err}"
-                                    );
+                                    // `{info:?}` since issue #39 added the
+                                    // derive. This used to spell the eight flags
+                                    // out by hand, which meant a ninth flag
+                                    // joining the walk would have been missing
+                                    // from every failure message here without
+                                    // anything failing to remind us.
+                                    let case = format!("{info:?}");
                                     // The state line is unconditional.
                                     assert!(n >= 1, "no state line for {case}");
                                     assert_eq!(
@@ -12494,6 +12672,125 @@ mod tests {
         specs.iter().map(|s| s.meta.name.clone()).collect()
     }
 
+    // ── `read_only: true` inertness (2026-07-19, issue #39) ─────────────────
+
+    /// Render `render_module_settings_body` once, headless, at a given
+    /// `read_only`, and report whether it claimed a change.
+    ///
+    /// Same throwaway-`Context` technique as [`render_editor_body_once`], for
+    /// the same reason: the behaviour under test lives in the render pass.
+    fn render_settings_body_once(app: &mut GuiApp, spec: &Extension, read_only: bool) -> bool {
+        let resolution = app.resolve_specs_for_editing(std::slice::from_ref(spec));
+        let ext_res = resolution.exts.get(&spec.id()).cloned();
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1200.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        let mut changed = false;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                changed = app.render_module_settings_body(
+                    ui,
+                    spec,
+                    ext_res.as_ref(),
+                    true,
+                    read_only,
+                    false,
+                );
+            });
+        });
+        changed
+    }
+
+    /// A module with one `multi_string` field, and a game-scope value for it
+    /// that the renderer's cleanup pass *wants* to rewrite.
+    ///
+    /// *Why a `multi_string` with a blank entry specifically:* it is the one
+    /// leak path that fires with **no input events at all**. The list renderer
+    /// filters blank rows out and persists the difference
+    /// (`if !read_only && cleaned != stored`), so a stored `["a", ""]` is
+    /// rewritten to `["a"]` on the first frame, unprompted. Every other guarded
+    /// path needs a click to reach, and synthesising a click at a widget's
+    /// laid-out position is exactly the kind of brittle coordinate arithmetic
+    /// that makes a test rot faster than the code it pins. This fixture gets a
+    /// real, unforced write attempt for free.
+    fn app_with_a_dirty_multi_string() -> (GuiApp, Extension) {
+        let spec: Extension = serde_json::from_value(json!({
+            "Extension": { "Author": "Ritze", "Name": "Sample", "Version": "1.0" },
+            "UI": { "General": [{ "Type": "multi_string", "Variable": "args" }] }
+        }))
+        .unwrap();
+        let mut app = test_app();
+        app.all_specs = vec![spec.clone()];
+        app.game_config.set_value("Ritze", "Sample", "args", json!(["a", ""]));
+        (app, spec)
+    }
+
+    /// The control. Proves the fixture actually reaches the guarded write, so
+    /// the inertness assertion below is testing something rather than passing
+    /// vacuously.
+    ///
+    /// *Why this is not optional:* an inertness test whose fixture never
+    /// triggers a write is indistinguishable from a passing one. This is the
+    /// half that fails if the cleanup pass is ever changed out from under the
+    /// fixture.
+    #[test]
+    fn read_only_false_does_rewrite_the_stored_list() {
+        let (mut app, spec) = app_with_a_dirty_multi_string();
+
+        assert!(render_settings_body_once(&mut app, &spec, false), "premise: a write happens");
+        assert_eq!(
+            app.game_config.get_value("Ritze", "Sample", "args"),
+            Some(&json!(["a"])),
+            "premise: the blank entry is cleaned out and persisted",
+        );
+    }
+
+    /// `read_only: true` must render the identical form and touch **nothing**.
+    ///
+    /// This exists because no production caller passes `true` any more (Config
+    /// mode and the IDE preview both pass `false` — the preview has been
+    /// interactive since S5a), which left four correctly-written guards
+    /// completely unexercised. Issue #39's choice was delete-or-pin; see
+    /// [`GuiApp::render_module_settings_body`]'s doc comment for why the
+    /// parameter was kept. This is the pin: the guards now have a caller, and
+    /// removing any of them fails here instead of waiting for the next feature
+    /// that needs an inert form to rediscover the leak.
+    #[test]
+    fn read_only_true_makes_the_body_inert() {
+        let (mut app, spec) = app_with_a_dirty_multi_string();
+        let before = serde_json::to_value((
+            &app.game_config,
+            &app.global_config,
+            &app.editing_preset_buf,
+        ))
+        .unwrap();
+
+        let changed = render_settings_body_once(&mut app, &spec, true);
+
+        assert!(!changed, "a read-only body must never report a change");
+        let after = serde_json::to_value((
+            &app.game_config,
+            &app.global_config,
+            &app.editing_preset_buf,
+        ))
+        .unwrap();
+        assert_eq!(before, after, "a read-only body must not write to any config store");
+        // The other half of the guard, and the easier one to break: read-only
+        // seeds its working copy by *cloning* `multi_edit` rather than taking
+        // and re-inserting it, so the live editor's in-progress buffers must be
+        // exactly as untouched as the stored config.
+        assert!(
+            app.multi_edit.is_empty(),
+            "a read-only body must not seed or consume the shared multi_edit buffers",
+        );
+        assert!(app.text_buffers.is_empty(), "nor the shared text buffers");
+    }
+
     // ── Merely rendering a draft must not dirty it (2026-07-19) ─────────────
 
     /// Render `render_editor_body` once, headless, with no input events at all.
@@ -13079,7 +13376,10 @@ mod tests {
     fn rename_writes_the_new_identity_and_leaves_the_body_edit_pending() {
         let (mut app, base, manifest) = app_with_pending_body_and_rename("rename-only", "New");
 
-        app.perform_rename();
+        // Asserted, not discarded (issue #30): the return value is now the
+        // contract, so a rename that silently refused would fail here rather
+        // than only in the manifest assertions below.
+        assert_eq!(app.perform_rename(), Ok(()));
 
         let after = manifest_json(&manifest);
         assert_eq!(after["Extension"]["Name"], "New", "the staged rename must land");
@@ -13140,7 +13440,11 @@ mod tests {
         assert!(app.draft().unwrap().dirty());
         assert!(!app.draft().unwrap().save_enabled(), "premise: the body cannot be saved");
 
-        app.perform_rename();
+        assert_eq!(
+            app.perform_rename(),
+            Ok(()),
+            "an unsaveable body must not make the rename itself fail"
+        );
 
         let after = manifest_json(&manifest);
         assert_eq!(
@@ -13173,7 +13477,15 @@ mod tests {
         }
         app.refresh_unsaved_drafts();
 
-        app.perform_rename();
+        // The refusal is now *stated*, not inferred (issue #30). This test used
+        // to prove "nothing happened" only by checking side effects — which is
+        // exactly the fragile inference that issue was about: it could not tell
+        // a refused rename from one that ran and failed to change anything.
+        assert_eq!(
+            app.perform_rename(),
+            Err(RenameError::NotApplicable),
+            "an invalid staged identity must be refused by the gate, not attempted"
+        );
 
         assert!(app.focused_module.is_some(), "an aborted rename must not close the editor");
         assert_eq!(app.drafts.len(), 1, "an aborted rename must not drop the draft");
@@ -13774,7 +14086,7 @@ mod tests {
         app.draft_mut().unwrap().identity.name = "Zzz".to_string();
         app.refresh_identity_state();
 
-        app.perform_rename();
+        assert_eq!(app.perform_rename(), Ok(()));
 
         assert_eq!(app.focused_module.as_deref(), Some("Ritze::Zzz::1.0"), "premise");
         assert_eq!(selected_name(&app), "Zzz", "the selection follows the rename");

@@ -84,6 +84,45 @@ border's 32%. Sending the stroke through it would have changed the rendered colo
 egui's `from_rgba_unmultiplied` blends in linear space and lands elsewhere — so
 `danger_border` keeps the original call and only stops duplicating the channels.
 
+## Diagnostic severity colours
+
+A second, small role pair — *how serious a message is*, independent of scope. Added
+2026-07-19 (issue #39) and consumed only through
+`crate::gui::DiagSeverity::color()`; never reference the raw tokens from a message
+renderer.
+
+| Token | Role |
+| --- | --- |
+| `theme::COL_WARN` | Warning — amber (`#E1A854`). Something unfinished or lossy, but nothing is being refused |
+| `theme::COL_ERROR` | Error — `#E15554`, **exactly `COL_GLOBAL`'s red**. The reason an action is refused |
+
+*Why `COL_ERROR` is not a new red:* that red is already this app's danger colour (see
+"Why the Global/danger overlap" above — Delete, Cancel, `danger_button`). A second red
+for errors would be a distinction the eye cannot make and the palette does not mean.
+`COL_ERROR` is defined as `COL_GLOBAL` rather than as a copied literal, so the two
+cannot drift; it exists as its own name so call sites can say which *role* they mean,
+and so the pair can diverge later by editing one line.
+
+*Why that specific amber, and not a generic orange:* `COL_WARN` is `COL_GLOBAL` with
+the green channel lifted and the other two held **byte-identical** (`0xE1` red, `0x54`
+blue). That is what keeps it in the palette rather than beside it. In HSL it lands at
+roughly (36°, 70%, 61%) against `COL_GLOBAL`'s (0°, 68%, 61%) — the same lightness,
+effectively the same saturation, one hue step away. The whole scope family already
+sits in a narrow L 55–61% / S 50–70% band (`COL_PROFILE` ≈ 104°/50%/55%, `COL_GAME` ≈
+209°/70%/59%), so a stock `#FFA500`-style orange — far brighter and fully saturated —
+would have been the single loudest colour in the app, which is the opposite of what a
+"nothing is broken" rank should be. Deriving it from the red also means a future
+retune of `COL_GLOBAL` shows up as a deliberate divergence rather than a silent
+mismatch; `theme::tests::severity_colors_derive_from_the_danger_red` asserts the
+derivation, not just the hex.
+
+*Why this was not done sooner:* `DiagSeverity::Warning` and `::Error` both resolved to
+`COL_GLOBAL` and were told apart by icon alone, which was fine while the diagnostics
+band held one or two warnings. 60a56b3 added three lints that all rank as `Warning`,
+so an ordinary draft could paint the whole band danger-red — a screen with nothing
+refused reading exactly like a screen with Save blocked. See
+`docs/features/settings-gui.md`, "Diagnostics band".
+
 *Why `Provenance::Game` is special-cased at call sites:* when editing a value at the
 layer that's currently open, `resolve::Provenance` reports it as `Provenance::Game`
 even if you're actually editing a Profile or Global layer (the layer under edit is

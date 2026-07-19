@@ -649,6 +649,18 @@ corrections to *this* plan are recorded here.
   split"), because the header and body now render in different panel closures while the
   body still holds `&mut module_draft`. The status lines deliberately stayed with the
   body — they are conditional and would have resized a full-width band mid-keystroke.
+  > **Amended 2026-07-19 (later that day):** the status lines no longer stay with the
+  > body in IDE mode. 62eb53d (issue #26) moved them into the **diagnostics band** under
+  > the editor column, alongside the launch preview's env-overwrite warnings, under a
+  > shared `DiagSeverity` info/warning/error vocabulary. *Why that does not contradict
+  > the reasoning above:* the objection was never "these messages belong to the body", it
+  > was that a **conditional** message list cannot live in a full-width band that resizes
+  > mid-keystroke. The diagnostics band is `exact_height` with a scroll area inside it,
+  > so it absorbs any number of messages at zero height cost — which removes the
+  > objection rather than overriding it. Config mode is unchanged and still renders them
+  > inline under its header (`render_editor_status_lines`), which is why
+  > `StatusLine` carries both a `config_color` and a `severity`. See
+  > `docs/features/settings-gui.md`, "IDE-mode diagnostics band".
   *Follow-ups from the click-through, same day:* the band took the columns' own
   `theme::PANEL` fill (the `PANEL2` toolbar look was tried and rejected — it read as
   bolted on), grew to two rows / 60pt to stop reading as a cramped strip next to Config

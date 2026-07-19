@@ -331,7 +331,7 @@ the problem somewhere else.
 - `ide_editor_band` is the **diagnostics band** (`crate::gui::render_ide_diagnostics_band`)
   — declared but empty until 2026-07-19, when the env-overwrite lint moved into it from
   the launch band, joined later the same day by the open draft's status lines (issue #26).
-  Its `exact_height(198.0)` matches the nav footer band so the two bottom
+  Its `exact_height(BOTTOM_BAND_H)` matches the nav footer band so the two bottom
   edges align, and it stays `exact_height` however much it ends up showing: a
   variable-height band here would reflow the editor column above it every time the warning
   count changed. That fixed height plus the scroll area inside it is exactly why the status
@@ -1398,6 +1398,20 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   manifest is written last, so a crash between (2) and (4) leaves the manifest on the OLD
   identity — re-pressing Rename re-runs cleanly (already-moved scopes no-op). No WAL/journal.
   Dropped vars reuse the `carryover_report` banner; the editor stays open on the new `id`.
+  **`perform_rename` returns `Result<(), RenameError>`** (2026-07-19, issue #30), with one
+  variant per failure mode: `NotApplicable` (the gate refused — nothing was attempted, and
+  nothing on disk or in memory was touched), `Migration(String)` (step 2 failed; the
+  manifest was deliberately not written) and `ManifestWrite(String)` (step 4 failed, after
+  the sweep had already landed — idempotent, so re-pressing Rename retries cleanly).
+  *Why an enum and not the `Result<(), String>` the issue suggested:* "refused" and "tried
+  and broke" are genuinely different answers for a caller deciding whether to fall back to
+  another action, and a string cannot carry that distinction without the caller matching on
+  prose. **The banner is unchanged and is not replaced by the return value** — it is the
+  *user's* channel and every failure still surfaces there (or on stderr) exactly as before;
+  `RenameError` is the *caller's* channel. Before this, the only signal was the banner, so a
+  caller had to infer the outcome from how the draft happened to be left afterwards — an
+  inference that worked by coincidence rather than contract, and that stopped holding once
+  075183b changed the post-rename draft bookkeeping.
   This step order is load-bearing and must not be reordered by anything that reuses it.
 
   **Rename writes the identity only** (2026-07-19 — the independence decision above).
@@ -1798,17 +1812,23 @@ Three ranks, each an icon + colour pair:
 | rank | icon | colour | what it means |
 |---|---|---|---|
 | `Info` | `` circled *i* | `theme::ACCENT` (blue) | state, not a problem — the draft's dirty / clean / read-only line |
-| `Warning` | `` triangle | `theme::COL_GLOBAL` | unfinished or lossy, but nothing is being refused — an env overwrite, a staged-but-unapplied rename |
-| `Error` | `` circled *!* | `theme::COL_GLOBAL` | the reason an action is refused — every `Draft::save_enabled` gate, plus a blocked Rename |
+| `Warning` | `` triangle | `theme::COL_WARN` (amber) | unfinished or lossy, but nothing is being refused — an env overwrite, a staged-but-unapplied rename |
+| `Error` | `` circled *!* | `theme::COL_ERROR` (the danger red) | the reason an action is refused — every `Draft::save_enabled` gate, plus a blocked Rename |
 
-*Why `Warning` and `Error` share a colour:* `theme.rs` has no amber. Its palette is the
-scope colours (global red / profile green / game blue) plus chrome, and `COL_GLOBAL`
-already doubles as the danger colour (`docs/ui/STYLING-GUIDE.md`) — which is what this
-band's warnings have always been drawn in. Introducing a `Color32` literal at the call
-site would break the styling guide's top-level rule, so the two ranks are separated by
-**icon** instead. **A dedicated `COL_WARN` (amber) / `COL_ERROR` pair in `theme.rs` is the
-right fix** and would let `DiagSeverity::color` split cleanly; it was deliberately left
-undone, because adding palette tokens is a theme decision rather than a diagnostics one.
+**`Warning` and `Error` used to share `theme::COL_GLOBAL`**, separated by icon alone,
+because `theme.rs` had no amber and a `Color32` literal at the call site would have broken
+the styling guide's top-level rule. That was tolerable while the band held one or two
+warnings. It stopped being tolerable when 60a56b3 added three lints that all rank as
+`Warning`: a draft with a few undeclared references painted the whole band danger-red, so
+a screen where **nothing** was refused read exactly like a screen where Save was blocked.
+Fixed 2026-07-19 (issue #39) the way that note always pointed at — as real palette tokens
+in `theme.rs`, where palette decisions belong. See `docs/ui/STYLING-GUIDE.md`,
+"Diagnostic severity colours", for the two hex values and why they are those values.
+
+The band's **tally row** ("3 warnings", "1 error · 2 warnings") is coloured by the worst
+rank it summarises — `COL_ERROR` when there is at least one error, `COL_WARN` otherwise.
+It was unconditionally red, which was the same misread one level up: the summary claimed
+something was refused when nothing was.
 
 ### The pinned info line
 
@@ -2072,11 +2092,22 @@ Three guards keep a preview toggle off the user's disk, and all three are load-b
    no-op under `Mode::Ide` (S4b), but letting `changed` escape this closure would still be
    wrong to rely on — nothing outside the scratch layer changed, so there is nothing to
    report upward regardless.
-3. **A snapshot assertion.** `serde_json::to_value(&game_config.config.modules)` is taken
-   before the body call and `debug_assert_eq!`d after. This replaces the old
-   `debug_assert!(!changed)` (which could not survive an interactive preview) with an
-   assertion of the property that actually matters — it checks the *destination*, not the
-   messenger, so it stays meaningful however the write path is later refactored.
+3. **A snapshot assertion.** `serde_json::to_value` over **all three** config stores —
+   `game_config`, `global_config` and `editing_preset_buf` — is taken before the body call
+   and `debug_assert_eq!`d after. This replaces the old `debug_assert!(!changed)` (which
+   could not survive an interactive preview) with an assertion of the property that
+   actually matters — it checks the *destination*, not the messenger, so it stays
+   meaningful however the write path is later refactored.
+
+   *Why all three and not `game_config` alone* (2026-07-19, issue #39): it started as
+   `game_config.config.modules`, then widened to the whole `GameConfig`, but `game_config`
+   is only the store a field write lands in when `nav_sel` is `NavSel::Game(_)`. The whole
+   premise of S4b is that IDE mode leaves `nav_sel` wherever the user last had it, so this
+   preview legitimately renders with `GlobalSettings` or `Profile(_)` selected — and a leak
+   would then land in `global_config` or `editing_preset_buf` and sail straight past a
+   game-only snapshot. It would not even stay in memory: the next unrelated edit anywhere
+   calls `persist()`, which writes `global.json`. Snapshotting every reachable store means
+   the guard no longer silently depends on which scope happens to be selected.
 
 `poll_detect` is the one writer outside that wrapped region: it runs at the frame tail,
 after the restore, so `Detect` captures the `write_target` in force when the detection
@@ -2173,6 +2204,37 @@ Flipping `read_only` to `false` would have **silently resurrected them**, so
 `true`; the preview passes `preview_game.is_some()` — the colours describe layers that are
 only actually participating once a real game is selected, so with **None** the palette
 would be decorative.
+
+### `read_only` has no live caller — kept, and pinned by a test
+
+Both callers of `render_module_settings_body` pass `read_only: false`: Config mode always
+did, and the IDE preview has been deliberately interactive since S5a. That left four
+correctly-written guards completely unexercised in production. Issue #39 posed the choice
+as delete-or-pin; **kept and pinned** (2026-07-19), by
+`read_only_true_makes_the_body_inert`.
+
+*Why kept:* it is **not** a redundant second copy of `WriteTarget::Preview`. That guard
+controls the write's *destination* (redirect into the scratch layer); `read_only` controls
+*interactivity* — greyed widgets and no write-back at all. Deleting it would remove the
+only way to render this form genuinely inert, a capability with an obvious future claimant
+(inspecting a bundled, un-forkable module), and the deletion is wide and delicate: the flag
+reaches eight functions plus `scope_checkbox`, through the most intricate rendering code in
+`gui.rs`, for zero runtime benefit. S5a deliberately *split* it from `editable` (see the
+section above) so the two could not be confused; unpicking that trades a real risk for a
+tidiness gain.
+
+*How it is pinned without synthesising input:* the fixture stores a `multi_string` value
+containing a blank entry (`["a", ""]`). The list renderer filters blanks out and persists
+the difference (`if !read_only && cleaned != stored`), so that value is rewritten on the
+first frame **unprompted** — the one guarded path reachable with no input events at all,
+which avoids the brittle coordinate arithmetic a synthetic click would need. The test
+asserts the body reports no change, that all three config stores are byte-identical, and
+that `multi_edit` / `text_buffers` were neither seeded nor consumed (read-only *clones* its
+working copy instead of taking and re-inserting it). A companion control test,
+`read_only_false_does_rewrite_the_stored_list`, proves the fixture actually reaches the
+write — without it, an inertness test whose fixture never triggers a write would pass
+vacuously. Both were verified non-vacuous by removing the `!read_only` guard and watching
+the inertness test fail.
 
 ### Preview game selector (S5b)
 
