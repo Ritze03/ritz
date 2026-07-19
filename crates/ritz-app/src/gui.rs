@@ -1373,7 +1373,27 @@ impl GuiApp {
                             // is via Close / Save (or Ctrl+S) only.
                             let tree_live = self.module_draft.is_none();
                             ui.add_enabled_ui(tree_live, |ui| {
-                                self.render_ext_tree(ui);
+                                // `render_ext_tree` now takes its data source as
+                                // parameters (S3a) so S3b can reuse it against
+                                // `all_specs`/`all_dirs`/`all_is_folder_ext` for a
+                                // read-only preview column. Clone/copy out of `self`
+                                // first — passing `&self.cur_specs`/`&mut
+                                // self.selected_ext` directly would borrow `self`
+                                // while the method call also needs `&mut self`.
+                                let tree_specs = self.cur_specs.clone();
+                                let tree_dirs = self.cur_dirs.clone();
+                                let tree_is_folder_ext = self.cur_is_folder_ext.clone();
+                                let mut tree_selected = self.selected_ext;
+                                let show_inheritance = self.show_inheritance;
+                                self.render_ext_tree(
+                                    ui,
+                                    &tree_specs,
+                                    &tree_dirs,
+                                    &tree_is_folder_ext,
+                                    &mut tree_selected,
+                                    show_inheritance,
+                                );
+                                self.selected_ext = tree_selected;
                             });
                         });
                 });
@@ -1492,143 +1512,23 @@ impl GuiApp {
                 return;
             }
 
-            let edit_ctx_label: Option<String> = match &self.nav_sel {
-                NavSel::GlobalSettings => {
-                    Some("Editing Global Profile — applies to all games".to_string())
-                }
-                NavSel::Profile(name) => Some(format!("Editing Profile: {name}")),
-                NavSel::ModuleEditor(_) => None, // handled above; unreachable here
-                NavSel::Game(_) => {
-                    Some(format!("Editing Game: {}", self.game_config.game.name))
-                }
-                NavSel::GeneralSettings => None,
-            };
-
             let Some(spec) = self.cur_specs.get(self.selected_ext).cloned() else {
                 ui.label("No extensions apply to this game.");
                 return;
             };
 
-            // Detail header: title + version/author + description, bottom border.
-            ui.add_space(6.0);
-            let mut open_inspector = false;
-            ui.horizontal(|ui| {
-                ui.heading(&spec.meta.name);
-                ui.add_space(6.0);
-                ui.label(egui::RichText::new(format!("v{}", spec.meta.version)).color(theme::FAINT));
-                ui.label(egui::RichText::new(format!("by {}", spec.meta.author)).color(theme::FAINT));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if icon_button(
-                        ui,
-                        &mut self.icon_cache,
-                        "\u{f044}",
-                        "Edit",
-                        IconBtn::Secondary,
-                        true,
-                    )
-                    .on_hover_text("Open this module in the editor")
-                    .clicked()
-                    {
-                        open_inspector = true;
-                    }
-                });
-            });
-            if open_inspector {
-                self.open_module_editor(spec.id());
-            }
-            if let Some(label) = edit_ctx_label {
-                ui.add_space(2.0);
-                ui.label(egui::RichText::new(label).color(theme::ACCENT).small());
-            }
-            if let Some(desc) = &spec.meta.description {
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new(desc).color(theme::DIM));
-            }
-            ui.add_space(10.0);
-            ui.separator();
+            // S3a: the detail header (name/version/author/description/separator)
+            // and the settings body (ScrollArea + section/field loop + legend/hint)
+            // are extracted methods so S3b can call the body a second time for a
+            // read-only preview column without duplicating this layout.
+            self.render_module_detail_header(ui, &spec);
 
             let ext_id = spec.id();
             let ext_res = edit_resolution.exts.get(&ext_id);
-
-            egui::ScrollArea::vertical()
-                // Fill the panel (don't shrink to content) so the scrollbar sits at
-                // the far right while the content stays capped/left-aligned.
-                .auto_shrink([false, false])
-                .drag_to_scroll(self.general_config.touch_mode)
-                .show(ui, |ui| {
-                ui.vertical(|ui| {
-                    let max_w = body_max_width(ui, self.general_config.full_width);
-                    ui.set_max_width(max_w);
-                    // Custom-env/-game-env/-args modules render through this same
-                    // generic section/field loop — `render_field` dispatches their
-                    // single `multi_string` field (Variable `env`/`game_env`/`args`)
-                    // to the right widget by backend string, see `render_field`.
-                    {
-                        let mut any_section = false;
-                        for (section, fields) in &spec.ui {
-                            let visible: Vec<&UiField> =
-                                fields.iter().filter(|f| field_visible(f, ext_res)).collect();
-                            if visible.is_empty() {
-                                continue;
-                            }
-                            any_section = true;
-                            ui.add_space(12.0);
-                            ui.horizontal(|ui| {
-                                ui.label(theme::section_label(section));
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    scope_legend(ui);
-                                });
-                            });
-                            ui.add_space(6.0);
-                            let field_chain: Vec<Preset> = match &self.nav_sel {
-                                NavSel::Game(_) => {
-                                    let mut c = Vec::new();
-                                    if let Some(p) = &self.preset {
-                                        c.push(p.clone());
-                                        if let Some(pn) = &p.parent {
-                                            c.extend(collect_parent_presets(&self.paths, pn));
-                                        }
-                                    }
-                                    c
-                                }
-                                NavSel::Profile(_) => self.editing_preset_buf.as_ref()
-                                    .and_then(|p| p.parent.as_ref())
-                                    .map(|pn| collect_parent_presets(&self.paths, pn))
-                                    .unwrap_or_default(),
-                                _ => Vec::new(),
-                            };
-                            for field in visible {
-                                let Some(res) = ext_res.and_then(|e| e.fields.get(&field.variable)) else {
-                                    continue;
-                                };
-                                let preset_depth: Option<usize> =
-                                    if res.provenance == resolve::Provenance::Preset
-                                        && self.general_config.show_field_inheritance
-                                        && !field_chain.is_empty()
-                                    {
-                                        field_chain.iter().enumerate()
-                                            .find(|(_, p)| p.modules
-                                                .get(&spec.meta.author)
-                                                .and_then(|e| e.get(&spec.meta.name))
-                                                .and_then(|vars| vars.get(&field.variable))
-                                                .is_some())
-                                            .map(|(i, _)| i)
-                                    } else { None };
-                                if self.render_field(ui, &spec, field, res, preset_depth) {
-                                    changed = true;
-                                }
-                            }
-                        }
-                        if any_section {
-                            ui.add_space(10.0);
-                            ui.label(egui::RichText::new(
-                                "Colours mark where each value resolves from — Global, Profile, or this Game. \
-                                 Left-click a checkbox to toggle, right-click to reset to inherited.",
-                            ).color(theme::FAINT).small());
-                        }
-                    }
-                });
-            });
+            let full_width = self.general_config.full_width;
+            if self.render_module_settings_body(ui, &spec, ext_res, full_width, false) {
+                changed = true;
+            }
         });
 
         if self.render_confirm_dialog(ctx) {
@@ -3240,6 +3140,172 @@ impl GuiApp {
         });
     }
 
+    /// Detail header for the selected module in the central panel: the
+    /// name/version/author heading row (with the "Edit" icon button that opens the
+    /// manifest editor), the "Editing Game/Profile/Global: X" context label, the
+    /// description, and a trailing separator. Split out of the old inline `ui()`
+    /// block (S3a) so `render_module_settings_body` below can eventually be called
+    /// twice — this header only ever needs to render once per selected module,
+    /// which is why it stays a separate method rather than folding into the body.
+    fn render_module_detail_header(&mut self, ui: &mut egui::Ui, spec: &Extension) {
+        // Computed *before* the heading row, as it was pre-extraction: the Edit
+        // button below calls `open_module_editor`, which sets
+        // `nav_sel = NavSel::ModuleEditor(..)`. Reading `nav_sel` after that click
+        // would hit the `ModuleEditor(_) => None` arm and drop the label (and its
+        // 2px space) for the click frame, shifting the description and body up.
+        let edit_ctx_label: Option<String> = match &self.nav_sel {
+            NavSel::GlobalSettings => {
+                Some("Editing Global Profile — applies to all games".to_string())
+            }
+            NavSel::Profile(name) => Some(format!("Editing Profile: {name}")),
+            NavSel::ModuleEditor(_) => None, // handled by the caller; unreachable here
+            NavSel::Game(_) => {
+                Some(format!("Editing Game: {}", self.game_config.game.name))
+            }
+            NavSel::GeneralSettings => None,
+        };
+        ui.add_space(6.0);
+        let mut open_inspector = false;
+        ui.horizontal(|ui| {
+            ui.heading(&spec.meta.name);
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new(format!("v{}", spec.meta.version)).color(theme::FAINT));
+            ui.label(egui::RichText::new(format!("by {}", spec.meta.author)).color(theme::FAINT));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if icon_button(
+                    ui,
+                    &mut self.icon_cache,
+                    "\u{f044}",
+                    "Edit",
+                    IconBtn::Secondary,
+                    true,
+                )
+                .on_hover_text("Open this module in the editor")
+                .clicked()
+                {
+                    open_inspector = true;
+                }
+            });
+        });
+        if open_inspector {
+            self.open_module_editor(spec.id());
+        }
+        if let Some(label) = edit_ctx_label {
+            ui.add_space(2.0);
+            ui.label(egui::RichText::new(label).color(theme::ACCENT).small());
+        }
+        if let Some(desc) = &spec.meta.description {
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(desc).color(theme::DIM));
+        }
+        ui.add_space(10.0);
+        ui.separator();
+    }
+
+    /// Settings body for the selected module: the field-editor `ScrollArea`
+    /// (section header + per-field `render_field` loop), the scope legend, and the
+    /// trailing colour-hint footer. Returns whether any field changed (mirrors the
+    /// old inline `changed` bool this replaced).
+    ///
+    /// `read_only` forces every field to render non-editable and suppresses the
+    /// scope legend and colour-hint footer — neither makes sense on a read-only
+    /// preview. It is threaded through to `render_field`/`render_value_editor`
+    /// rather than relying on `ui.add_enabled_ui`; see `render_value_editor`'s doc
+    /// comment for why. Every call site in this stage (S3a) passes `false`, so
+    /// behaviour is unchanged — a second call with `read_only: true` is S3b's job.
+    fn render_module_settings_body(
+        &mut self,
+        ui: &mut egui::Ui,
+        spec: &Extension,
+        ext_res: Option<&resolve::ExtResolution>,
+        full_width: bool,
+        read_only: bool,
+    ) -> bool {
+        let mut changed = false;
+        egui::ScrollArea::vertical()
+            // Fill the panel (don't shrink to content) so the scrollbar sits at
+            // the far right while the content stays capped/left-aligned.
+            .auto_shrink([false, false])
+            .drag_to_scroll(self.general_config.touch_mode)
+            .show(ui, |ui| {
+            ui.vertical(|ui| {
+                let max_w = body_max_width(ui, full_width);
+                ui.set_max_width(max_w);
+                // Custom-env/-game-env/-args modules render through this same
+                // generic section/field loop — `render_field` dispatches their
+                // single `multi_string` field (Variable `env`/`game_env`/`args`)
+                // to the right widget by backend string, see `render_field`.
+                {
+                    let mut any_section = false;
+                    for (section, fields) in &spec.ui {
+                        let visible: Vec<&UiField> =
+                            fields.iter().filter(|f| field_visible(f, ext_res)).collect();
+                        if visible.is_empty() {
+                            continue;
+                        }
+                        any_section = true;
+                        ui.add_space(12.0);
+                        ui.horizontal(|ui| {
+                            ui.label(theme::section_label(section));
+                            if !read_only {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    scope_legend(ui);
+                                });
+                            }
+                        });
+                        ui.add_space(6.0);
+                        let field_chain: Vec<Preset> = match &self.nav_sel {
+                            NavSel::Game(_) => {
+                                let mut c = Vec::new();
+                                if let Some(p) = &self.preset {
+                                    c.push(p.clone());
+                                    if let Some(pn) = &p.parent {
+                                        c.extend(collect_parent_presets(&self.paths, pn));
+                                    }
+                                }
+                                c
+                            }
+                            NavSel::Profile(_) => self.editing_preset_buf.as_ref()
+                                .and_then(|p| p.parent.as_ref())
+                                .map(|pn| collect_parent_presets(&self.paths, pn))
+                                .unwrap_or_default(),
+                            _ => Vec::new(),
+                        };
+                        for field in visible {
+                            let Some(res) = ext_res.and_then(|e| e.fields.get(&field.variable)) else {
+                                continue;
+                            };
+                            let preset_depth: Option<usize> =
+                                if res.provenance == resolve::Provenance::Preset
+                                    && self.general_config.show_field_inheritance
+                                    && !field_chain.is_empty()
+                                {
+                                    field_chain.iter().enumerate()
+                                        .find(|(_, p)| p.modules
+                                            .get(&spec.meta.author)
+                                            .and_then(|e| e.get(&spec.meta.name))
+                                            .and_then(|vars| vars.get(&field.variable))
+                                            .is_some())
+                                        .map(|(i, _)| i)
+                                } else { None };
+                            if self.render_field(ui, spec, field, res, preset_depth, read_only) {
+                                changed = true;
+                            }
+                        }
+                    }
+                    if any_section && !read_only {
+                        ui.add_space(10.0);
+                        ui.label(egui::RichText::new(
+                            "Colours mark where each value resolves from — Global, Profile, or this Game. \
+                             Left-click a checkbox to toggle, right-click to reset to inherited.",
+                        ).color(theme::FAINT).small());
+                    }
+                }
+            });
+        });
+        changed
+    }
+
     fn render_field(
         &mut self,
         ui: &mut egui::Ui,
@@ -3247,6 +3313,7 @@ impl GuiApp {
         field: &UiField,
         res: &resolve::ResolvedField,
         preset_depth: Option<usize>,
+        read_only: bool,
     ) -> bool {
         let state = tri_state(res);
         // A value set at the layer being edited resolves as `Provenance::Game`
@@ -3287,9 +3354,9 @@ impl GuiApp {
                 _ => None,
             };
             if pair_var == Some(field.variable.as_str()) {
-                return self.render_env_pair_field(ui, spec, field, scope);
+                return self.render_env_pair_field(ui, spec, field, scope, read_only);
             }
-            return self.render_multi_string_field(ui, spec, field, scope);
+            return self.render_multi_string_field(ui, spec, field, scope, read_only);
         }
 
         // Row card: scope-tinted background, 8px rounding, with a 3px left bar.
@@ -3308,8 +3375,15 @@ impl GuiApp {
                     let label = field.name.clone().unwrap_or_else(|| field.variable.clone());
                     let hover = field.description.clone().unwrap_or_default();
                     let left = ui.cursor().min.x;
+                    // `read_only` goes *into* `scope_checkbox` rather than gating
+                    // its result here: the row must still paint (WYSIWYG preview)
+                    // but must be allocated non-interactively, so no click can ever
+                    // reach `apply_tri` — which writes config and seeds
+                    // `text_buffers`. This is the one write path shared by *every*
+                    // field type, Toggle included.
+                    let value = TriValue { state, inherited_on: res.var.truthy };
                     if let Some(new) =
-                        scope_checkbox(ui, &label, &hover, state, res.var.truthy, scope, badge)
+                        scope_checkbox(ui, &label, &hover, value, scope, badge, read_only)
                     {
                         self.apply_tri(spec, field, res, new);
                         changed = true;
@@ -3323,10 +3397,13 @@ impl GuiApp {
                     // it's shown greyed-out and read-only, displaying the effective
                     // (inherited) value. Right-to-left so controls are right-bound.
                     if field.field_type != FieldType::Toggle {
-                        let editable = state == Tri::Enabled;
+                        // `read_only` forces this to false regardless of resolution
+                        // state — see `render_value_editor` for why that has to be an
+                        // explicit bool rather than relying on `ui.is_enabled()`.
+                        let editable = !read_only && state == Tri::Enabled;
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.add_enabled_ui(editable, |ui| {
-                                changed |= self.render_value_editor(ui, spec, field, res, scope, editable);
+                                changed |= self.render_value_editor(ui, spec, field, res, scope, editable, read_only);
                             });
                         });
                     }
@@ -3348,7 +3425,14 @@ impl GuiApp {
     /// Render a `multi_string` field: a scope-tinted card with the label and a
     /// growing list of entry rows (text box + delete) plus a `+ Add` button. The
     /// list is stored as a JSON array at the current scope.
-    fn render_multi_string_field(&mut self, ui: &mut egui::Ui, spec: &Extension, field: &UiField, scope: Color32) -> bool {
+    ///
+    /// `read_only` renders the identical card — same label, same rows, same
+    /// buttons — but with every widget non-interactive and *no* shared state
+    /// touched: the working copy is seeded straight from the stored array instead
+    /// of taking (and re-inserting) `self.multi_edit`, and the persist block is
+    /// skipped, so neither `set_current` nor `unset_current` (which removes from
+    /// `text_buffers`) can run. Returns `false` unconditionally when read-only.
+    fn render_multi_string_field(&mut self, ui: &mut egui::Ui, spec: &Extension, field: &UiField, scope: Color32, read_only: bool) -> bool {
         let author = spec.meta.author.clone();
         let name = spec.meta.name.clone();
         let var = field.variable.clone();
@@ -3370,7 +3454,14 @@ impl GuiApp {
             .and_then(|v| v.as_array())
             .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
             .unwrap_or_default();
-        let mut entries = self.multi_edit.remove(&key).unwrap_or(stored.clone());
+        // Read-only takes the working copy by *reference* (clone, no `remove`) so
+        // the live editor's in-progress buffer is still what the preview shows,
+        // without the preview owning or consuming it.
+        let mut entries = if read_only {
+            self.multi_edit.get(&key).cloned().unwrap_or_else(|| stored.clone())
+        } else {
+            self.multi_edit.remove(&key).unwrap_or(stored.clone())
+        };
 
         let tint = Color32::from_rgba_unmultiplied(scope.r(), scope.g(), scope.b(), 16);
         let btn_w = icon_button_width(ui) + ui.spacing().item_spacing.x;
@@ -3394,14 +3485,15 @@ impl GuiApp {
                         ui.add(
                             egui::TextEdit::singleline(entry)
                                 .desired_width(w)
+                                .interactive(!read_only)
                                 .hint_text(egui::RichText::new("command").color(theme::FAINT)),
                         );
-                        if icon_button(ui, cache, "\u{f467}", "", IconBtn::Danger, true).clicked() {
+                        if icon_button(ui, cache, "\u{f467}", "", IconBtn::Danger, !read_only).clicked() {
                             to_delete = Some(i);
                         }
                     });
                 }
-                if ui.button("+ Add").clicked() {
+                if ui.add_enabled(!read_only, egui::Button::new("+ Add")).clicked() {
                     entries.push(String::new());
                 }
             });
@@ -3413,7 +3505,7 @@ impl GuiApp {
         // Persist the non-empty entries when they differ from what's stored.
         let cleaned: Vec<String> = entries.iter().filter(|s| !s.trim().is_empty()).cloned().collect();
         let mut changed = false;
-        if cleaned != stored {
+        if !read_only && cleaned != stored {
             if cleaned.is_empty() {
                 self.unset_current(spec, field);
             } else {
@@ -3430,7 +3522,9 @@ impl GuiApp {
             .rect_filled(r, egui::Rounding::same(8.0), scope);
         ui.add_space(8.0);
 
-        self.multi_edit.insert(key, entries);
+        if !read_only {
+            self.multi_edit.insert(key, entries);
+        }
         changed
     }
 
@@ -3442,7 +3536,12 @@ impl GuiApp {
     /// ([`is_valid_env_name`]): an invalid name gets a red outline, and a row whose
     /// name is empty/invalid is dropped when persisting, so a bad pair can never
     /// reach a stored env var. The Value half is unrestricted (may contain `=`).
-    fn render_env_pair_field(&mut self, ui: &mut egui::Ui, spec: &Extension, field: &UiField, scope: Color32) -> bool {
+    ///
+    /// `read_only` behaves exactly as in [`Self::render_multi_string_field`]: same
+    /// card, non-interactive widgets, `multi_edit` read but never taken or
+    /// re-inserted, and the persist block skipped so no `set_current` /
+    /// `unset_current` can fire. Returns `false` unconditionally when read-only.
+    fn render_env_pair_field(&mut self, ui: &mut egui::Ui, spec: &Extension, field: &UiField, scope: Color32, read_only: bool) -> bool {
         let author = spec.meta.author.clone();
         let name = spec.meta.name.clone();
         let var = field.variable.clone();
@@ -3463,7 +3562,13 @@ impl GuiApp {
             .and_then(|v| v.as_array())
             .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
             .unwrap_or_default();
-        let mut entries = self.multi_edit.remove(&key).unwrap_or(stored.clone());
+        // See `render_multi_string_field`: read-only clones the working copy
+        // instead of taking it, so the preview never consumes the live buffer.
+        let mut entries = if read_only {
+            self.multi_edit.get(&key).cloned().unwrap_or_else(|| stored.clone())
+        } else {
+            self.multi_edit.remove(&key).unwrap_or(stored.clone())
+        };
 
         let tint = Color32::from_rgba_unmultiplied(scope.r(), scope.g(), scope.b(), 16);
         let btn_w = icon_button_width(ui) + ui.spacing().item_spacing.x;
@@ -3492,6 +3597,7 @@ impl GuiApp {
                         let name_resp = ui.add(
                             egui::TextEdit::singleline(&mut n)
                                 .desired_width(name_w)
+                                .interactive(!read_only)
                                 .hint_text(egui::RichText::new("NAME").color(theme::FAINT)),
                         );
                         if !name_ok {
@@ -3504,15 +3610,16 @@ impl GuiApp {
                         ui.add(
                             egui::TextEdit::singleline(&mut v)
                                 .desired_width(value_w)
+                                .interactive(!read_only)
                                 .hint_text(egui::RichText::new("value").color(theme::FAINT)),
                         );
-                        if icon_button(ui, cache, "\u{f467}", "", IconBtn::Danger, true).clicked() {
+                        if icon_button(ui, cache, "\u{f467}", "", IconBtn::Danger, !read_only).clicked() {
                             to_delete = Some(i);
                         }
                     });
                     *entry = format!("{n}={v}");
                 }
-                if ui.button("+ Add").clicked() {
+                if ui.add_enabled(!read_only, egui::Button::new("+ Add")).clicked() {
                     entries.push(String::new());
                 }
             });
@@ -3532,7 +3639,7 @@ impl GuiApp {
             })
             .collect();
         let mut changed = false;
-        if cleaned != stored {
+        if !read_only && cleaned != stored {
             if cleaned.is_empty() {
                 self.unset_current(spec, field);
             } else {
@@ -3549,7 +3656,9 @@ impl GuiApp {
             .rect_filled(r, egui::Rounding::same(8.0), scope);
         ui.add_space(8.0);
 
-        self.multi_edit.insert(key, entries);
+        if !read_only {
+            self.multi_edit.insert(key, entries);
+        }
         changed
     }
 
@@ -3609,6 +3718,15 @@ impl GuiApp {
     /// Value editor for a non-toggle field. When `editable` is false the widgets
     /// are drawn read-only (the caller has disabled the ui) and just display the
     /// effective value, so no persistent edit buffer is touched.
+    ///
+    /// `read_only` is threaded down separately from `editable` (rather than
+    /// trusting the caller's `editable` alone) as a deliberate belt-and-suspenders:
+    /// the `String` arm below branches on the `editable` *parameter*, not
+    /// `ui.is_enabled()` — wrapping the call in `ui.add_enabled_ui(false, …)` at the
+    /// call site greys out the widget but does NOT stop this arm from writing into
+    /// `self.text_buffers` or minting the `("text_edit", key)` `egui::Id`. Re-deriving
+    /// `editable` from `read_only` here means a future caller can never reintroduce a
+    /// read-only leak by passing a stale `editable: true` alongside `read_only: true`.
     fn render_value_editor(
         &mut self,
         ui: &mut egui::Ui,
@@ -3617,7 +3735,9 @@ impl GuiApp {
         res: &resolve::ResolvedField,
         scope: Color32,
         editable: bool,
+        read_only: bool,
     ) -> bool {
+        let editable = editable && !read_only;
         let mut changed = false;
         match field.field_type {
             FieldType::Selection => {
@@ -3656,7 +3776,12 @@ impl GuiApp {
                             }
                         });
                 });
-                if let Some(v) = picked {
+                // The ComboBox is deliberately still *drawn* when read-only (it is a
+                // WYSIWYG preview); `editable` is what stops the pick from writing.
+                // A disabled `Ui` already makes `picked` unreachable, so this guard
+                // is a no-op for `read_only == false` — it exists so the parameter,
+                // not `ui.is_enabled()`, is what guarantees inertness.
+                if let Some(v) = picked.filter(|_| editable) {
                     self.set_current(spec, field, json!(v));
                     changed = true;
                 }
@@ -3665,7 +3790,11 @@ impl GuiApp {
                 let integer = field.field_type == FieldType::Integer;
                 let (min, max, step) = number_range(field);
                 let v: f64 = res.var.value.parse().unwrap_or(min);
-                if let Some(nv) = scope_slider(ui, v, min, max, step, integer, scope) {
+                // Same reasoning as the Selection arm: the slider/spinner is drawn
+                // either way, `editable` is the gate on the write.
+                if let Some(nv) = scope_slider(ui, v, min, max, step, integer, scope)
+                    .filter(|_| editable)
+                {
                     self.set_current(spec, field, num_value(nv, integer));
                     changed = true;
                 }
@@ -4944,7 +5073,29 @@ impl GuiApp {
     /// `extensions/` layout; in author mode it groups by extension Author. In
     /// both modes the built-in (backend) modules are collected under a single
     /// "Built-In" node shown last.
-    fn render_ext_tree(&mut self, ui: &mut egui::Ui) {
+    ///
+    /// Takes its data source as explicit parameters (`specs`/`dirs`/
+    /// `is_folder_ext`, index-aligned) rather than always reading `self.cur_*` —
+    /// S3b will pass `all_specs`/`all_dirs`/`all_is_folder_ext` here for the
+    /// unfiltered preview column; this stage's one call site still passes the
+    /// `cur_*` fields, so behaviour is unchanged.
+    ///
+    /// `specs`/`dirs`/`is_folder_ext`/`selected` can't be `&self.cur_specs`/
+    /// `&mut self.selected_ext` etc. at the call site — that would borrow `self`
+    /// immutably (or mutably, for `selected`) while also needing `&mut self` for
+    /// the method receiver. The call site clones the `cur_*` Vecs and copies
+    /// `selected_ext` into locals first (the same "clone the spec" pattern already
+    /// used elsewhere in this file for the same reason), passes those in, then
+    /// writes `selected_ext` back after the call.
+    fn render_ext_tree(
+        &mut self,
+        ui: &mut egui::Ui,
+        specs: &[Extension],
+        dirs: &[PathBuf],
+        is_folder_ext: &[bool],
+        selected: &mut usize,
+        show_inheritance: bool,
+    ) {
         // Build per-extension icon lists: each entry is (icon_glyph, color).
         // Inheritance from a lower layer → ICON_INHERIT; edit at current scope → ICON_EDIT.
         let resolution = self.resolve_for_editing();
@@ -4974,9 +5125,9 @@ impl GuiApp {
         } else { Vec::new() };
 
         let display_mode = self.general_config.inheritance_display;
-        let icon_lists: Vec<Vec<(&'static str, Color32)>> = if !self.show_inheritance {
-            vec![Vec::new(); self.cur_specs.len()]
-        } else { self.cur_specs.iter().map(|spec| {
+        let icon_lists: Vec<Vec<(&'static str, Color32)>> = if !show_inheritance {
+            vec![Vec::new(); specs.len()]
+        } else { specs.iter().map(|spec| {
             // Variables the module still declares — a stored value for a removed
             // variable (e.g. an old `xkb_de`) must not count as "configured".
             let declared: std::collections::HashSet<&str> =
@@ -5046,7 +5197,7 @@ impl GuiApp {
 
         let mut builtins: Vec<usize> = Vec::new();
         let mut others: Vec<usize> = Vec::new();
-        for (i, spec) in self.cur_specs.iter().enumerate() {
+        for (i, spec) in specs.iter().enumerate() {
             if spec.backend.is_some() {
                 builtins.push(i);
             } else {
@@ -5058,7 +5209,7 @@ impl GuiApp {
             let mut by_author: BTreeMap<String, Vec<usize>> = BTreeMap::new();
             for &i in &others {
                 by_author
-                    .entry(self.cur_specs[i].meta.author.clone())
+                    .entry(specs[i].meta.author.clone())
                     .or_default()
                     .push(i);
             }
@@ -5067,20 +5218,20 @@ impl GuiApp {
                     .default_open(true)
                     .show(ui, |ui| {
                         for &i in items {
-                            leaf(ui, &mut self.icon_cache, i, &self.cur_specs, &icon_lists, &mut self.selected_ext, mono);
+                            leaf(ui, &mut self.icon_cache, i, specs, &icon_lists, selected, mono);
                         }
                     });
             }
         } else {
             let mut root = TreeNode::default();
             for &i in &others {
-                let comps: Vec<String> = self.cur_dirs[i]
+                let comps: Vec<String> = dirs[i]
                     .iter()
                     .map(|c| c.to_string_lossy().into_owned())
                     .collect();
                 root.insert(&comps, i);
             }
-            render_node(ui, &mut self.icon_cache, &root, &self.cur_specs, &self.cur_is_folder_ext, &icon_lists, &mut self.selected_ext, mono);
+            render_node(ui, &mut self.icon_cache, &root, specs, is_folder_ext, &icon_lists, selected, mono);
         }
 
         if !builtins.is_empty() {
@@ -5088,7 +5239,7 @@ impl GuiApp {
                 .default_open(true)
                 .show(ui, |ui| {
                     for &i in &builtins {
-                        leaf(ui, &mut self.icon_cache, i, &self.cur_specs, &icon_lists, &mut self.selected_ext, mono);
+                        leaf(ui, &mut self.icon_cache, i, specs, &icon_lists, selected, mono);
                     }
                 });
         }
@@ -5425,10 +5576,15 @@ fn paint_scope_box(painter: &egui::Painter, rect: egui::Rect, on: bool, faded: b
 /// Lay out and sense a single clickable `[box] label` row: the whole rect (box +
 /// gap + label) is one click target with a subtle hover background. `paint_box`
 /// draws the 18×18 box. Returns the row's response.
+/// `interactive: false` allocates the row with `Sense::hover()` instead of
+/// `Sense::click()` and skips the hover highlight, so the row paints identically
+/// but can never report a click. Used by the read-only (preview) render path,
+/// where a returned `Some(Tri)` would write config — see [`scope_checkbox`].
 fn checkbox_row(
     ui: &mut egui::Ui,
     label: &str,
     badge: Option<(&str, Color32)>,
+    interactive: bool,
     paint_box: impl FnOnce(&egui::Painter, egui::Rect),
 ) -> egui::Response {
     const BOX: f32 = 18.0;
@@ -5438,10 +5594,11 @@ fn checkbox_row(
     let badge_w = badge_galley.as_ref().map(|g| g.size().x + GAP).unwrap_or(0.0);
     let galley = ui.painter().layout_no_wrap(label.to_owned(), font, theme::TEXT);
     let size = egui::vec2(BOX + GAP + badge_w + galley.size().x, BOX.max(galley.size().y));
-    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    let sense = if interactive { egui::Sense::click() } else { egui::Sense::hover() };
+    let (rect, resp) = ui.allocate_exact_size(size, sense);
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
-        if resp.hovered() {
+        if interactive && resp.hovered() {
             painter.rect_filled(rect.expand2(egui::vec2(4.0, 2.0)), egui::Rounding::same(6.0), theme::HOV);
         }
         let box_rect = egui::Rect::from_min_size(
@@ -5534,7 +5691,7 @@ fn settings_toggle_row(ui: &mut egui::Ui, label: &str, hover: &str, value: &mut 
     let on = *value;
     let clicked = settings_card(ui, |ui| {
         let mut resp =
-            checkbox_row(ui, label, None, |p, r| paint_scope_box(p, r, on, false, theme::COL_DEFAULT));
+            checkbox_row(ui, label, None, true, |p, r| paint_scope_box(p, r, on, false, theme::COL_DEFAULT));
         if !hover.is_empty() {
             resp = resp.on_hover_text(hover);
         }
@@ -5548,11 +5705,20 @@ fn settings_toggle_row(ui: &mut egui::Ui, label: &str, hover: &str, value: &mut 
 
 fn styled_checkbox(ui: &mut egui::Ui, checked: &mut bool, label: &str) -> egui::Response {
     let on = *checked;
-    let resp = checkbox_row(ui, label, None, |p, r| paint_scope_box(p, r, on, false, COL_PROFILE));
+    let resp = checkbox_row(ui, label, None, true, |p, r| paint_scope_box(p, r, on, false, COL_PROFILE));
     if resp.clicked() {
         *checked = !*checked;
     }
     resp
+}
+
+/// The tri-state a [`scope_checkbox`] renders, together with the effective
+/// (inherited) on/off it falls back to when the state is `Unset`. The two are
+/// only ever meaningful together, so they travel as one argument — which also
+/// keeps `scope_checkbox` at the arity limit now that it takes `read_only`.
+struct TriValue {
+    state: Tri,
+    inherited_on: bool,
 }
 
 /// A mockup-style checkbox over the tri-state model, with the label as part of
@@ -5560,27 +5726,38 @@ fn styled_checkbox(ui: &mut egui::Ui, checked: &mut bool, label: &str) -> egui::
 /// - **left-click** toggles Enabled ⇄ Disabled (flipping from the current
 ///   effective on/off, so the first click on an inherited value sets the opposite)
 /// - **right-click** resets to Unset (inherit from a lower scope)
+///
+/// `read_only` makes the row inert: it paints exactly the same box, badge and
+/// label but is allocated non-interactively and always returns `None`, so the
+/// caller can never reach `apply_tri` (which writes config *and* seeds
+/// `text_buffers`). The gate is this parameter, not `ui.is_enabled()` — a
+/// disabled parent `Ui` would grey the row out but is not what stops the write.
 fn scope_checkbox(
     ui: &mut egui::Ui,
     label: &str,
     hover: &str,
-    state: Tri,
-    inherited_on: bool,
+    value: TriValue,
     scope: Color32,
     badge: Option<(&str, Color32)>,
+    read_only: bool,
 ) -> Option<Tri> {
+    let TriValue { state, inherited_on } = value;
     let on = match state {
         Tri::Enabled => true,
         Tri::Disabled => false,
         Tri::Unset => inherited_on,
     };
     let faded = state == Tri::Unset;
-    let mut resp = checkbox_row(ui, label, badge, |p, r| paint_scope_box(p, r, on, faded, scope));
+    let mut resp = checkbox_row(ui, label, badge, !read_only, |p, r| {
+        paint_scope_box(p, r, on, faded, scope)
+    });
     if !hover.is_empty() {
         resp = resp.on_hover_text(hover);
     }
 
-    if resp.secondary_clicked() {
+    if read_only {
+        None
+    } else if resp.secondary_clicked() {
         Some(Tri::Unset)
     } else if resp.clicked() {
         Some(if on { Tri::Disabled } else { Tri::Enabled })
