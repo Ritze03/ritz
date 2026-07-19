@@ -46,36 +46,37 @@ const NAV_W: f32 = 280.0;
 /// | `27.0` | the name/version/author + button row — **button-driven**, not `interact_size.y`; see [`IDE_HEADER_ROW_H`] |
 /// | `7.0`  | `item_spacing.y` (`theme.rs`) — egui's gap between those two rows |
 /// | `17.0` | [`IDE_HEADER_DESC_H`], the one-line description slot             |
-/// | `7.0`  | `item_spacing.y` again — the gap before the status slot          |
-/// | `56.0` | [`IDE_HEADER_STATUS_H`], the reserved status-message slot        |
-/// | `12.0` | the frame's bottom inner margin; see *Why 8/12 and not 14/10 (unequal on purpose)* |
+/// | `11.0` | the frame's bottom inner margin; see *Why 8/12 and not 14/10 (unequal on purpose)* |
 ///
-/// Sum: `8 + 27 + 7 + 17 + 7 + 56 + 12 = 134.0`.
+/// Sum: `8 + 27 + 7 + 17 + 11 = 70.0`.
 ///
-/// *Why 134 and not the ~110 the request named* (2026-07-19, issue #26): the ask
-/// was "make the top bar a little taller so the status messages have space —
-/// copy the module name/description block from the profiles page (~110px)". 110
-/// is what a **two**-line status slot costs (`70 + 7 + 2*14 = 105`), and the
-/// worst case is **four** lines, not two — see [`IDE_HEADER_STATUS_LINES`] for
-/// the enumeration. Reserving for the worst case is what lets the messages
-/// appear and vanish inside a *constant* band, which is the whole point of the
-/// exercise (see *Why `exact_height`* below); reserving for two would have
-/// forced an elide-or-drop policy on exactly the diagnostics that explain why
-/// Save is greyed out. 24pt of usually-empty band, filled with the same
-/// [`theme::PANEL`] as everything around it, is the price.
+/// *Why the band holds no status lines* (2026-07-19, issue #26, revised same
+/// day): for one commit (`7f6109c`) it did — the draft's status messages were
+/// hoisted out of the editor body into a fixed slot here, sized for the
+/// four-line worst case, which put `IDE_HEADER_H` at `134.0`. That was rejected
+/// on sight: *"It's way too large."* Only the first status line is ever normally
+/// present, so three of the four reserved rows — ~42pt, a third of the band —
+/// were permanently empty. Shrinking the reservation to one line and letting the
+/// band grow was considered and dropped in favour of the better answer the user
+/// pointed at: *"We could move it into the diagnostic view?"*
 ///
-/// *Why the status lines live here at all* (2026-07-19, issue #26): they used to
-/// render in the editor **body**, deliberately — only the first line is
-/// unconditional, and an auto-height header would have reflowed the editor *and*
-/// the preview column mid-keystroke. Moving them up did not change that hazard;
-/// it is defused by the fixed slot rather than by the choice of container. The
-/// Config-mode body still renders them inline (there is no band there to hoist
-/// them into) — see [`render_editor_status_lines`] and
-/// [`render_editor_header_status_slot`], which share one message list so the two
-/// surfaces cannot drift.
+/// **So the status lines now render in the diagnostics band**
+/// ([`render_ide_diagnostics_band`]) instead. That band is already
+/// `exact_height(198.0)`, always visible, and already contains a *scrolling*
+/// list — so any number of messages costs zero height and nothing reflows, which
+/// is strictly better than either the fixed reservation (dead space) or a
+/// growing band (reflow mid-keystroke). It is also where they belong on the
+/// merits: a `validate` error, a section-name collision and an unparseable
+/// `Requires` **are** diagnostics; they only ever sat in this band because
+/// `7f6109c` put them here. See [`ide_diagnostic_entries`] for the assembled
+/// list and [`DiagSeverity`] for the info/warning/error vocabulary that carries
+/// them.
 ///
-/// The pre-issue-#26 sum was `8.0 + 27.0 + 7.0 + 17.0 + 11.0 = 70.0` — the same as
-/// before this fix, so nothing downstream reflows. The old term-by-term sum,
+/// This band is therefore back to exactly what it was before `7f6109c` — the
+/// name/version/author row and the description — at the same `70.0` it has
+/// always been, so nothing downstream reflows either way.
+///
+/// The old term-by-term sum,
 /// `14 + 23 + 7 + 16 + 10`, also summed to 70 on paper — but the `23` and `16`
 /// terms were merely the *documented* derivation, not what egui actually laid
 /// out at runtime. The heading row is button-driven (see [`IDE_HEADER_ROW_H`])
@@ -131,19 +132,23 @@ const NAV_W: f32 = 280.0;
 /// gap between its description and separator, which is the number this term
 /// originally tried to reproduce.
 ///
-/// *Why the bottom margin went 11 → 12* (2026-07-19, issue #26): the band's last
-/// text row is no longer the 13pt `Body` description but an 11pt `Small` status
-/// line, and the two sit differently inside their slots. Measured headlessly
-/// against the real bundled font (same harness as [`IDE_HEADER_ROW_H`]): a cap
-/// glyph's ink bottom is `13.0` in the description's `17.0` slot (4pt of slack
-/// below it) but `11.0` in a status line's `14.0` slot (3pt). One point closer
-/// to the edge, so the margin gives one point back and the optical distance is
-/// unchanged. This is the *only* margin change issue #26 makes — the top and
-/// left margins, and the whole ink-balance argument above, carry over intact.
+/// *Why the bottom margin is 11 and not 12* (2026-07-19, issue #26): `7f6109c`
+/// took it to `12` for one commit, because the band's last text row was then an
+/// 11pt `Small` status line rather than the 13pt `Body` description, and the two
+/// sit differently inside their slots — measured headlessly against the real
+/// bundled font (same harness as [`IDE_HEADER_ROW_H`]), a cap glyph's ink bottom
+/// is `13.0` in the description's `17.0` slot (4pt of slack below it) but `11.0`
+/// in a status line's `14.0` slot (3pt), so the margin gave a point back to keep
+/// the optical distance the same. With the status lines gone to the diagnostics
+/// band the description is the last row again, so the extra point goes back too.
+/// **The measurement is kept here on purpose:** if anything 11pt-sized is ever
+/// added as the band's last row, this is the point that has to move again.
 ///
 /// *Why `exact_height` and not auto-sizing:* the band spans the editor **and**
-/// preview columns, so any height change there reflows half the window. Pinning
-/// it also keeps the layout still on the frames where
+/// preview columns, so any height change here reflows half the window — the
+/// hazard that ultimately sent the status lines to the diagnostics band rather
+/// than letting this band grow. Pinning it also keeps the layout still on the
+/// frames where
 /// [`GuiApp::editor_header_info`] returns `None` (a module switch, before
 /// `ensure_draft` catches up) — an auto-sized band would collapse to nothing and
 /// snap back, which reads as a flicker.
@@ -151,8 +156,6 @@ const IDE_HEADER_H: f32 = IDE_HEADER_MARGIN.top
     + IDE_HEADER_ROW_H
     + 7.0
     + IDE_HEADER_DESC_H
-    + 7.0
-    + IDE_HEADER_STATUS_H
     + IDE_HEADER_MARGIN.bottom;
 
 /// The `ide_module_header` panel frame's inner margin.
@@ -175,63 +178,8 @@ const IDE_HEADER_MARGIN: egui::Margin = egui::Margin {
     left: 14.0,
     right: 16.0,
     top: 8.0,
-    bottom: 12.0,
+    bottom: 11.0,
 };
-
-/// Height of one line in the header band's status slot, in points.
-///
-/// One `Small` (11pt) text row, which is what `RichText::small()` resolves to
-/// (`theme.rs`). Measured, not derived from `11.0 * 1.3`: `Fonts::row_height`
-/// reports `14.3` for that `FontId`, but the **galley** a one-line
-/// `layout_no_wrap` produces measures exactly `14.0`, and the galley is what
-/// gets painted and what a `ui.label` allocates. `14.0` is therefore the pitch
-/// that makes N stacked lines occupy exactly `N * 14.0` with no cumulative
-/// drift. Confirmed 2026-07-19 with the headless `egui::Context` + real bundled
-/// font + `theme::apply` harness described on [`IDE_HEADER_ROW_H`], and pinned
-/// by the `ide_header_status_slot_is_one_small_row_per_line` test.
-const IDE_HEADER_STATUS_LINE_H: f32 = 14.0;
-
-/// How many status lines the header band's slot reserves room for.
-///
-/// **Four, which is the true worst case — not a guess.** Enumerated from
-/// [`editor_status_lines`], which is the single place the message list is built:
-///
-/// 1. the state line (bundled / unsaved / all-saved) — **unconditional**;
-/// 2. *one* of "two UI sections share a name" or a `validate` error — the two
-///    are mutually exclusive branches of one `if`/`else if`;
-/// 3. "A Requires expression does not parse.";
-/// 4. a pending-identity line (either the blocking reason or the ready prompt).
-///
-/// All four can be live at once: a dirty draft whose sections collide, whose
-/// `Requires` does not parse, and which also has a staged rename is not exotic —
-/// it is what a half-finished edit looks like. So the slot holds the whole stack
-/// and no message is ever dropped, elided or scrolled away.
-///
-/// *Why reserve the worst case rather than the common one:* the slot is
-/// fixed-height inside an `exact_height` band (see [`IDE_HEADER_H`]), so
-/// under-reserving does not merely clip — it paints over the columns below, the
-/// exact failure mode that produced the black bar fixed in `1142dd8`. The lines
-/// that would overflow a smaller slot are precisely the ones explaining why Save
-/// is greyed out, so dropping them would hide the most load-bearing text in the
-/// band. [`render_editor_header_status_slot`] still `take`s this many
-/// defensively and debug-asserts the count, so a fifth message added to
-/// [`editor_status_lines`] without growing this constant trips a test rather
-/// than silently painting outside the band.
-const IDE_HEADER_STATUS_LINES: usize = 4;
-
-/// Height of the header band's reserved status-message slot, in points.
-///
-/// `4 * 14.0 = 56.0` — see [`IDE_HEADER_STATUS_LINES`] for why four, and
-/// [`IDE_HEADER_STATUS_LINE_H`] for why 14.
-///
-/// *Why the lines are packed at galley pitch with no `item_spacing.y` between
-/// them,* unlike the Config-mode body's stack of `ui.label`s (which egui spaces
-/// by 7pt): four lines plus three 7pt gaps would be `77`, pushing the band to
-/// `155` — half again the size the request asked for — to buy leading between
-/// four short one-line messages that are already a distinct size and colour from
-/// everything around them. `14.0` pitch on 11pt text is the font's own line
-/// height, i.e. normal single-spaced body leading, not a squeeze.
-const IDE_HEADER_STATUS_H: f32 = IDE_HEADER_STATUS_LINE_H * IDE_HEADER_STATUS_LINES as f32;
 
 /// Height of the header band's first row (name/version/author + action buttons),
 /// in points.
@@ -2631,13 +2579,12 @@ impl GuiApp {
                             // for the same space and re-creates the collision the
                             // band was built to fix. A row of its own cannot collide.
                             render_editor_header_description(ui, info.description.as_deref());
-                            // Third row: the draft's status messages, in a slot
-                            // reserved for the worst case so they appear and
-                            // vanish without moving anything (2026-07-19, issue
-                            // #26). They used to render in the editor body; see
-                            // [`IDE_HEADER_H`]'s *Why the status lines live here
-                            // at all* for why moving them was safe.
-                            render_editor_header_status_slot(ui, info);
+                            // NO third row. The draft's status messages render in
+                            // the diagnostics band below (2026-07-19, issue #26)
+                            // — see [`IDE_HEADER_H`]'s *Why the band holds no
+                            // status lines*. Adding one here re-opens the choice
+                            // between dead space and mid-keystroke reflow that
+                            // moving them out of this band is what avoids.
                         }
                     });
             }
@@ -2647,7 +2594,10 @@ impl GuiApp {
             // the nav footer and the launch band beside it, so all three bottom
             // edges align across the window. It must stay fixed even as content
             // grows, because a variable height here would reflow the editor column
-            // above it on every keystroke that changed the warning count.
+            // above it on every keystroke that changed the warning count. That
+            // fixed height plus the scroll area inside it is exactly why the
+            // draft's status lines moved in here (2026-07-19, issue #26): however
+            // many appear as the user types, the band does not move a pixel.
             let mono = self.general_config.mono_ui;
             egui::TopBottomPanel::bottom("ide_editor_band")
                 .exact_height(198.0)
@@ -2656,7 +2606,10 @@ impl GuiApp {
                     .fill(theme::PANEL2)
                     .inner_margin(egui::Margin::same(16.0)))
                 .show(ctx, |ui| {
-                    render_ide_diagnostics_band(ui, &diagnostics, mono);
+                    // `ide_header` is the SAME snapshot the header band above
+                    // rendered from — taken once per frame, before any panel, so
+                    // the two surfaces cannot disagree about the draft's state.
+                    render_ide_diagnostics_band(ui, ide_header.as_ref(), &diagnostics, mono);
                 });
         }
 
@@ -3324,68 +3277,114 @@ fn render_editor_header_description(ui: &mut egui::Ui, desc: Option<&str>) {
     }
 }
 
-/// The status messages for a draft: dirty state, then any schema / `Requires` /
-/// pending-identity diagnostics, in display order, each with its colour.
+/// One status message about the open draft, in both dialects the two surfaces
+/// that render it speak.
 ///
-/// *Why this is a list-builder and not a renderer* (2026-07-19, issue #26): the
-/// same messages now appear on two surfaces with two different layout rules —
-/// Config mode stacks them as ordinary `ui.label`s in the editor body
-/// ([`render_editor_status_lines`]), IDE mode paints them into a fixed-height
-/// slot in the header band ([`render_editor_header_status_slot`]). Duplicating
-/// the `if` ladder would let the two drift, and the drift would be invisible:
-/// each surface only ever shows one mode's version. Building the list once and
-/// laying it out twice makes "which messages" a single decision, and lets
-/// [`IDE_HEADER_STATUS_LINES`] be checked against the *only* place that can grow
-/// the stack.
+/// *Why an entry carries two presentations* (2026-07-19, issue #26): the same
+/// message list feeds Config mode's inline stack under the editor header, which
+/// colours by a per-message palette it has always used, and IDE mode's
+/// diagnostics band, which colours by [`DiagSeverity`]. Those are genuinely
+/// different schemes, not one scheme two ways: Config's state line is green when
+/// dirty, grey when clean and red when the module is bundled — three colours for
+/// what is a single informational message under the severity vocabulary. Mapping
+/// severity back onto Config's colours is therefore impossible without changing
+/// Config mode, which is out of scope, and duplicating the `if` ladder to give
+/// each surface its own list would let the two drift invisibly (each surface only
+/// ever shows one mode's version). Carrying both on the entry keeps *which
+/// messages exist* a single decision while leaving *how each surface paints them*
+/// to the surface.
+struct StatusLine {
+    text: String,
+    /// The colour Config mode draws this message in — preserved verbatim from
+    /// before the severity vocabulary existed, so that surface is byte-for-byte
+    /// unchanged.
+    config_color: egui::Color32,
+    /// How the IDE diagnostics band ranks and paints this message.
+    severity: DiagSeverity,
+}
+
+/// The status messages for a draft: dirty state first, then any schema /
+/// `Requires` / pending-identity problems, in display order.
 ///
-/// The first entry is **unconditional** — that is what keeps the clean→dirty
-/// transition on the first keystroke from inserting a new line and reflowing
-/// whatever sits below.
-fn editor_status_lines(info: &EditorHeaderInfo) -> Vec<(String, egui::Color32)> {
-    let mut out: Vec<(String, egui::Color32)> = Vec::new();
-    // State line. ALWAYS present (greyed when clean).
+/// **The first entry is unconditional and always [`DiagSeverity::Info`]** — it
+/// is the draft's state line, and both surfaces rely on it being there. The
+/// diagnostics band pins it to the top of its list in info blue; Config mode
+/// keeps it as the first label under the header. Nothing else in the list is
+/// ever `Info`, which is what lets the band's tally count "problems" by simply
+/// skipping the info entries ([`ide_diagnostic_entries`]).
+/// [`status_lines_have_exactly_one_pinned_info_line`] pins both halves of that
+/// over every combination of flags that can add a message.
+fn editor_status_lines(info: &EditorHeaderInfo) -> Vec<StatusLine> {
+    let mut out: Vec<StatusLine> = Vec::new();
+    let mut push = |text: String, config_color: egui::Color32, severity: DiagSeverity| {
+        out.push(StatusLine { text, config_color, severity });
+    };
+    // State line. ALWAYS present (greyed when clean), ALWAYS `Info`: it says
+    // what the draft *is*, not what is wrong with it — even the bundled/read-only
+    // variant, which reports a property of the module rather than a defect the
+    // user can fix.
     if !info.editable {
-        out.push((
+        push(
             "Bundled module \u{2014} read-only. Fork to edit (coming soon).".to_string(),
             theme::COL_GLOBAL,
-        ));
+            DiagSeverity::Info,
+        );
     } else if info.dirty {
-        out.push((
+        push(
             "Unsaved changes \u{2014} config autosave paused until you Save or Discard."
                 .to_string(),
             theme::COL_PROFILE,
-        ));
+            DiagSeverity::Info,
+        );
     } else {
-        out.push(("All changes saved.".to_string(), theme::FAINT));
+        push("All changes saved.".to_string(), theme::FAINT, DiagSeverity::Info);
     }
     // Explain *why* Save is greyed for a schema problem. Duplicate section
     // names collapse when folded into the `IndexMap` before `validate` sees
     // them, so that case is caught by `sections_unique` separately.
+    //
+    // `Error`, not `Warning`, for all three of the next blocks: each one is a
+    // condition `Draft::save_enabled` gates on, so each is literally the reason
+    // an action is refused, not advice about one that would still work.
     if info.editable && !info.sections_unique {
-        out.push((
+        push(
             "Cannot save: two UI sections share a name \u{2014} rename one.".to_string(),
             theme::COL_GLOBAL,
-        ));
+            DiagSeverity::Error,
+        );
     } else if info.editable {
         if let Some(reason) = &info.validate_err {
-            out.push((format!("Cannot save: {reason}"), theme::COL_GLOBAL));
+            push(format!("Cannot save: {reason}"), theme::COL_GLOBAL, DiagSeverity::Error);
         }
     }
     if info.editable && !info.req_ok {
-        out.push((
+        push(
             "A Requires expression does not parse.".to_string(),
             theme::COL_GLOBAL,
-        ));
+            DiagSeverity::Error,
+        );
     }
     // Pending-identity feedback: why Rename is blocked, or a ready prompt.
     if info.editable && info.has_identity {
         match &info.identity_err {
-            Some(reason) => out.push((format!("Cannot rename: {reason}"), theme::COL_GLOBAL)),
-            None => out.push((
+            // Blocks Rename → error, same rule as the save gates above.
+            Some(reason) => push(
+                format!("Cannot rename: {reason}"),
+                theme::COL_GLOBAL,
+                DiagSeverity::Error,
+            ),
+            // *Why `Warning` and not a second `Info`:* the rename is staged but
+            // NOT applied, so the draft's on-disk identity and its edited one
+            // disagree until the user acts — an unfinished state that wants
+            // attention, which is what a warning is. Keeping it out of `Info`
+            // also preserves the "exactly one info entry" rule the band's tally
+            // and pinning both lean on.
+            None => push(
                 "Pending identity change \u{2014} press Rename to migrate saved settings and apply it."
                     .to_string(),
                 theme::COL_PROFILE,
-            )),
+                DiagSeverity::Warning,
+            ),
         }
     }
     out
@@ -3398,84 +3397,25 @@ fn editor_status_lines(info: &EditorHeaderInfo) -> Vec<(String, egui::Color32)> 
 /// *Why the growth is acceptable here and not in IDE mode* (2026-07-19, issue
 /// #26): this stack is inside the editor column's own scroll area, so a line
 /// appearing mid-keystroke shifts only the fields underneath it — the behaviour
-/// Config mode has always had. IDE mode's band spans the editor **and** the
-/// preview column, so the same growth would shove half the window down; that
-/// surface uses [`render_editor_header_status_slot`] instead, which reserves the
-/// worst case up front. Both draw the same messages from
+/// Config mode has always had. IDE mode's header band spans the editor **and**
+/// the preview column, so the same growth there would shove half the window
+/// down; that mode draws these messages in its diagnostics band instead
+/// ([`ide_diagnostic_entries`]), inside a scroll area that absorbs any number of
+/// them at no height cost. Both surfaces draw the same messages from
 /// [`editor_status_lines`].
 ///
-/// *Why Config was not simply switched to the fixed slot too:* Config's header
-/// is natural-sized by design (`GuiApp::render_module_detail_header`), so a
-/// fixed reservation there would only add dead space to a column that has no
-/// reflow problem to solve. Config mode's behaviour is deliberately byte-for-byte
-/// what it was before issue #26.
+/// *Why Config mode was left exactly as it was:* it has no reflow problem to
+/// solve and no diagnostics band to move anything into, and its per-message
+/// palette predates the [`DiagSeverity`] vocabulary. It therefore keeps painting
+/// by [`StatusLine::config_color`] — deliberately byte-for-byte what it rendered
+/// before issue #26.
 fn render_editor_status_lines(ui: &mut egui::Ui, info: &EditorHeaderInfo) {
-    for (text, color) in editor_status_lines(info) {
-        ui.label(egui::RichText::new(text).color(color).small());
-    }
-}
-
-/// The status lines as the **IDE header band** renders them: painted into a slot
-/// of exactly [`IDE_HEADER_STATUS_H`] points, however many there are.
-///
-/// **Invariant: this occupies [`IDE_HEADER_STATUS_H`] points, unconditionally** —
-/// the same contract [`render_editor_header_description`] holds, for the same
-/// reason and by the same means. The rect is allocated *before* the messages are
-/// consulted, so one message and four cost identical height and the band does
-/// not twitch as the user types. Each line is painted as a galley rather than
-/// added as a `Label`, because a `Label` sizes its `Ui` from its galley and the
-/// galley is exactly the thing that must not be allowed to.
-///
-/// Long messages elide to one line with an ellipsis (a `validate` error carries
-/// an arbitrary-length reason string, so this is a live case, not a theoretical
-/// one) and the full text is available on hover, so nothing is lost. The tooltip
-/// is attached only when something *was* elided — a tooltip repeating what you
-/// can already read is noise.
-///
-/// The `take` and the `debug_assert!` below are a tripwire, not a policy: four is
-/// the worst case [`editor_status_lines`] can produce today
-/// ([`IDE_HEADER_STATUS_LINES`] enumerates it), so the `take` never actually
-/// truncates. If a fifth message is ever added, the assert fires in tests and dev
-/// builds and the `take` keeps a release build painting inside the band instead
-/// of over the columns below it.
-fn render_editor_header_status_slot(ui: &mut egui::Ui, info: &EditorHeaderInfo) {
-    // Reserve the slot FIRST — before the messages are even built — so every
-    // path through this function costs the same height.
-    let (rect, resp) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), IDE_HEADER_STATUS_H),
-        egui::Sense::hover(),
-    );
-    let lines = editor_status_lines(info);
-    debug_assert!(
-        lines.len() <= IDE_HEADER_STATUS_LINES,
-        "editor_status_lines produced {} lines but the header slot reserves {} \u{2014} \
-         grow IDE_HEADER_STATUS_LINES (and with it IDE_HEADER_H) or the extra line \
-         paints over the editor/preview columns",
-        lines.len(),
-        IDE_HEADER_STATUS_LINES,
-    );
-    let font = egui::TextStyle::Small.resolve(ui.style());
-    let mut elided: Vec<String> = Vec::new();
-    for (i, (text, color)) in lines.iter().take(IDE_HEADER_STATUS_LINES).enumerate() {
-        let mut job = egui::text::LayoutJob::simple_singleline(text.clone(), font.clone(), *color);
-        job.wrap.max_width = rect.width();
-        job.wrap.max_rows = 1;
-        job.wrap.overflow_character = Some('\u{2026}');
-        let galley = ui.fonts(|f| f.layout_job(job));
-        if galley.elided {
-            elided.push(text.clone());
-        }
-        // Fixed pitch off the slot's top edge — NOT the previous galley's
-        // height. Every line is one `Small` row, but pinning the pitch to the
-        // constant the slot is sized from means N lines land inside N *
-        // IDE_HEADER_STATUS_LINE_H by construction, with no way for a rounding
-        // difference to accumulate into an overrun.
-        let y = rect.top() + i as f32 * IDE_HEADER_STATUS_LINE_H;
-        ui.painter()
-            .galley(egui::pos2(rect.left(), y), galley, *color);
-    }
-    if !elided.is_empty() {
-        resp.on_hover_text(elided.join("\n"));
+    for line in editor_status_lines(info) {
+        ui.label(
+            egui::RichText::new(line.text)
+                .color(line.config_color)
+                .small(),
+        );
     }
 }
 
@@ -3561,9 +3501,9 @@ impl GuiApp {
     /// IDE mode passes `false`: it renders the same row via
     /// [`render_editor_header_row`] in a full-width `TopBottomPanel` spanning the
     /// editor *and* preview columns, and dispatches the action itself. The status
-    /// lines follow the header row: rendered here in Config mode
-    /// ([`render_editor_status_lines`]), and in the band in IDE mode
-    /// ([`render_editor_header_status_slot`]) as of issue #26.
+    /// lines follow the header row in Config mode ([`render_editor_status_lines`]);
+    /// IDE mode shows the same messages in its diagnostics band instead
+    /// ([`ide_diagnostic_entries`]) as of issue #26.
     fn render_module_editor(&mut self, ui: &mut egui::Ui, id: &str, header_inline: bool) {
         let touch = self.general_config.touch_mode;
         // IDE mode always runs full-width: its editor column is already sized by the
@@ -3626,7 +3566,7 @@ impl GuiApp {
             action = render_editor_header_row(ui, &mut cache, &info, false);
             // Status lines follow the header row, so they render here only on
             // the path that owns that row. IDE mode draws the same messages in
-            // its header band instead (`render_editor_header_status_slot`);
+            // its diagnostics band instead (`ide_diagnostic_entries`);
             // rendering them here too would put them on screen twice
             // (2026-07-19, issue #26). Gated on `header_inline` rather than
             // `self.mode` because `header_inline` is what actually says "this
@@ -4984,6 +4924,109 @@ fn lossy_env_overwrites(specs: &[Extension], res: &Resolution) -> Vec<EnvOverwri
     out
 }
 
+/// How serious one entry in the IDE diagnostics band is.
+///
+/// *Why a three-level vocabulary* (2026-07-19, issue #26): the band used to hold
+/// exactly one kind of thing — env-var overwrite warnings — so severity could be
+/// implicit in the one colour and one icon it drew. It now also holds the open
+/// draft's status messages, which span "here is what this draft is" (info),
+/// "something is staged but unfinished" (warning) and "this is why Save is
+/// greyed out" (error). Naming the three makes the band's ordering, its tally
+/// and its empty state all derive from one axis instead of three ad-hoc `if`s,
+/// and gives the ok/warning/error tally the heading row was built as a growth
+/// point for something real to count.
+///
+/// *Why `Warning` and `Error` share [`theme::COL_GLOBAL`]:* `theme.rs` has no
+/// amber. Its palette is scope colours (global red / profile green / game blue)
+/// plus chrome, and `COL_GLOBAL` already doubles as the danger colour
+/// (`docs/ui/STYLING-GUIDE.md`), which is what the band's warnings have always
+/// been drawn in. Inventing a `Color32` literal here would violate the styling
+/// guide's top-level rule, so the two ranks are distinguished by **icon** — a
+/// triangle for a warning, a filled circle for an error — and share the colour.
+/// **A dedicated `COL_WARN` (amber) / `COL_ERROR` (red) pair in `theme.rs` is
+/// the right fix** and would let this `color()` split cleanly; it is deliberately
+/// not done here because adding palette tokens is a theme decision, not a
+/// diagnostics-band one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiagSeverity {
+    /// State, not a problem: the draft's dirty/clean/read-only line. Always
+    /// exactly one, always pinned to the top of the list, and never counted by
+    /// the tally.
+    Info,
+    /// Something is unfinished or lossy but no action is being refused: an
+    /// env-var overwrite, a staged-but-unapplied rename.
+    Warning,
+    /// The reason an action is refused — every `Draft::save_enabled` gate, plus a
+    /// blocked Rename.
+    Error,
+}
+
+impl DiagSeverity {
+    /// The text colour for this rank. Info is the accent blue; see the type's
+    /// doc comment for why the other two are the same red.
+    fn color(self) -> egui::Color32 {
+        match self {
+            DiagSeverity::Info => theme::ACCENT,
+            DiagSeverity::Warning | DiagSeverity::Error => theme::COL_GLOBAL,
+        }
+    }
+
+    /// The leading Nerd Font glyph. This is the *only* thing separating a
+    /// warning from an error visually, so the three must stay distinct shapes:
+    /// circled `i`, triangle `!`, circled `!`.
+    fn icon(self) -> &'static str {
+        match self {
+            DiagSeverity::Info => "\u{f05a}",
+            // Unchanged from before issue #26 — the env-overwrite warnings this
+            // band already drew used this glyph, and they are still warnings.
+            DiagSeverity::Warning => "\u{f071}",
+            DiagSeverity::Error => "\u{f06a}",
+        }
+    }
+}
+
+/// One rendered line of the IDE diagnostics band.
+struct DiagEntry {
+    severity: DiagSeverity,
+    text: String,
+}
+
+/// Everything the diagnostics band shows, in display order: the open draft's
+/// status messages first, then the launch-preview env-overwrite warnings.
+///
+/// *Why the draft's messages come first* (2026-07-19, issue #26): they are about
+/// the thing the user is typing into right now, while the env-overwrite warnings
+/// are about how the whole module set composes at launch. The first entry —
+/// always [`DiagSeverity::Info`], always the state line, guaranteed by
+/// [`editor_status_lines`] — is therefore pinned at the very top of the list, in
+/// info blue, which is what the user asked for: it is the answer to "is my work
+/// saved", and that question should not move down the list as errors appear
+/// above it.
+///
+/// The rest keeps source order rather than sorting by severity. Sorting would
+/// scramble [`editor_status_lines`]' deliberate sequence (state → why Save is
+/// blocked → why Rename is blocked), and with the whole list visible in a scroll
+/// area there is no truncation for a sort to protect against.
+///
+/// `info` is `None` when no draft has resolved yet (a module switch, before
+/// `ensure_draft` catches up); the band then shows only the env warnings, which
+/// are computed independently of the draft.
+fn ide_diagnostic_entries(
+    info: Option<&EditorHeaderInfo>,
+    diagnostics: &[EnvOverwrite],
+) -> Vec<DiagEntry> {
+    let mut out: Vec<DiagEntry> = Vec::new();
+    if let Some(info) = info {
+        for line in editor_status_lines(info) {
+            out.push(DiagEntry { severity: line.severity, text: line.text });
+        }
+    }
+    for d in diagnostics {
+        out.push(DiagEntry { severity: DiagSeverity::Warning, text: d.message() });
+    }
+    out
+}
+
 /// Contents of `ide_editor_band` — the diagnostics band under the editor column.
 ///
 /// Deliberately shaped as a *down payment* on the full diagnostics panel the IDE
@@ -4991,29 +5034,59 @@ fn lossy_env_overwrites(specs: &[Extension], res: &Resolution) -> Vec<EnvOverwri
 /// has to be torn out to build it:
 ///
 /// - The header is a **row**, not a bare label: the title sits left, a right-aligned
-///   tally sits opposite it. Today the tally has one severity in it; adding ok and
-///   error counts is appending to that row, and nothing below moves.
+///   tally sits opposite it. As of issue #26 the tally has two severities in it;
+///   adding an ok count is appending to that row, and nothing below moves.
 /// - The list is a **scroll area inside the framed box**, matching the launch band
 ///   beside it pixel for pixel (same `FIELD` fill, `BORDER` stroke, 8px rounding,
 ///   13/11 margins). The two 198px bands are peers and have to read as peers; more
 ///   diagnostics simply scroll rather than growing the band.
+///
+/// *Why the draft's status messages render here* (2026-07-19, issue #26): see
+/// [`IDE_HEADER_H`]'s *Why the band holds no status lines*. The short version is
+/// that this band was already fixed-height, always visible and scrolling, so it
+/// absorbs them for free — and most of them are diagnostics in the first place.
+/// [`ide_diagnostic_entries`] assembles the combined list.
+///
+/// *Why the tally counts warnings and errors but not info* (2026-07-19, issue
+/// #26): exactly one `Info` entry is always present (the state line), so counting
+/// it would mean the band never reads below "1" and a clean draft would claim to
+/// have an issue. The tally answers "how much is wrong", and the info line is by
+/// definition not wrong. Errors are named first and warnings second, because that
+/// is the order the user has to deal with them in.
 ///
 /// *Why an explicit "No issues" line rather than an empty box:* the band is a fixed
 /// 198px and always visible, so "nothing wrong" and "lint didn't run" would look
 /// identical if it rendered blank — the one state a diagnostics surface most needs
 /// to distinguish. It is drawn in `FAINT`, not a success green: the quiet absence of
 /// a problem is not an achievement to celebrate, and a coloured line would pull the
-/// eye to the emptiest thing on screen.
-fn render_ide_diagnostics_band(ui: &mut egui::Ui, diagnostics: &[EnvOverwrite], mono: bool) {
+/// eye to the emptiest thing on screen. It is keyed to the *problem* count, not the
+/// entry count, so it still appears under the pinned info line — a clean draft
+/// reads "All changes saved." then "No issues.", which is the clean state stated
+/// twice over rather than an empty box under a lone blue line.
+fn render_ide_diagnostics_band(
+    ui: &mut egui::Ui,
+    info: Option<&EditorHeaderInfo>,
+    diagnostics: &[EnvOverwrite],
+    mono: bool,
+) {
     let sep = icon_sep(mono);
+    let entries = ide_diagnostic_entries(info, diagnostics);
+    let count = |s: DiagSeverity| entries.iter().filter(|e| e.severity == s).count();
+    let (errors, warnings) = (count(DiagSeverity::Error), count(DiagSeverity::Warning));
     ui.horizontal(|ui| {
         ui.label(theme::header_label("Diagnostics"));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if !diagnostics.is_empty() {
-                let n = diagnostics.len();
-                let word = if n == 1 { "warning" } else { "warnings" };
+            // Zero counts are omitted rather than shown as "0 errors": the row is
+            // a status summary, not a table, and "3 warnings" alone is quieter and
+            // faster to read than "0 errors \u{b7} 3 warnings".
+            let parts: Vec<String> = [(errors, "error"), (warnings, "warning")]
+                .iter()
+                .filter(|(n, _)| *n > 0)
+                .map(|(n, word)| format!("{n} {word}{}", if *n == 1 { "" } else { "s" }))
+                .collect();
+            if !parts.is_empty() {
                 ui.label(
-                    egui::RichText::new(format!("{n} {word}"))
+                    egui::RichText::new(parts.join(" \u{b7} "))
                         .color(theme::COL_GLOBAL)
                         .size(11.0)
                         .strong(),
@@ -5040,18 +5113,24 @@ fn render_ide_diagnostics_band(ui: &mut egui::Ui, diagnostics: &[EnvOverwrite], 
                 .id_salt("ide_diag_scroll")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    if diagnostics.is_empty() {
+                    for e in &entries {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{}{sep}{}",
+                                e.severity.icon(),
+                                e.text
+                            ))
+                            .color(e.severity.color())
+                            .small(),
+                        );
+                    }
+                    // Keyed to problems, not entries — see this function's doc
+                    // comment. With no draft resolved and no warnings there are
+                    // no entries at all, and this is the only line in the box.
+                    if errors + warnings == 0 {
                         ui.label(
                             egui::RichText::new(format!("\u{f00c}{sep}No issues."))
                                 .color(theme::FAINT)
-                                .small(),
-                        );
-                        return;
-                    }
-                    for d in diagnostics {
-                        ui.label(
-                            egui::RichText::new(format!("\u{f071}{sep}{}", d.message()))
-                                .color(theme::COL_GLOBAL)
                                 .small(),
                         );
                     }
@@ -8839,14 +8918,14 @@ mod tests {
         }
     }
 
-    /// An [`EditorHeaderInfo`] with every optional status line switched on.
+    /// An [`EditorHeaderInfo`] with every optional status line switched on:
+    /// dirty (state line) + colliding section names + an unparseable `Requires`
+    /// + a blocked pending rename.
     ///
-    /// This is the worst case [`IDE_HEADER_STATUS_LINES`] is sized for: dirty
-    /// (state line) + colliding section names + an unparseable `Requires` + a
-    /// blocked pending rename. `validate_err` is `Some` as well, to prove the
-    /// `sections_unique`/`validate_err` pair really is one line and not two —
-    /// if that `else if` ever became a second `if`, the stack would hit five and
-    /// the assertions below would catch it.
+    /// `validate_err` is `Some` as well, to prove the
+    /// `sections_unique`/`validate_err` pair really is one line and not two — if
+    /// that `else if` ever became a second `if`, the stack would grow a line and
+    /// the exhaustive walk below would see it.
     fn worst_case_header_info() -> EditorHeaderInfo {
         EditorHeaderInfo {
             name: "Gamescope".to_string(),
@@ -8864,17 +8943,42 @@ mod tests {
         }
     }
 
-    /// The status stack never exceeds the slot the header band reserves for it.
+    /// Every draft state produces **exactly one** [`DiagSeverity::Info`] status
+    /// line, and it is always the first one.
     ///
-    /// *Why this is a test and not a comment:* [`IDE_HEADER_STATUS_LINES`] is a
-    /// hand-counted enumeration of [`editor_status_lines`]'s branches, and
-    /// hand-counted enumerations rot the moment someone adds a branch. The band
-    /// is `exact_height`, so the rot is not cosmetic — a fifth line would paint
-    /// over the editor and preview columns (the black-bar failure mode of
-    /// `1142dd8`, in reverse). This walks every combination of the flags that can
-    /// add a line, so a new branch has to either fit or fail here.
+    /// *What this used to assert, and why it changed* (2026-07-19, issue #26):
+    /// this was `status_line_count_never_exceeds_the_reserved_slot`, and it
+    /// bounded the stack at four — the number of lines the IDE header band
+    /// reserved space for, where a fifth would have painted over the editor and
+    /// preview columns (the black-bar failure mode of `1142dd8`, in reverse).
+    /// That bound is **gone, deliberately**: the messages now render in the
+    /// diagnostics band's scroll area, which absorbs any number of them at no
+    /// height cost, so there is no longer a layout budget for a message count to
+    /// overrun. Asserting a ceiling nothing enforces would be theatre.
+    ///
+    /// The exhaustive 128-combination walk is kept, because two *new* invariants
+    /// took the old one's place and both are exactly as easy to break by adding
+    /// a branch to [`editor_status_lines`]:
+    ///
+    /// 1. **At least one line, always** — the state line is unconditional. The
+    ///    diagnostics band pins index 0 to the top of its list; if the ladder
+    ///    could produce an empty list, that pinning would silently promote a
+    ///    warning into the info slot and paint it accent blue.
+    /// 2. **Exactly one `Info`, and it is index 0** — the band's tally counts
+    ///    problems by skipping info entries, so a second `Info` would be a
+    ///    message that renders as informational and is counted as nothing. It
+    ///    would simply never show up in the heading row.
+    ///
+    /// The old "the reservation is tight" check is kept in spirit as the
+    /// `MAX_LINES` assertion below: it no longer guards a layout budget, but it
+    /// still catches the ladder growing a branch nobody described.
     #[test]
-    fn status_line_count_never_exceeds_the_reserved_slot() {
+    fn status_lines_have_exactly_one_pinned_info_line() {
+        /// The four branches [`editor_status_lines`] enumerates: state line,
+        /// section-collision *or* validate error, `Requires` parse, pending
+        /// identity. Not a layout budget any more — a description of the ladder,
+        /// asserted tight so it cannot silently stop describing it.
+        const MAX_LINES: usize = 4;
         let mut worst = 0usize;
         for editable in [true, false] {
             for dirty in [true, false] {
@@ -8895,7 +8999,8 @@ mod tests {
                                             .then(|| "nope".to_string()),
                                         ..worst_case_header_info()
                                     };
-                                    let n = editor_status_lines(&info).len();
+                                    let lines = editor_status_lines(&info);
+                                    let n = lines.len();
                                     // Spelled out rather than `{info:?}`:
                                     // `EditorHeaderInfo` is production state and
                                     // does not derive `Debug` just to serve a
@@ -8907,14 +9012,30 @@ mod tests {
                                          has_identity={has_identity} \
                                          identity_err={identity_err}"
                                     );
-                                    // The state line is unconditional — that is
-                                    // what stops the first keystroke inserting a
-                                    // row and reflowing what sits below.
+                                    // The state line is unconditional.
                                     assert!(n >= 1, "no state line for {case}");
+                                    assert_eq!(
+                                        lines[0].severity,
+                                        DiagSeverity::Info,
+                                        "the first status line is {:?}, not Info, for \
+                                         {case} \u{2014} the diagnostics band pins index \
+                                         0 to the top of its list in info blue",
+                                        lines[0].severity,
+                                    );
+                                    let infos = lines
+                                        .iter()
+                                        .filter(|l| l.severity == DiagSeverity::Info)
+                                        .count();
+                                    assert_eq!(
+                                        infos, 1,
+                                        "{infos} Info status lines for {case} \u{2014} the \
+                                         band's tally skips Info, so a second one would \
+                                         render as a message nothing counts",
+                                    );
                                     assert!(
-                                        n <= IDE_HEADER_STATUS_LINES,
-                                        "{n} status lines for {case}, but the header \
-                                         slot reserves {IDE_HEADER_STATUS_LINES}",
+                                        n <= MAX_LINES,
+                                        "{n} status lines for {case}, but the ladder is \
+                                         documented as having {MAX_LINES} branches",
                                     );
                                     worst = worst.max(n);
                                 }
@@ -8924,51 +9045,74 @@ mod tests {
                 }
             }
         }
-        // Not just "fits" — the reservation must be *tight*. If the real worst
-        // case ever drops below the constant, the band is carrying dead points
-        // and this says so instead of letting them sit there unnoticed.
+        // Tight, not just "fits": if nothing can reach MAX_LINES any more, the
+        // enumeration above has stopped describing the ladder and should be
+        // corrected rather than left as a comfortable over-estimate.
         assert_eq!(
-            worst, IDE_HEADER_STATUS_LINES,
-            "the slot reserves {IDE_HEADER_STATUS_LINES} lines but nothing can \
+            worst, MAX_LINES,
+            "the ladder is documented as {MAX_LINES} branches but nothing can \
              produce more than {worst}",
         );
     }
 
-    /// One status line costs exactly [`IDE_HEADER_STATUS_LINE_H`].
+    /// The diagnostics band's list: the draft's info line pinned first, its
+    /// problems next, the env-overwrite warnings last — and the tally counting
+    /// the problems only.
     ///
-    /// Pins the measured `14.0` (see that constant's doc comment for why it is
-    /// not `Fonts::row_height`'s `14.3`, nor `11.0 * 1.3`) against the real
-    /// bundled font in both UI-font settings, since `mono_ui` is a user setting
-    /// and could in principle carry different metrics.
+    /// *Why this replaces `ide_header_status_slot_is_one_small_row_per_line`*
+    /// (2026-07-19, issue #26): that test pinned the 14pt galley pitch the
+    /// header band's fixed status slot was sized from. The slot is gone, so the
+    /// pitch is not load-bearing any more — the band lays these out as ordinary
+    /// `ui.label`s inside a scroll area. What *is* load-bearing now is the
+    /// assembly: which entry comes first, what rank each source gets, and what
+    /// the tally counts. That is what this asserts instead.
     #[test]
-    fn ide_header_status_slot_is_one_small_row_per_line() {
-        for mono in [true, false] {
-            let ctx = egui::Context::default();
-            crate::fonts::install(&ctx, mono);
-            crate::theme::apply(&ctx);
-            let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::pos2(0.0, 0.0),
-                    egui::vec2(1200.0, 900.0),
-                )),
-                ..Default::default()
-            };
-            let _ = ctx.run(input, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    let font = egui::TextStyle::Small.resolve(ui.style());
-                    let galley = ui.fonts(|f| {
-                        f.layout_no_wrap("All changes saved.".to_string(), font, theme::FAINT)
-                    });
-                    assert_eq!(
-                        galley.size().y,
-                        IDE_HEADER_STATUS_LINE_H,
-                        "mono={mono}: a Small galley measures {}, not the \
-                         IDE_HEADER_STATUS_LINE_H the slot is sized from",
-                        galley.size().y,
-                    );
-                });
-            });
-        }
+    fn diagnostic_entries_pin_the_info_line_and_rank_env_warnings() {
+        let info = worst_case_header_info();
+        let env = [EnvOverwrite {
+            var: "DXVK_HUD".to_string(),
+            victims: vec!["MangoHud".to_string()],
+            culprit: "Gamescope".to_string(),
+            by_unset: false,
+        }];
+        let entries = ide_diagnostic_entries(Some(&info), &env);
+
+        // Pinned info line, first, whatever else is in the list.
+        assert_eq!(entries[0].severity, DiagSeverity::Info);
+        assert_eq!(entries[0].text, editor_status_lines(&info)[0].text);
+        // Env warnings land after the draft's own messages, and are warnings.
+        let last = entries.last().expect("at least the env warning");
+        assert_eq!(last.severity, DiagSeverity::Warning);
+        assert!(last.text.contains("DXVK_HUD"), "{}", last.text);
+
+        // The tally the heading row draws: problems only, info excluded.
+        let count = |s: DiagSeverity| entries.iter().filter(|e| e.severity == s).count();
+        assert_eq!(count(DiagSeverity::Info), 1, "exactly one pinned info line");
+        // worst_case_header_info: section collision (validate_err is the same
+        // `else if` branch, so it does NOT add a line), unparseable Requires,
+        // blocked rename \u{2014} three errors. Plus the one env warning.
+        assert_eq!(count(DiagSeverity::Error), 3);
+        assert_eq!(count(DiagSeverity::Warning), 1);
+
+        // No draft resolved yet: env warnings only, and nothing to pin.
+        let no_draft = ide_diagnostic_entries(None, &env);
+        assert_eq!(no_draft.len(), 1);
+        assert_eq!(no_draft[0].severity, DiagSeverity::Warning);
+
+        // Clean draft, no env warnings: one info entry and zero problems, which
+        // is what makes the band draw "No issues." under the pinned line rather
+        // than leaving an empty box.
+        let clean = EditorHeaderInfo {
+            dirty: false,
+            sections_unique: true,
+            validate_err: None,
+            req_ok: true,
+            has_identity: false,
+            ..worst_case_header_info()
+        };
+        let clean_entries = ide_diagnostic_entries(Some(&clean), &[]);
+        assert_eq!(clean_entries.len(), 1);
+        assert_eq!(clean_entries[0].severity, DiagSeverity::Info);
     }
 
     /// The IDE header band's content lays out to **exactly** [`IDE_HEADER_H`].
@@ -8983,14 +9127,25 @@ mod tests {
     /// band carries dead space nobody notices. Neither shows up in `cargo
     /// check`, and both are one careless margin edit away.
     ///
-    /// So this reproduces the real panel's frame — same margins, same three
+    /// So this reproduces the real panel's frame — same margins, same **two**
     /// rows, real bundled font, real `theme::apply` — and asserts the laid-out
     /// height equals the constant on the nose. `min_rect` (not the cursor) is
     /// the measurement, because the cursor sits one `item_spacing.y` *past* the
     /// last widget and would overcount by 7.
     ///
-    /// Run with the worst-case status stack: that is the case the slot is sized
-    /// for, and the one that overruns first if a term is wrong.
+    /// *Why two rows and not three* (2026-07-19, issue #26, revised same day):
+    /// the third row was the fixed status slot, which has moved to the
+    /// diagnostics band — so the measured content is the heading row and the
+    /// description, and the expected sum dropped from `134.0` back to `70.0`.
+    /// The test is otherwise untouched: it is the only thing standing between a
+    /// margin edit and the black bar, and it still measures the real widgets
+    /// rather than a re-declared copy of their numbers.
+    ///
+    /// The status stack in `worst_case_header_info` no longer affects this
+    /// measurement at all — kept as the fixture because the *header row* still
+    /// reads `dirty`/`save_on` from it, and a fixture whose flags are all set is
+    /// the one most likely to surface a row that sizes itself differently when
+    /// something is wrong.
     #[test]
     fn ide_header_content_is_exactly_ide_header_h() {
         for mono in [true, false] {
@@ -9021,15 +9176,16 @@ mod tests {
                     // expands to fill the viewport, so its `min_rect` reports
                     // the window height (900) and says nothing about the rows.
                     // A scope's response rect is its child `Ui`'s `min_rect`,
-                    // which is exactly the three rows and the gaps between them
+                    // which is exactly the two rows and the gap between them
                     // — and unlike a cursor delta it does not include the
                     // trailing `item_spacing.y` that follows the last widget.
                     let content = ui
                         .scope(|ui| {
-                            // `ide_mode: true` — the band's own call.
+                            // `ide_mode: true` — the band's own call. These two
+                            // calls must stay in step with the panel's closure:
+                            // a row rendered there and not here measures short.
                             let _ = render_editor_header_row(ui, &mut cache, &info, true);
                             render_editor_header_description(ui, info.description.as_deref());
-                            render_editor_header_status_slot(ui, &info);
                         })
                         .response
                         .rect;

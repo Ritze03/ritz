@@ -204,26 +204,36 @@ the problem somewhere else.
                + IDE_HEADER_ROW_H     (27)   heading + button row (button-driven)
                + 7.0                         item_spacing.y
                + IDE_HEADER_DESC_H    (17)   one-line description slot
-               + 7.0                         item_spacing.y
-               + IDE_HEADER_STATUS_H  (56)   reserved status slot (4 x 14)
-               + IDE_HEADER_MARGIN.bottom (12)  bottom inset
-               = 134.0
+               + IDE_HEADER_MARGIN.bottom (11)  bottom inset
+               = 70.0
   ```
 
   The frame's `inner_margin` is `IDE_HEADER_MARGIN`
-  (`{ left: 14.0, right: 16.0, top: 8.0, bottom: 12.0 }`) — a **shared constant**, not a
+  (`{ left: 14.0, right: 16.0, top: 8.0, bottom: 11.0 }`) — a **shared constant**, not a
   literal at the panel, because two of its four numbers are terms of the sum that sizes
   the panel. Written twice, a margin edit that failed to reach the sum would reintroduce
   the black bar below with no compile error and no test failure (verified: changing only
   the panel's copy left every test green). The test
-  `ide_header_content_is_exactly_ide_header_h` renders the real three rows headlessly,
+  `ide_header_content_is_exactly_ide_header_h` renders the real two rows headlessly,
   with the real bundled font and `theme::apply`, and asserts the laid-out content plus
   those margins equals `IDE_HEADER_H` on the nose.
 
-  *Where 134 comes from* (2026-07-19, issue #26): the band grew from `70.0` to hold the
-  status lines, which moved up into it — see the status-slot bullet below for the
-  reserved-slot design and why the target figure in the request (~110px) was not the
-  number that came out. *Where the original 70 came from*
+  *The band briefly held the status lines, and no longer does* (2026-07-19, issue #26,
+  revised the same day): commit `7f6109c` hoisted the draft's status messages into this
+  band as a third row, in a slot reserved for the four-line worst case, which put
+  `IDE_HEADER_H` at `134.0` and the bottom margin at `12`. It was rejected on sight —
+  *"It's way too large."* Only the first status line is normally present, so three of the
+  four reserved rows (~42pt, a third of the band) were permanently empty. Shrinking the
+  reservation to one line and letting the band grow per message was considered and
+  dropped in favour of the user's own better suggestion: *"We could move it into the
+  diagnostic view?"* **The status lines now live in the diagnostics band** — see
+  "Diagnostics band" below for why that surface absorbs them for free. This band is back
+  to exactly the two rows and the `70.0` it had before `7f6109c`, bottom margin included
+  (the `12` existed only because an 11pt `Small` status row sits 1pt closer to its slot's
+  bottom edge than the 13pt description does; with the description last again, the point
+  goes back).
+
+  *Where the original 70 came from*
   (2026-07-19): the first cut was one row (`6 + 23 + 8 = 37`), then two rows at
   `6 + 23 + 7 + 16 + 8 = 60` (top/bottom inset `6`/`8`) — both read as cramped beside
   Config mode's module header. That header (`render_module_detail_header`) is **not**
@@ -268,49 +278,12 @@ the problem somewhere else.
   these back to equal numbers.
 
   *Why pinned rather than auto-sized:*
-  the band spans half the window, so any height change reflows both columns; and on the
+  the band spans half the window, so any height change reflows both columns — the hazard
+  that ultimately sent the status lines to the diagnostics band rather than letting this
+  band grow; and on the
   frames where `GuiApp::editor_header_info` returns `None` (a module switch, before
   `ensure_draft` catches up) an auto-sized band would collapse to nothing and snap back,
   which reads as a flicker. `None` renders an **empty band of the same height** instead.
-- **The status lines render as a fixed-height third row** (2026-07-19, issue #26).
-  `render_editor_header_status_slot` reserves exactly `IDE_HEADER_STATUS_H` = 56pt —
-  four `Small` rows at `IDE_HEADER_STATUS_LINE_H` = 14pt each — *before* it looks at how
-  many messages there are, and paints each as a galley rather than adding a `Label`
-  (a `Label` sizes its `Ui` from its galley, which is the thing that must not be allowed
-  to). So messages appear and vanish **inside a constant band**.
-
-  *Why a reserved slot and not simply moving them:* only the first line ("Unsaved
-  changes" / "All changes saved") is unconditional — the validation, `Requires` and
-  pending-identity lines appear and disappear **as you type**. In an auto-height band
-  they would resize it mid-keystroke and shove the editor *and* the preview column down,
-  breaking the focus-stability contract documented under the manifest editor. The hazard
-  did not go away when the lines moved up; the fixed slot is what defuses it. Until issue
-  #26 these lines stayed in the editor `CentralPanel` for exactly this reason.
-
-  *Why four lines, and why 134 rather than the ~110 the request named:* four is the true
-  worst case, enumerated in `IDE_HEADER_STATUS_LINES`' doc comment — the state line
-  (unconditional), *one* of "two UI sections share a name" / a `validate` error (they are
-  mutually exclusive branches of one `if`/`else if`), a `Requires` parse failure, and a
-  pending-identity line. All four are live at once on a half-finished edit. ~110px is
-  what a **two**-line slot costs; reserving two would have forced an elide-or-drop policy
-  onto precisely the diagnostics that explain why Save is greyed out, and under-reserving
-  in an `exact_height` band does not clip — it paints over the columns below (the
-  black-bar failure mode, in reverse). 24pt of usually-empty band, filled with the same
-  `theme::PANEL` as everything around it, is the price. The test
-  `status_line_count_never_exceeds_the_reserved_slot` walks every flag combination so a
-  fifth message cannot be added without failing rather than silently overflowing.
-
-  *Why the lines are packed at galley pitch* (14pt) with no `item_spacing.y` between
-  them, unlike the Config-mode body's `ui.label` stack (which egui spaces by 7pt): four
-  lines plus three 7pt gaps would be 77, pushing the band to 155 to buy leading between
-  four short one-line messages already distinguished by size and colour. 14pt on 11pt
-  text is the font's own line height.
-
-  **Config mode is unchanged.** It still renders the same messages inline in the editor
-  body via `render_editor_status_lines`, because its header is natural-sized by design
-  and has no reflow problem a reservation would solve. Both surfaces draw from one list
-  builder, `editor_status_lines`, so the two cannot drift — duplicating the `if` ladder
-  would let them, invisibly, since each surface only ever shows one mode's version.
 - **The description renders as a fixed one-line second row**, full band width, under the
   name and left of nothing — the action cluster owns the right end of row *one*, so a row
   of its own can never collide with it. Painted by the free function
@@ -348,10 +321,13 @@ the problem somewhere else.
   would stack a dead strip under the editor column on top of `ide_editor_band`.
 - `ide_editor_band` is the **diagnostics band** (`crate::gui::render_ide_diagnostics_band`)
   — declared but empty until 2026-07-19, when the env-overwrite lint moved into it from
-  the launch band. Its `exact_height(198.0)` matches the nav footer band so the two bottom
+  the launch band, joined later the same day by the open draft's status lines (issue #26).
+  Its `exact_height(198.0)` matches the nav footer band so the two bottom
   edges align, and it stays `exact_height` however much it ends up showing: a
   variable-height band here would reflow the editor column above it every time the warning
-  count changed. See "Diagnostics band" below.
+  count changed. That fixed height plus the scroll area inside it is exactly why the status
+  lines could move in — however many appear as you type, the band does not move a pixel.
+  See "Diagnostics band" below.
 - `ide_preview_split` is **`resizable(false)` with an `exact_width` of exactly half** of
   everything right of the fixed `NAV_W` (280px) nav column:
   `((ctx.screen_rect().width() - NAV_W) * 0.5).max(0.0)`, recomputed every frame so the
@@ -903,8 +879,8 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   appear on the first keystroke must not knock the focused `TextEdit` out of focus. Two
   mechanisms guarantee this: (1) the "unsaved changes / All changes saved" line is
   **always rendered** (greyed when clean) so the clean→dirty transition never inserts a
-  line above the fields — and in IDE mode, where the lines now live in the header band,
-  the whole stack sits in a fixed-height slot so *none* of them can shift the body
+  line above the fields — and in IDE mode, where the lines now live in the diagnostics
+  band, they are out of the editor column altogether and cannot shift the body at all
   (issue #26); (2) the body `ScrollArea` carries an explicit `id_salt`
   ("module_editor_body") and **every** editor `TextEdit` a stable `.id_salt` keyed on its
   structural path (section/field/block index + role), so a focused box keeps the same egui
@@ -921,13 +897,18 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
     cluster, and *returns* the click rather than acting on it. `ide_mode` hides
     Save/Close for a bundled module in IDE mode only — see "IDE-mode header band"
     above.
-  - `editor_status_lines(info) -> Vec<(String, Color32)>` builds the
-    dirty/validation/identity messages **once**, and two renderers lay that one list out
-    two ways: `render_editor_status_lines(ui, info)` stacks them as ordinary labels in the
-    Config-mode editor body, `render_editor_header_status_slot(ui, info)` paints them into
-    the IDE band's fixed slot (issue #26). Splitting the list from its layout is what keeps
-    the two surfaces from drifting — each only ever shows one mode's version, so a
-    divergence would be invisible in use.
+  - `editor_status_lines(info) -> Vec<StatusLine>` builds the dirty/validation/identity
+    messages **once**, and two surfaces lay that one list out two ways:
+    `render_editor_status_lines(ui, info)` stacks them as ordinary labels in the
+    Config-mode editor body, painting by `StatusLine::config_color`; IDE mode feeds them
+    through `ide_diagnostic_entries` into the diagnostics band, painting by
+    `StatusLine::severity` (issue #26). *Why an entry carries both a colour and a
+    severity:* Config's state line is green when dirty, grey when clean and red when
+    bundled — three colours for what is one informational message under the severity
+    vocabulary, so severity cannot be mapped back onto Config's palette without changing
+    Config mode. Splitting the list from its layout is what keeps the two surfaces from
+    drifting — each only ever shows one mode's version, so a divergence would be
+    invisible in use.
 
   *Why the snapshot struct rather than passing `&ModuleDraft`:* IDE mode renders the header
   row in a **different panel closure** from the body (see "IDE-mode header band"), while the
@@ -940,8 +921,8 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   Config mode passes `true` (header drawn in the editor column, action dispatched there);
   IDE mode passes `false` and owns both itself. **The status lines follow the header row**
   (2026-07-19, issue #26): `render_module_editor` draws them only on the `header_inline`
-  path, and IDE mode draws them in its band instead — rendering both would put them on
-  screen twice. Gated on `header_inline` rather than `self.mode` because `header_inline` is
+  path, and IDE mode draws them in its diagnostics band instead — rendering both would put
+  them on screen twice. Gated on `header_inline` rather than `self.mode` because `header_inline` is
   what actually means "this column owns the header"; the two agree today, and if a third
   call site ever disagrees, the header and its status lines should still travel together.
 
@@ -1306,17 +1287,80 @@ list, styled to match `ide_launch_band` beside it exactly (same `FIELD` fill, `B
 stroke, 8px rounding, 13/11 inner margins, same fill-the-band `available_height - 22`
 arithmetic). The two 198px bands are peers and have to read as peers.
 
-Today the list holds one lint, `crate::gui::lossy_env_overwrites`. It is laid out as a
-**down payment** on the full ok/warning/error diagnostics panel the IDE plan calls for,
-not as something to tear out: the heading is a row with a right-aligned tally opposite the
-title (adding ok/error counts appends to that row and moves nothing below it), and the
-list scrolls inside the fixed band rather than growing it.
+The list holds two sources, assembled in display order by
+`crate::gui::ide_diagnostic_entries`:
 
-**Empty state:** a quiet `✔ No issues.` in `FAINT`. *Why an explicit line and not a blank
-box:* the band is fixed-height and always visible, so "nothing is wrong" and "the lint
-never ran" would look identical if it rendered empty — precisely the distinction a
-diagnostics surface exists to make. `FAINT` rather than a success green because the
-absence of a problem shouldn't be the loudest thing on screen.
+1. **The open draft's status messages** (`crate::gui::editor_status_lines`) — the state
+   line, then whatever is blocking Save or Rename.
+2. **The launch-preview lint** `crate::gui::lossy_env_overwrites`, described below.
+
+It was laid out as a **down payment** on the full ok/warning/error diagnostics panel the
+IDE plan calls for, and issue #26 spent part of it: the heading is a row with a
+right-aligned tally opposite the title (adding an ok count appends to that row and moves
+nothing below it), and the list scrolls inside the fixed band rather than growing it.
+
+### Severity vocabulary (`crate::gui::DiagSeverity`)
+
+Three ranks, each an icon + colour pair:
+
+| rank | icon | colour | what it means |
+|---|---|---|---|
+| `Info` | `` circled *i* | `theme::ACCENT` (blue) | state, not a problem — the draft's dirty / clean / read-only line |
+| `Warning` | `` triangle | `theme::COL_GLOBAL` | unfinished or lossy, but nothing is being refused — an env overwrite, a staged-but-unapplied rename |
+| `Error` | `` circled *!* | `theme::COL_GLOBAL` | the reason an action is refused — every `Draft::save_enabled` gate, plus a blocked Rename |
+
+*Why `Warning` and `Error` share a colour:* `theme.rs` has no amber. Its palette is the
+scope colours (global red / profile green / game blue) plus chrome, and `COL_GLOBAL`
+already doubles as the danger colour (`docs/ui/STYLING-GUIDE.md`) — which is what this
+band's warnings have always been drawn in. Introducing a `Color32` literal at the call
+site would break the styling guide's top-level rule, so the two ranks are separated by
+**icon** instead. **A dedicated `COL_WARN` (amber) / `COL_ERROR` pair in `theme.rs` is the
+right fix** and would let `DiagSeverity::color` split cleanly; it was deliberately left
+undone, because adding palette tokens is a theme decision rather than a diagnostics one.
+
+### The pinned info line
+
+The draft's **state line is always first, always `Info`, and always blue.** It is
+unconditional — `editor_status_lines` emits exactly one of "Unsaved changes…" /
+"All changes saved." / "Bundled module — read-only" on every path, and nothing else in the
+list is ever `Info`. The test `status_lines_have_exactly_one_pinned_info_line` walks all
+128 flag combinations to hold both halves of that.
+
+*Why pinned at the top rather than sorted in* (2026-07-19, issue #26, user's call): it
+answers "is my work saved", and that question should not slide down the list as errors
+appear above it. Everything after it keeps source order rather than sorting by severity —
+sorting would scramble `editor_status_lines`' deliberate sequence (state → why Save is
+blocked → why Rename is blocked), and with the whole list in a scroll area there is no
+truncation for a sort to protect against.
+
+**Why the status lines are here at all** (2026-07-19, issue #26): they spent one commit
+(`7f6109c`) in the IDE header band, in a fixed slot reserved for the four-line worst case
+— see "IDE-mode header band" above. That band spans both columns and is `exact_height`, so
+the reservation was the price of not reflowing half the window mid-keystroke, and the
+reservation read as far too tall. This band has neither problem: it is *already* a fixed
+198px, always visible, and its list already scrolls, so any number of messages costs zero
+height and nothing moves. Most of them are diagnostics on the merits, too — a `validate`
+error, a section-name collision and an unparseable `Requires` are exactly what this
+surface is for. **Config mode is unchanged**: it has no diagnostics band, so it still
+renders the same messages inline under its header via `render_editor_status_lines`, in
+the per-message palette it has always used (`StatusLine::config_color`). Both surfaces
+draw from the one `editor_status_lines` builder, so they cannot drift.
+
+**The tally** counts errors and warnings, never `Info`, and omits a rank at zero
+(`3 warnings`, not `0 errors · 3 warnings`). *Why info is excluded:* exactly one info
+entry is always present, so counting it would mean the band never reads below "1" and a
+clean draft would claim to have an issue. The tally answers "how much is wrong", and the
+state line is by definition not wrong. Errors are named before warnings, in the order
+they have to be dealt with.
+
+**Empty state:** a quiet `✔ No issues.` in `FAINT`, keyed to the **problem** count rather
+than the entry count — so a clean draft reads `All changes saved.` (blue) then
+`✔ No issues.`, which states the clean case twice rather than leaving an empty box under a
+lone blue line. *Why an explicit line and not a blank box:* the band is fixed-height and
+always visible, so "nothing is wrong" and "the lint never ran" would look identical if it
+rendered empty — precisely the distinction a diagnostics surface exists to make. `FAINT`
+rather than a success green because the absence of a problem shouldn't be the loudest
+thing on screen.
 
 ### What `lossy_env_overwrites` detects
 
