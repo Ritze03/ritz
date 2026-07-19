@@ -783,6 +783,41 @@ since `persist` saves *by scope*, the edited scope never received it while the t
 buffer still displayed it (a silent wrong-scope write). Every new writer must go
 through `set_scoped` for the same reason.
 
+**Whose countdown is it** (2026-07-19, issue #2): the "Detecting… Ns" button that
+replaces **Detect** is drawn from `crate::gui::GuiApp::detect_countdown_secs`, which
+returns `Some(secs)` only when the in-flight `Detect` targets *this* module and field —
+`Detect::ext_id`/`var` matched against the rendering module's, plus `target`/`mode`
+matched against the live ones (`crate::gui::Detect::targets`). It used to ask nothing
+but "is some detection waiting, and is this variable called `window_class`". *Why that
+was worth fixing while still latent:* only `hypr-monctl` declares `window_class` among
+the shipped modules, so there is never a second field on screen to mis-render into —
+but a user's own module under `~/.config/ritz/extensions/` can declare it too, and then
+the countdown draws on the user's field while `poll_detect` writes the result to
+hypr-monctl. `target`/`mode` are in the comparison because Config mode and the IDE
+preview draw the *same* module's fields and only those two axes tell them apart — see
+"Preview write guards" below and `cancel_stale_detect`.
+
+**A detection failure cannot take the window down** (2026-07-19, issue #3). Two
+independent measures, deliberately belt-and-braces:
+
+1. `start_detect`'s thread computes first and locks second — the guard is never held
+   across `detect_active_window_class`, which spawns `hyprctl` and parses its JSON. It
+   used to be one statement (`*handle.lock().unwrap() = DetectStatus::Done(detect…())`),
+   so a panic in there unwound with the guard held and **poisoned** the mutex.
+2. Both GUI-thread readers go through `crate::gui::Detect::status`, which resolves a
+   poisoned lock to `DetectStatus::Done(None)` instead of `.unwrap()`-ing.
+
+*Why tolerate poisoning rather than fail fast:* both readers are on the GUI thread —
+`detect_countdown_secs` every frame a field renders, `poll_detect` every frame a
+detection is live — so `.unwrap()` converts any panic in the detector thread into a
+panic in the UI thread, i.e. a failed `hyprctl` costs the user the settings window and
+every unsaved draft in it. The poisoning is also not evidence of half-written shared
+state: the slot holds one enum and its only writer assigns it whole. *Why `Done(None)`
+and not `Waiting`:* a poisoned slot still literally contains `Waiting` (the writer never
+got to store), so propagating the contents would strand the countdown at "Detecting… 0"
+with no route back to the Detect button; `Done(None)` is the existing "found nothing"
+outcome and flows through `poll_detect`'s clear-and-write-nothing path.
+
 **Cancel on navigate**: a pending detection is dropped if the user changes the
 navigation selection before the 3 seconds elapse — `crate::gui::GuiApp::start_detect`
 snapshots `nav_sel` into `Detect::nav`, and
@@ -1001,9 +1036,22 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   the preview. Exit stays Close / Save (or Ctrl+S).
 - **Keybinds** (handled at the top of `GuiApp::ui`, before panels render) — **Ctrl+S**
   triggers Save when the editor is open and `ModuleDraft::save_enabled` holds (same gate
-  as the button), a no-op otherwise; **Ctrl+R** hot-reloads extensions and configs. The
-  `command` modifier means text editing is never swallowed. *There is deliberately no
-  Ctrl+E* — see the entry-point note at the top of this section.
+  as the button), a no-op otherwise; **Ctrl+R** hot-reloads extensions and configs
+  through `GuiApp::request_reload`. The `command` modifier means text editing is never
+  swallowed. *There is deliberately no Ctrl+E* — see the entry-point note at the top of
+  this section.
+
+  Both shortcuts are **guarded on `confirm.is_none()`** (Ctrl+R since 2026-07-19, issue
+  #38 — Ctrl+S always was). *Why:* the confirmation dialog's backdrop eats **pointer**
+  input only, so a keyboard shortcut fires straight through an open modal; the toolbar
+  buttons that run the same two reloads individually are genuinely blocked by the
+  backdrop and need no guard, which is exactly the inconsistency #38 closed. *Why it
+  matters even though it cannot corrupt anything* — and it can't: `perform_rename`
+  re-checks `identity_error` at execution time and re-derives its target from the live
+  draft, so a dialog's captured state is advisory. The cost is a smaller data loss:
+  `reload_configs` → `switch_game` clears `text_buffers` and `multi_edit`, and any row
+  that has not yet reached `cleaned` — a freshly added blank multi_string row, an env
+  pair with an empty or invalid NAME — lives *only* in `multi_edit`.
 - **Focus stability (no reflow steal)** — the dirty/identity/validation status lines that
   appear on the first keystroke must not knock the focused `TextEdit` out of focus. Two
   mechanisms guarantee this: (1) the "unsaved changes / All changes saved" line is
@@ -1856,6 +1904,38 @@ for `WriteTarget::Scope`, for guard #2's reason. Without this, the `window_class
 **Detect** button — which becomes live along with the rest of the preview — would land its
 result in the real game config, bypassing all three guards.
 
+#### Inheritance shading in the preview (2026-07-19, issue #8)
+
+`write_target` is also what picks the **parent-preset chain** that inheritance depth
+badges shade against. `crate::gui::GuiApp::field_chain` — extracted from the inline
+`match` that used to sit in `render_module_settings_body` — returns
+`preview_preset_chain` under `WriteTarget::Preview` and dispatches on `nav_sel`
+otherwise.
+
+*Why `Preview` needs its own arm at all:* S4b stopped forcing `nav_sel` away from
+`Game`/`Profile` while the preview renders, so without the arm a preview opened from a
+Profile screen would shade against **that screen's** chain — a layer the preview is not
+resolving through.
+
+*Why the arm returns a real chain and not `Vec::new()`:* empty was the conservative
+first cut and it was wrong in one reachable case. `set_preview_game` points the preview
+at a game whose profile may have parents, and `resolve_specs_for_preview` genuinely
+resolves fields to `Provenance::Preset` through that chain — so hard-empty dropped the
+depth badge for exactly the values Config mode's Game view badges. Same value, two
+screens, two answers. With **no** preview game selected the chain is empty and the depth
+stays `None`, which remains correct: there is nothing to point at.
+
+*Why `preview_preset_chain` is a second copy of what `preview_preset` already holds:*
+`preview_preset` is pre-**merged** (one `Preset` with the parent chain folded in), which
+is what the resolver wants and what the badge cannot use — merging is precisely what
+destroys the "which link set this" information the badge exists to show. Both are cached
+by `set_preview_game` rather than rebuilt in the render path, because rebuilding costs
+one `load_preset` per link and rendering happens every frame.
+
+Pinned by `ide_preview_shades_against_its_own_preset_chain_not_nav_sels`, which asserts
+all three: a real deepest-first chain for a preview game with a parented profile, an
+empty one for no preview game, and that neither is `nav_sel`'s.
+
 #### Test coverage of the guards (2026-07-19, issue #16)
 
 `set_scoped`/`unset_scoped`'s routing has been pinned since `ec4422b`
@@ -1931,7 +2011,10 @@ already holds `&mut self`.
   back. The game's preset (`config.modules.preset`, else `default_preset`) is loaded and
   merged with its parent chain via `collect_parent_chain` + `merge_modules` and cached in
   `preview_preset` — presets are **not** re-read from disk inside the render path, which
-  runs every frame.
+  runs every frame. The **unmerged** chain is cached alongside it in
+  `preview_preset_chain` (index 0 = the game's own profile, 1 = its parent, …) for the
+  inheritance depth badge, which cannot use the merged form — see "Inheritance shading in
+  the preview" above.
 - **It does not call `switch_game`.** That overwrites `appid`, `game_config`, `preset` and
   rebuilds `cur_specs` — it would change what Config mode edits and what would actually
   launch, as a side effect of moving a preview dropdown. The two jobs share shape, not

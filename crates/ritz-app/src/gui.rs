@@ -507,6 +507,17 @@ pub struct GuiApp {
     /// inside the render path — resolution runs every frame, preset loads are file
     /// reads.
     preview_preset: Option<Preset>,
+    /// The same profile layer **unmerged**, one entry per preset, index 0 = the
+    /// game's own profile, 1 = its parent, 2 = grandparent, … — the shape
+    /// `render_module_settings_body` needs to pick an inheritance-shading depth.
+    ///
+    /// *Why a second copy of what `preview_preset` already holds* (issue #8):
+    /// `preview_preset` is pre-*merged*, which is exactly what the resolver wants
+    /// and exactly what the depth badge cannot use — merging is what destroys the
+    /// "which preset in the chain set this" information the badge exists to show.
+    /// Cached here for the same reason `preview_preset` is: resolution and render
+    /// both run every frame, and rebuilding this means one `load_preset` per link.
+    preview_preset_chain: Vec<Preset>,
     /// AppID of the game the IDE preview resolves against, or `None` for the empty
     /// scratch layer. **Deliberately not persisted and not in `GeneralConfig`**:
     /// the user asked twice that this never be remembered, so every app start
@@ -1219,6 +1230,56 @@ struct Detect {
     mode: Mode,
 }
 
+impl Detect {
+    /// Read the worker thread's slot, treating a **poisoned** mutex as a finished
+    /// detection that found nothing (issue #3).
+    ///
+    /// *Why tolerate poisoning at all rather than `.unwrap()`:* both readers are on
+    /// the GUI thread — the countdown in `render_value_editor` and
+    /// [`GuiApp::poll_detect`], which runs every frame while a detection is live.
+    /// `.unwrap()` there converts *any* panic in the detector thread into a panic
+    /// in the UI thread, i.e. a failed `hyprctl` call takes down the whole settings
+    /// window and every unsaved draft with it. The user's data is worth more than
+    /// the fail-fast signal, and the poisoning is not evidence of shared state
+    /// left half-written: the slot holds one enum, and the only writer assigns it
+    /// whole.
+    ///
+    /// *Why `Done(None)` and not `Waiting`:* the poisoned slot still literally
+    /// contains `Waiting` (the initial value — the writer never got to store), so
+    /// propagating what's inside would leave the countdown stuck at "Detecting… 0"
+    /// forever with no way back to the Detect button. `Done(None)` is what a
+    /// detection that found no window class already reports, so it flows through
+    /// `poll_detect`'s existing "clear `detect`, write nothing" path.
+    ///
+    /// Note this is belt-and-braces: `start_detect` no longer holds the guard
+    /// across anything fallible, so nothing *should* poison it. This is what makes
+    /// that structural fix non-load-bearing for UI survival.
+    fn status(&self) -> DetectStatus {
+        match self.result.lock() {
+            Ok(g) => g.clone(),
+            Err(_) => DetectStatus::Done(None),
+        }
+    }
+
+    /// Whether this in-flight detection targets the given module + variable.
+    ///
+    /// *Why the render site must ask this* (issue #2): the "Detecting… Ns"
+    /// countdown that replaces the Detect button used to be gated on nothing but
+    /// `field.variable == "window_class"` plus "some detection is in flight". Only
+    /// `hypr-monctl` declares `window_class` today, so there was never a second
+    /// field to mis-render into — but users drop their own modules into
+    /// `~/.config/ritz/extensions/`, and a second declarer would draw hypr-monctl's
+    /// countdown on *its* field while the result silently landed on hypr-monctl.
+    ///
+    /// `target`/`mode` are compared alongside `ext_id`/`var` because the same
+    /// module's fields are drawn by two different surfaces — Config mode and the
+    /// IDE preview column — for which `write_target`/`mode` are the discriminator,
+    /// not `nav_sel` (see [`WriteTarget`] and [`GuiApp::cancel_stale_detect`]).
+    fn targets(&self, ext_id: &str, var: &str, target: WriteTarget, mode: Mode) -> bool {
+        self.ext_id == ext_id && self.var == var && self.target == target && self.mode == mode
+    }
+}
+
 impl GuiApp {
     /// Build an editor for a game (does not open a window).
     pub fn new(ctx: &AppContext, appid: &str, name: &str, game_command: Vec<String>) -> GuiApp {
@@ -1267,6 +1328,7 @@ impl GuiApp {
             write_target: WriteTarget::Scope,
             preview_config: GameConfig::new("__preview__", "None"),
             preview_preset: None,
+            preview_preset_chain: Vec::new(),
             preview_game: None,
             ide_selected: 0,
             all_presets,
@@ -1342,6 +1404,7 @@ impl GuiApp {
                 self.preview_game = None;
                 self.preview_config = GameConfig::new("__preview__", "None");
                 self.preview_preset = None;
+                self.preview_preset_chain = Vec::new();
             }
             Some(id) => {
                 self.preview_game = Some(id.to_string());
@@ -1362,6 +1425,19 @@ impl GuiApp {
                     .clone()
                     .or_else(|| self.default_preset.clone());
                 let direct = preset_name.and_then(|n| self.paths.load_preset(&n).ok().flatten());
+                // The unmerged chain for inheritance shading, cached alongside the
+                // merged one — same [direct, parent, grandparent, …] order the
+                // `NavSel::Game(_)` arm of `render_module_settings_body` builds.
+                self.preview_preset_chain = match &direct {
+                    Some(p) => {
+                        let mut c = vec![p.clone()];
+                        if let Some(pn) = &p.parent {
+                            c.extend(collect_parent_presets(&self.paths, pn));
+                        }
+                        c
+                    }
+                    None => Vec::new(),
+                };
                 // Parent chain merges UNDER the direct preset (parent = lower
                 // priority) — same order as `resolve_specs_for_editing`.
                 self.preview_preset = direct.map(|p| match p.parent.as_ref() {
@@ -1640,6 +1716,77 @@ impl GuiApp {
             self.preview_preset.as_ref(),
             Some(&self.global_config),
         )
+    }
+
+    /// The parent-preset chain the currently rendering surface shades against —
+    /// index 0 = the preset closest to the value, 1 = its parent, and so on.
+    /// `render_module_settings_body` searches it for whichever link actually set a
+    /// field, and uses that index as the field's inheritance-shading depth.
+    ///
+    /// **`write_target == Preview` takes its own arm** (S4b): that body renders
+    /// both Config mode's fields and the IDE preview column's, and the preview's
+    /// `nav_sel` is no longer forced away from `Game`/`Profile` while it renders
+    /// (see [`Mode`]'s doc comment) — without this branch a preview opened from
+    /// the Global Profile or a Profile screen would pick up *that screen's* chain
+    /// and shade against a layer the preview is not resolving through at all. The
+    /// preview's own layers are the scratch `preview_config` / `preview_preset`,
+    /// not whatever `nav_sel` happens to still hold.
+    ///
+    /// *Why that arm returns the preview's own chain and not `Vec::new()`* (issue
+    /// #8, 2026-07-19): empty was the conservative first cut, and it was wrong in
+    /// one real case. With a preview game selected whose profile has parents,
+    /// [`Self::resolve_specs_for_preview`] genuinely resolves fields to
+    /// `resolve::Provenance::Preset` through that chain, so hard-empty dropped the
+    /// depth badge for exactly the values Config mode's Game view badges — the
+    /// same value, two screens, two answers. With **no** preview game selected
+    /// `preview_preset_chain` is empty and the depth stays `None`, which is still
+    /// the right answer: there is no chain to point at.
+    ///
+    /// *Why a method rather than the inline `match` it used to be:* it is a pure
+    /// decision over `write_target`/`nav_sel`/cached state and it is the thing
+    /// issue #8 was about, so it should be assertable without standing up an egui
+    /// render pass.
+    fn field_chain(&self) -> Vec<Preset> {
+        if self.write_target == WriteTarget::Preview {
+            return self.preview_preset_chain.clone();
+        }
+        match &self.nav_sel {
+            NavSel::Game(_) => {
+                let mut c = Vec::new();
+                if let Some(p) = &self.preset {
+                    c.push(p.clone());
+                    if let Some(pn) = &p.parent {
+                        c.extend(collect_parent_presets(&self.paths, pn));
+                    }
+                }
+                c
+            }
+            NavSel::Profile(_) => self
+                .editing_preset_buf
+                .as_ref()
+                .and_then(|p| p.parent.as_ref())
+                .map(|pn| collect_parent_presets(&self.paths, pn))
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Seconds left on the "Detecting… Ns" countdown **for this specific field**,
+    /// or `None` when the plain Detect button should be drawn instead.
+    ///
+    /// *Why this is scoped and not just "is a detection in flight"* (issue #2):
+    /// see [`Detect::targets`]. The old inline form asked only whether *any*
+    /// detection was waiting, so a second module declaring `window_class` — which
+    /// any user can drop into `~/.config/ritz/extensions/` — would draw
+    /// hypr-monctl's countdown on its own field while the result landed on
+    /// hypr-monctl.
+    fn detect_countdown_secs(&self, ext_id: &str, var: &str) -> Option<u64> {
+        let d = self
+            .detect
+            .as_ref()
+            .filter(|d| d.targets(ext_id, var, self.write_target, self.mode))?;
+        matches!(d.status(), DetectStatus::Waiting)
+            .then(|| (3.0 - d.start.elapsed().as_secs_f32()).ceil().max(0.0) as u64)
     }
 
     /// Run `f` with every module-field write redirected to the scratch
@@ -1998,6 +2145,34 @@ impl GuiApp {
             return;
         }
         self.save_module();
+    }
+
+    /// The **only** entry point for Ctrl+R: hot-reload extensions, then configs,
+    /// from disk.
+    ///
+    /// *Why the `confirm` guard* (issue #38): identical reasoning to
+    /// [`Self::request_save_module`]'s, one shortcut over. The confirmation
+    /// dialog's backdrop eats **pointer** input only, so Ctrl+R fires straight
+    /// through an open modal. The two toolbar buttons that run these same reloads
+    /// individually *are* blocked by the backdrop and need no guard — which is
+    /// exactly the inconsistency this closes.
+    ///
+    /// *Why it matters even though it cannot corrupt anything:* worth stating
+    /// plainly — it can't. `perform_rename` re-checks `identity_error` at
+    /// execution time and re-derives its target from the live draft, so a dialog's
+    /// captured state is advisory and the whole stale-capture class is already
+    /// closed downstream. The cost is data loss of a smaller kind:
+    /// `reload_configs` → `switch_game` clears `text_buffers` and `multi_edit`,
+    /// and any row that has not yet reached `cleaned` — a freshly added blank
+    /// multi_string row, an env pair with an empty or invalid NAME — lives *only*
+    /// in `multi_edit`. Reloading under a question the user has not answered yet
+    /// drops those without a word.
+    fn request_reload(&mut self) {
+        if self.confirm.is_some() {
+            return;
+        }
+        self.reload_extensions();
+        self.reload_configs();
     }
 
     /// What the [`ConfirmAction::SaveWithPendingRename`] dialog's affirmative
@@ -2754,8 +2929,7 @@ impl GuiApp {
     pub fn ui(&mut self, ctx: &egui::Context) {
         // Ctrl+R: hot-reload extensions, then the configs, from disk.
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::R)) {
-            self.reload_extensions();
-            self.reload_configs();
+            self.request_reload();
         }
 
         // *Why there is no longer a frame-start draft-drop guard here (S4a):* it
@@ -6240,38 +6414,7 @@ impl GuiApp {
                             }
                         });
                         ui.add_space(6.0);
-                        // `write_target == Preview` short-circuits to empty (S4b):
-                        // this body renders both Config mode's fields and the IDE
-                        // preview column's, and the preview's `nav_sel` is no
-                        // longer forced away from `Game`/`Profile` while it
-                        // renders (see `Mode`'s doc comment) — without this guard
-                        // a preview opened from the Global Profile or a Profile
-                        // screen would pick up that screen's chain and start
-                        // showing preset-inheritance depth badges the preview has
-                        // no business drawing (the preview's own layer is the
-                        // scratch `preview_config`/`preview_preset`, not
-                        // whatever `nav_sel` happens to still hold).
-                        let field_chain: Vec<Preset> = if self.write_target == WriteTarget::Preview {
-                            Vec::new()
-                        } else {
-                            match &self.nav_sel {
-                                NavSel::Game(_) => {
-                                    let mut c = Vec::new();
-                                    if let Some(p) = &self.preset {
-                                        c.push(p.clone());
-                                        if let Some(pn) = &p.parent {
-                                            c.extend(collect_parent_presets(&self.paths, pn));
-                                        }
-                                    }
-                                    c
-                                }
-                                NavSel::Profile(_) => self.editing_preset_buf.as_ref()
-                                    .and_then(|p| p.parent.as_ref())
-                                    .map(|pn| collect_parent_presets(&self.paths, pn))
-                                    .unwrap_or_default(),
-                                _ => Vec::new(),
-                            }
-                        };
+                        let field_chain: Vec<Preset> = self.field_chain();
                         for field in visible {
                             let Some(res) = ext_res.and_then(|e| e.fields.get(&field.variable)) else {
                                 continue;
@@ -6800,11 +6943,10 @@ impl GuiApp {
                 // Right-to-left: the Detect button (if any) pins to the right, then
                 // the text field fills the remaining width to its left.
                 if editable && field.variable == "window_class" {
-                    let remaining = self.detect.as_ref().and_then(|d| {
-                        matches!(*d.result.lock().unwrap(), DetectStatus::Waiting).then(|| {
-                            (3.0 - d.start.elapsed().as_secs_f32()).ceil().max(0.0) as u64
-                        })
-                    });
+                    // Scoped to *this* module's field, not "any detection is in
+                    // flight and this variable happens to be named window_class" —
+                    // see `detect_countdown_secs`.
+                    let remaining = self.detect_countdown_secs(&spec.id(), &field.variable);
                     if let Some(secs) = remaining {
                         ui.add_enabled(false, egui::Button::new(format!("Detecting… {secs}")));
                     } else if ui
@@ -6953,7 +7095,17 @@ impl GuiApp {
         let handle = result.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(3));
-            *handle.lock().unwrap() = DetectStatus::Done(detect_active_window_class());
+            // Compute FIRST, lock SECOND (issue #3). Holding the guard across
+            // `detect_active_window_class()` — which spawns `hyprctl` and parses
+            // its JSON — means a panic in there unwinds *with the guard held* and
+            // poisons the mutex. The GUI thread reads the same mutex every frame,
+            // so a poisoned lock is one `.unwrap()` away from taking the settings
+            // window down with it. Two statements make that structurally
+            // impossible: nothing fallible runs inside the guard's lifetime.
+            let detected = detect_active_window_class();
+            if let Ok(mut slot) = handle.lock() {
+                *slot = DetectStatus::Done(detected);
+            }
         });
         self.detect = Some(Detect {
             result,
@@ -7035,7 +7187,7 @@ impl GuiApp {
         // would never be re-examined for a scope change until it completed.
         self.cancel_stale_detect();
         let done = match &self.detect {
-            Some(d) => match d.result.lock().unwrap().clone() {
+            Some(d) => match d.status() {
                 DetectStatus::Waiting => {
                     ctx.request_repaint_after(Duration::from_millis(200));
                     return false;
@@ -10309,6 +10461,7 @@ mod tests {
             write_target: WriteTarget::Scope,
             preview_config: GameConfig::new("__preview__", "None"),
             preview_preset: None,
+            preview_preset_chain: Vec::new(),
             preview_game: None,
             ide_selected: 0,
             all_presets: Vec::new(),
@@ -10651,6 +10804,253 @@ mod tests {
             Some(&"steam_app_42".to_string()),
         );
         assert_eq!(app.write_target, WriteTarget::Scope);
+    }
+
+    /// A detection in flight for `var` on the module `ext_id`, started under
+    /// `target`/`mode`. `result` is supplied so a test can hand in a poisoned one.
+    fn pending_detect(
+        result: Arc<Mutex<DetectStatus>>,
+        ext_id: &str,
+        var: &str,
+        nav: NavSel,
+        target: WriteTarget,
+        mode: Mode,
+    ) -> Detect {
+        Detect {
+            result,
+            start: Instant::now(),
+            ext_id: ext_id.to_string(),
+            author: "Ritze".to_string(),
+            name: "HyprMonctl".to_string(),
+            var: var.to_string(),
+            nav,
+            target,
+            mode,
+        }
+    }
+
+    /// **Issue #2.** The "Detecting… Ns" countdown belongs to the module+field the
+    /// detection was actually started on — not to every field that happens to be
+    /// named `window_class`.
+    ///
+    /// *Why this is worth a test given only one shipped module declares
+    /// `window_class`:* the second declarer does not have to ship with ritz.
+    /// Users drop their own modules into `~/.config/ritz/extensions/`, and the old
+    /// gate ("some detection is waiting" AND "this variable is called
+    /// window_class") would then draw hypr-monctl's countdown on the user's field
+    /// while `poll_detect` wrote the detected value to hypr-monctl — the user
+    /// watches one module and a different one changes.
+    #[test]
+    fn detect_countdown_is_scoped_to_the_module_and_field_that_started_it() {
+        let mut app = test_app();
+        let nav = app.nav_sel.clone();
+        app.detect = Some(pending_detect(
+            Arc::new(Mutex::new(DetectStatus::Waiting)),
+            "Ritze::HyprMonctl::1.0",
+            "window_class",
+            nav,
+            WriteTarget::Scope,
+            Mode::Config,
+        ));
+
+        assert!(
+            app.detect_countdown_secs("Ritze::HyprMonctl::1.0", "window_class").is_some(),
+            "the field that started the detection lost its own countdown",
+        );
+        assert_eq!(
+            app.detect_countdown_secs("Someone::MyMonitors::1.0", "window_class"),
+            None,
+            "a second module declaring window_class drew another module's countdown",
+        );
+        assert_eq!(
+            app.detect_countdown_secs("Ritze::HyprMonctl::1.0", "some_other_var"),
+            None,
+            "the countdown leaked onto a different field of the same module",
+        );
+
+        // The same module+field drawn by the *other* surface. `write_target` and
+        // `mode` are what tell Config mode's copy of a field from the IDE
+        // preview's — `nav_sel` cannot, see `cancel_stale_detect`.
+        app.write_target = WriteTarget::Preview;
+        assert_eq!(
+            app.detect_countdown_secs("Ritze::HyprMonctl::1.0", "window_class"),
+            None,
+            "a Config-mode detection drew its countdown in the IDE preview column",
+        );
+        app.write_target = WriteTarget::Scope;
+        app.mode = Mode::Ide;
+        assert_eq!(
+            app.detect_countdown_secs("Ritze::HyprMonctl::1.0", "window_class"),
+            None,
+            "a detection started in Config mode drew its countdown under Mode::Ide",
+        );
+    }
+
+    /// **Issue #3.** A panic inside the detector thread must not be able to take
+    /// the settings window with it.
+    ///
+    /// `start_detect` no longer holds the guard across
+    /// `detect_active_window_class`, so nothing *should* poison this mutex any
+    /// more — but the GUI thread reads it every frame from two places, and
+    /// `.unwrap()` on either would turn a failed `hyprctl` into a lost window and
+    /// every unsaved draft in it. This pins the tolerance, not the structural fix:
+    /// both readers must survive a poisoned lock and resolve it to "detection
+    /// finished, found nothing".
+    ///
+    /// Expect one "thread panicked" line on stderr from the poisoning helper —
+    /// that panic is the fixture, not a failure.
+    #[test]
+    fn a_poisoned_detect_mutex_does_not_take_down_the_gui_thread() {
+        let result = Arc::new(Mutex::new(DetectStatus::Waiting));
+        let handle = result.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = handle.lock().unwrap();
+            panic!("hyprctl blew up while the guard was held");
+        })
+        .join();
+        assert!(result.is_poisoned(), "the fixture did not actually poison the mutex");
+
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let nav = app.nav_sel.clone();
+        app.detect = Some(pending_detect(
+            result,
+            "Ritze::HyprMonctl::1.0",
+            "window_class",
+            nav,
+            WriteTarget::Scope,
+            Mode::Config,
+        ));
+
+        // Render-side read: back to the plain Detect button, not a countdown stuck
+        // at 0 with no way out (the poisoned slot still literally holds `Waiting`).
+        assert_eq!(
+            app.detect_countdown_secs("Ritze::HyprMonctl::1.0", "window_class"),
+            None,
+        );
+
+        // Frame-tail read: completes as "found nothing", writes nothing, clears.
+        let changed = app.poll_detect(&ctx);
+        assert!(!changed, "a poisoned detection reported a config change");
+        assert!(app.detect.is_none(), "the poisoned detection was never cleared");
+        assert_eq!(
+            app.game_config.get_value("Ritze", "HyprMonctl", "window_class"),
+            None,
+            "a poisoned detection wrote a value",
+        );
+    }
+
+    /// **Issue #38.** Ctrl+R must not reload out from under an open confirmation,
+    /// for the same reason Ctrl+S must not save under one: the modal's backdrop
+    /// eats pointer input only.
+    ///
+    /// The asserted damage is the real one — `reload_configs` → `switch_game`
+    /// clears `text_buffers` and `multi_edit`, and rows that have not yet reached
+    /// `cleaned` (a blank multi_string row, an env pair with an empty NAME) live
+    /// *only* in `multi_edit`.
+    #[test]
+    fn ctrl_r_reload_is_refused_while_a_confirmation_is_open() {
+        let mut app = test_app();
+        app.text_buffers.insert("game:42::T::M::1::s".to_string(), "half-typed".to_string());
+        app.multi_edit
+            .insert("game:42::T::M::1::env".to_string(), vec!["".to_string()]);
+
+        app.confirm = Some(ConfirmAction::SaveWithPendingRename);
+        app.request_reload();
+        assert!(
+            app.text_buffers.contains_key("game:42::T::M::1::s"),
+            "Ctrl+R reloaded under an open dialog and dropped an in-progress text buffer",
+        );
+        assert!(
+            app.multi_edit.contains_key("game:42::T::M::1::env"),
+            "Ctrl+R reloaded under an open dialog and dropped an uncommitted list row",
+        );
+        assert!(app.confirm.is_some(), "the reload attempt dismissed the dialog");
+
+        // …and the guard is a guard, not a disablement: with no dialog up, the
+        // same call does reload (and clears, which is correct then).
+        app.confirm = None;
+        app.request_reload();
+        assert!(
+            app.multi_edit.is_empty() && app.text_buffers.is_empty(),
+            "with no dialog open, Ctrl+R did not reload at all",
+        );
+    }
+
+    /// **Issue #8.** The IDE preview shades inheritance depth against its **own**
+    /// preset chain.
+    ///
+    /// Three properties in one, because the bug and its original fix are two sides
+    /// of the same branch:
+    /// 1. a preview pointed at a game whose profile has a parent gets a real
+    ///    chain, deepest-first — this is what was inert;
+    /// 2. a preview pointed at nothing gets an empty chain, which is *correct* and
+    ///    must stay that way (there is no chain to shade against);
+    /// 3. the preview's chain is its own, not the one belonging to whatever
+    ///    `nav_sel` still holds behind IDE mode — the property the `Preview` arm
+    ///    was originally added for, and the one a naive "just delete the arm" fix
+    ///    would regress.
+    #[test]
+    fn ide_preview_shades_against_its_own_preset_chain_not_nav_sels() {
+        let base = std::env::temp_dir().join(format!(
+            "ritz-gui-test-preview-chain-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let paths = Paths { base: base.clone() };
+
+        let parent = Preset { name: "parent".to_string(), parent: None, ..Default::default() };
+        let child = Preset {
+            name: "child".to_string(),
+            parent: Some("parent".to_string()),
+            ..Default::default()
+        };
+        // A third, unrelated profile, standing in for "whatever Config mode was
+        // last looking at" — property 3's control.
+        let unrelated = Preset { name: "unrelated".to_string(), parent: None, ..Default::default() };
+        paths.save_preset(&parent).unwrap();
+        paths.save_preset(&child).unwrap();
+        paths.save_preset(&unrelated).unwrap();
+
+        let mut game = GameConfig::new("77", "Preview Target");
+        game.config.modules.preset = Some("child".to_string());
+        paths.save_game(&game).unwrap();
+
+        let mut app = test_app();
+        app.paths = paths;
+        // Config mode's selection is left pointing at an unrelated profile, as it
+        // is for real: entering IDE mode does not touch `nav_sel` (S4b).
+        app.nav_sel = NavSel::Profile("unrelated".to_string());
+        app.editing_preset_buf = Some(unrelated);
+        app.mode = Mode::Ide;
+        app.set_preview_game(Some("77"));
+
+        // (1) Inside the preview render, the chain is the preview's.
+        app.write_target = WriteTarget::Preview;
+        let chain = app.field_chain();
+        let names: Vec<&str> = chain.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["child", "parent"],
+            "the IDE preview computed no usable chain, so depth shading can never render",
+        );
+
+        // (3) …and it is not `nav_sel`'s, which is what the Preview arm exists for.
+        assert!(
+            !names.contains(&"unrelated"),
+            "the preview picked up the chain of the scope nav_sel still holds",
+        );
+
+        // (2) No preview game selected → no chain, and that is the right answer.
+        app.set_preview_game(None);
+        assert!(
+            app.field_chain().is_empty(),
+            "a preview resolving against nothing invented a chain to shade against",
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Build a one-var module with the given ops, in order.

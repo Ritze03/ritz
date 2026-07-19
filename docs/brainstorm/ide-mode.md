@@ -404,6 +404,13 @@ depending on which screen the user came from:
   `write_target == Preview` guard, the preview would start drawing preset-depth badges that
   describe a screen it isn't showing.
 
+  *Superseded in part, 2026-07-19 (issue #8):* this computation now lives in
+  `GuiApp::field_chain`, and its `Preview` arm returns the preview's **own**
+  `preview_preset_chain` rather than `Vec::new()`. The guard above was right about
+  *which* chain must not be used; returning empty also dropped the badge in the case
+  where the preview does resolve through a real preset chain. See "Inheritance shading in
+  the preview" in `../features/settings-gui.md`.
+
 Both are fixed by checking `self.write_target == WriteTarget::Preview` first (mirroring the
 guard `buffer_scope_tag`/`set_scoped`/`unset_scoped`/`current_scope_value` already had) —
 provably equivalent to the old always-`ModuleEditor(_)` behaviour, since the IDE preview's
