@@ -4507,7 +4507,10 @@ fn render_field_editor(
                 editor_row_label(ui, "", 0.0);
                 ui.label(
                     egui::RichText::new("(rename pending)")
-                        .color(theme::COL_PROFILE)
+                        // Red, not green: this is unapplied work, and green
+                        // reads as "settled" everywhere else in the scope
+                        // colors. COL_GLOBAL doubles as the danger color.
+                        .color(theme::COL_GLOBAL)
                         .small(),
                 );
             });
