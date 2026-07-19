@@ -209,7 +209,7 @@ enum WriteTarget {
 /// A click on one of the three rows in the nav's GENERAL category box. Collected
 /// during render and applied afterwards (the render closure already holds
 /// `&mut self`).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NavCategory {
     GeneralSettings,
     Ide,
@@ -227,8 +227,21 @@ enum ConfirmAction {
     /// Delete a user-authored module manifest. `label` is `Author::Name` for the
     /// prompt; `manifest` is the file to remove.
     DeleteModule { manifest: PathBuf, label: String },
-    /// Leave the module editor with unsaved edits (Close acting as Discard).
-    DiscardEdits,
+    /// Leave the open module editor while its draft has unsaved edits.
+    ///
+    /// `pending_nav` is **where the user was trying to go** when the prompt was
+    /// raised, so Confirm can complete the switch instead of merely discarding:
+    /// - `None` — the editor's own Close button (Close doubling as Discard).
+    ///   Confirm runs [`GuiApp::discard_module`], which lands on the remembered
+    ///   view exactly as a clean Close would.
+    /// - `Some(cat)` — a category tab (Profiles / Settings / IDE Mode) was
+    ///   clicked. Confirm drops the draft and then applies that click.
+    ///
+    /// *Why a payload and not two variants:* both cases render the identical
+    /// dialog (same title, same message, same buttons) and differ only in what
+    /// runs after Confirm. A second variant would duplicate the whole message arm
+    /// in [`GuiApp::render_confirm_dialog`] just to carry one word of state.
+    DiscardEdits { pending_nav: Option<NavCategory> },
 }
 
 /// The Fork / Create-new module dialog. Both share the same Author/Name form;
@@ -320,10 +333,18 @@ pub struct GuiApp {
     /// Non-fatal load problems (bad manifests / duplicate identities) shown as a
     /// banner atop the module tree. Refreshed on every hot-reload.
     extension_errors: Vec<ExtensionLoadError>,
+    /// The modules the **current screen** lists, in tree order. Game screens
+    /// (and the editor, which resolves against the ambient game) get `all_specs`
+    /// filtered by `Extension::applies_to(appid)`; the Global Profile and Profile
+    /// screens get all of them — see [`GuiApp::cur_specs_filter`].
     cur_specs: Vec<Extension>,
     /// Tree folder for each entry in `cur_specs`, index-aligned.
     cur_dirs: Vec<PathBuf>,
     cur_is_folder_ext: Vec<bool>,
+    /// The filter `cur_specs` was last built with (`Some(appid)` / `None` = no
+    /// filter). Compared against [`GuiApp::cur_specs_filter`] once per frame so a
+    /// screen change rebuilds the list exactly once, instead of every frame.
+    cur_specs_filter: Option<String>,
     /// Group the module tree by extension Author instead of folder.
     group_by_author: bool,
     /// Show the per-module inheritance/edit icons in the tree.
@@ -616,6 +637,35 @@ fn editor_exit_target(return_to: Option<NavSel>, appid: &str) -> NavSel {
     }
 }
 
+/// Pure predicate (factored out for testing): would applying this category-tab
+/// click take the open module draft away from the user?
+///
+/// Only meaningful while a draft exists — and a draft can only exist while
+/// `nav_sel` is `ModuleEditor(_)` (the frame-start guard in [`GuiApp::ui`]
+/// enforces that). `ide_target` is the id the IDE tree's current selection would
+/// reopen (`all_specs[ide_selected]`), or `None` when there is no module to open.
+///
+/// *Why the IDE arm is not simply `false`:* clicking IDE Mode re-opens the
+/// *tree's* selection, which need not be the module currently under edit — from a
+/// Config-mode editor it usually isn't, and `ensure_draft` would then silently
+/// swap the draft out. Clicking IDE Mode while that same module is already open
+/// is a genuine no-op, though, and must not prompt.
+fn nav_category_drops_draft(
+    cat: NavCategory,
+    nav_sel: &NavSel,
+    ide_target: Option<&str>,
+) -> bool {
+    match cat {
+        // Both land on a config scope, so whatever editor is open is left behind.
+        NavCategory::GamesProfiles | NavCategory::GeneralSettings => true,
+        NavCategory::Ide => match nav_sel {
+            NavSel::ModuleEditor(open) => ide_target != Some(open.as_str()),
+            // No editor open ⇒ no draft to drop (unreachable while `dirty`).
+            _ => false,
+        },
+    }
+}
+
 /// True when `(author, name)` is already taken by a loaded module — **Version-blind**
 /// (compares Author+Name only, since config keys on those two). `exclude` skips the
 /// module being edited/forked, matched by manifest path so a module never collides
@@ -818,6 +868,7 @@ impl GuiApp {
             cur_specs: Vec::new(),
             cur_dirs: Vec::new(),
             cur_is_folder_ext: Vec::new(),
+            cur_specs_filter: None,
             group_by_author: true,
             show_inheritance: true,
             games: ctx.list_games(),
@@ -951,10 +1002,39 @@ impl GuiApp {
         self.multi_edit.retain(|k, _| !k.starts_with("preview::"));
     }
 
-    /// Rebuild `cur_specs` (the modules applicable to the current game) from
+    /// Which game `cur_specs` is filtered by on the screen currently showing, or
+    /// `None` for "list every module".
+    ///
+    /// *Why the Global Profile and Profile screens take no filter:* those scopes
+    /// apply **across** games. `AppIds`-filtering them by whichever game happened
+    /// to be selected last is meaningless — the ambient game is not what the
+    /// screen is configuring — and it *hides* modules the user has to be able to
+    /// set a global/profile value for. The Game screens keep the filter: there the
+    /// ambient game is exactly the subject, and listing modules that can never
+    /// apply to it would be noise.
+    ///
+    /// This only ever *widens* the list. `RequiresDesktop`-gated modules are
+    /// dropped much earlier — at load time in `context::load_extensions`, shared by
+    /// `AppContext::load` and the GUI hot-reload — so they never reach `all_specs`
+    /// and dropping the `AppIds` filter cannot resurrect them.
+    fn cur_specs_filter(&self) -> Option<String> {
+        match &self.nav_sel {
+            NavSel::GlobalSettings | NavSel::Profile(_) => None,
+            // The ambient game, not `NavSel::Game`'s payload: everything else on
+            // these screens (config store, launch preview) resolves through
+            // `self.appid`, and a momentary disagreement between the two must not
+            // make the module list describe a different game than the fields do.
+            NavSel::Game(_) | NavSel::ModuleEditor(_) | NavSel::GeneralSettings => {
+                Some(self.appid.clone())
+            }
+        }
+    }
+
+    /// Rebuild `cur_specs` (the modules the current screen lists) from
     /// `all_specs`, preserving the selected module by id where possible.
     fn rebuild_cur_specs(&mut self) {
         let prev_id = self.cur_specs.get(self.selected_ext).map(|s| s.id());
+        let filter = self.cur_specs_filter();
         self.cur_specs = Vec::new();
         self.cur_dirs = Vec::new();
         self.cur_is_folder_ext = Vec::new();
@@ -964,15 +1044,20 @@ impl GuiApp {
             .zip(self.all_dirs.iter())
             .zip(self.all_is_folder_ext.iter())
         {
-            if spec.applies_to(&self.appid) {
+            if filter.as_deref().is_none_or(|a| spec.applies_to(a)) {
                 self.cur_specs.push(spec.clone());
                 self.cur_dirs.push(dir.clone());
                 self.cur_is_folder_ext.push(is_fe);
             }
         }
+        // `selected_ext` is a raw index into `cur_specs`, so a list that changed
+        // length would otherwise leave it pointing at a *different* module (or out
+        // of range). Re-find the previously selected module by id; fall back to the
+        // first entry only when it is genuinely gone from the new list.
         self.selected_ext = prev_id
             .and_then(|id| self.cur_specs.iter().position(|s| s.id() == id))
             .unwrap_or(0);
+        self.cur_specs_filter = filter;
     }
 
     /// Remove stored values for variables no longer declared by any loaded
@@ -1198,12 +1283,23 @@ impl GuiApp {
         }
     }
 
-    /// Resolution always for the current game — used for the launch command preview.
-    fn resolve_for_game(&self) -> Resolution {
-        self.resolve_specs_for_game(&self.cur_specs)
+    /// The modules that apply to the **ambient game**, whatever screen is showing.
+    ///
+    /// Identical to `cur_specs` on the Game screens and in the editor. It exists
+    /// for the Global Profile / Profile screens, where `cur_specs` is deliberately
+    /// unfiltered (see [`Self::cur_specs_filter`]) but the launch-command preview
+    /// still is — a launch command is by definition for one concrete game, so
+    /// assembling it from modules that can never apply to that game would print a
+    /// command that will never be run.
+    fn game_specs(&self) -> Vec<Extension> {
+        self.all_specs
+            .iter()
+            .filter(|s| s.applies_to(&self.appid))
+            .cloned()
+            .collect()
     }
 
-    /// Like [`resolve_for_game`] but over an explicit spec list — lets the module
+    /// Like the game resolution over an explicit spec list — lets the module
     /// editor resolve a draft-spliced spec set for its live preview without
     /// touching disk or the launch assembler's signature.
     fn resolve_specs_for_game(&self, specs: &[Extension]) -> Resolution {
@@ -1344,6 +1440,53 @@ impl GuiApp {
     /// clears the draft and releasing the interlock flushes any held config writes.
     fn discard_module(&mut self) {
         self.exit_module_editor();
+    }
+
+    /// Carry out a confirmed [`ConfirmAction::DiscardEdits`].
+    ///
+    /// *Why a method and not an inline match arm* (2026-07-19): this is the whole
+    /// payoff of the confirmation — the branch that decides whether the user's
+    /// unsaved work is dropped *and* whether the navigation they asked for
+    /// happens. Inline in `render_confirm_dialog` it is only reachable through a
+    /// live egui frame, so it could never be tested; as a method it is exercised
+    /// directly against a real `GuiApp` (see the tests at the bottom of this file).
+    fn apply_discard_edits(&mut self, pending_nav: Option<NavCategory>) {
+        match pending_nav {
+            // Close acting as Discard: leave for the remembered view.
+            None => self.discard_module(),
+            // A category tab was clicked. Drop the draft *explicitly* before
+            // completing the switch — `select_nav_category` may land somewhere the
+            // frame-start draft-drop guard in `ui()` never fires for
+            // (`NavCategory::Ide` keeps `nav_sel` on `ModuleEditor(_)`, just a
+            // different module), so relying on that guard would leave the discard
+            // to `ensure_draft`'s replacement instead of doing it here, where the
+            // user approved it. Flushing releases the config-autosave interlock the
+            // dirty draft was holding.
+            Some(cat) => {
+                self.module_draft = None;
+                self.flush_config_writes_if_clean();
+                self.select_nav_category(cat);
+            }
+        }
+    }
+
+    /// `Author::Name` of every module that currently has unsaved edits.
+    ///
+    /// *Why a `Vec` when S3b only ever holds one draft:* the discard prompt names
+    /// the modules at risk, and the wording the user asked for is already plural
+    /// ("These modules have unsaved changes: …"). Returning a list means
+    /// multi-draft (S4) only has to make this function look at more drafts —
+    /// neither the dialog text nor its callers need rewording then.
+    ///
+    /// Names come from `ext.meta` (the on-disk identity), not from the staged
+    /// `identity` buffers: a half-typed rename is not what the user recognises
+    /// the module by.
+    fn dirty_module_names(&self) -> Vec<String> {
+        self.module_draft
+            .iter()
+            .filter(|d| d.dirty())
+            .map(|d| format!("{}::{}", d.ext.meta.author, d.ext.meta.name))
+            .collect()
     }
 
     /// Recompute the open draft's live name-collision flag (Version-blind, excluding
@@ -1691,6 +1834,18 @@ impl GuiApp {
             }
         }
 
+        // Keep `cur_specs` in step with the screen being shown. `nav_sel` moves
+        // from a dozen call sites (nav tree, category tabs, editor open/close,
+        // delete, fork…), and the module list has to follow all of them — so the
+        // check lives here, once per frame, rather than being sprinkled next to
+        // every assignment where the next one added would forget it. Comparing the
+        // *filter* (not rebuilding unconditionally) keeps it to one rebuild per
+        // screen change; `switch_game`/`reload_extensions` still rebuild eagerly
+        // because they change the underlying data, not just the filter.
+        if self.cur_specs_filter != self.cur_specs_filter() {
+            self.rebuild_cur_specs();
+        }
+
         // Keep the module-editor draft in sync with the selected module.
         if let NavSel::ModuleEditor(id) = self.nav_sel.clone() {
             self.ensure_draft(&id);
@@ -1706,7 +1861,12 @@ impl GuiApp {
         }
 
         let edit_resolution = self.resolve_for_editing();
-        let game_resolution = self.resolve_for_game();
+        // The launch preview's own spec list, kept separate from `cur_specs`:
+        // on the Global Profile / Profile screens the latter is unfiltered, but a
+        // launch command is always for one game. Equal to `cur_specs` everywhere
+        // else, so no other screen changes.
+        let game_specs = self.game_specs();
+        let game_resolution = self.resolve_specs_for_game(&game_specs);
         let mut changed = false;
 
         self.render_title_bar(ctx);
@@ -1801,18 +1961,23 @@ impl GuiApp {
 
         // The spec list both IDE columns (preview body + launch band) resolve and
         // assemble against: the ambient game's applicable modules, with the module
-        // under edit spliced over its entry — or *appended* when it isn't in
-        // `cur_specs` at all. The append matters because the IDE tree browses the
+        // under edit spliced over its entry — or *appended* when it isn't in that
+        // list at all. The append matters because the IDE tree browses the
         // unfiltered `all_specs`: without it, opening a module that doesn't apply to
         // this game would show a preview that silently ignores everything you type.
         // Empty (and never used) outside IDE mode, so Config mode is untouched.
         //
         // S5b: the applicability filter follows the **preview** game when one is
-        // selected, not the ambient one. `cur_specs` is `all_specs` filtered by
-        // `self.appid`; with a preview game chosen, that is the wrong filter —
-        // modules gated to the previewed game would be missing from the launch
-        // string, and modules gated to the ambient game would be in it, both
-        // silently. `None` keeps `cur_specs` verbatim (the pre-S5 behaviour).
+        // selected, not the ambient one. With a preview game chosen, the ambient
+        // game's filter is the wrong one — modules gated to the previewed game
+        // would be missing from the launch string, and modules gated to the ambient
+        // game would be in it, both silently. `None` falls back to the ambient
+        // game's set (the pre-S5 behaviour).
+        //
+        // `game_specs`, not `cur_specs`: in IDE mode the two are equal (`nav_sel`
+        // is always `ModuleEditor(_)`, whose filter *is* the ambient game), but
+        // this list feeds a launch command, and `game_specs` is the list that is
+        // game-filtered by definition rather than by which screen is showing.
         let ide_specs: Vec<Extension> = if self.mode == Mode::Ide {
             let mut specs: Vec<Extension> = match self.preview_game.clone() {
                 Some(pid) => self
@@ -1821,7 +1986,7 @@ impl GuiApp {
                     .filter(|s| s.applies_to(&pid))
                     .cloned()
                     .collect(),
-                None => self.cur_specs.clone(),
+                None => game_specs.clone(),
             };
             if let NavSel::ModuleEditor(id) = self.nav_sel.clone() {
                 let snap = self
@@ -1861,7 +2026,7 @@ impl GuiApp {
         } else if matches!(self.nav_sel, NavSel::ModuleEditor(_)) {
                 match &self.module_draft {
                     Some(draft) => {
-                        let mut preview_specs = self.cur_specs.clone();
+                        let mut preview_specs = game_specs.clone();
                         if let Some(pos) =
                             preview_specs.iter().position(|s| s.id() == draft.id)
                         {
@@ -1884,7 +2049,7 @@ impl GuiApp {
                     &game_resolution
                 };
                 let text =
-                    context::assemble_launch(&self.cur_specs, preview_res, &self.game_command)
+                    context::assemble_launch(&game_specs, preview_res, &self.game_command)
                         .map(|lc| lc.to_string())
                         .unwrap_or_else(|e| format!("<error: {e}>"));
                 (text, Vec::new())
@@ -2187,10 +2352,29 @@ impl GuiApp {
                 "Delete Module",
                 format!("Delete the module \"{label}\"? This removes its manifest file."),
             ),
-            ConfirmAction::DiscardEdits => (
+            ConfirmAction::DiscardEdits { .. } => (
                 "Discard Changes",
-                "This module has unsaved changes. Close the editor and discard them?"
-                    .to_string(),
+                {
+                    // Names are read live rather than captured into the action:
+                    // the dialog and the draft can only disagree if the draft
+                    // changed under an open modal, and the modal backdrop makes
+                    // that impossible. One source of truth, no stale copy.
+                    let names = self.dirty_module_names();
+                    // The empty case is unreachable (nothing raises this action
+                    // with a clean draft) but must still read as a sentence —
+                    // "These modules have unsaved changes: ." would be a visible
+                    // bug if any future caller got the gate wrong.
+                    if names.is_empty() {
+                        "There are unsaved module changes. Discard them and continue?"
+                            .to_string()
+                    } else {
+                        format!(
+                            "These modules have unsaved changes: {}.\n\n\
+                             Discard them and continue?",
+                            names.join(", ")
+                        )
+                    }
+                },
             ),
         };
 
@@ -2250,7 +2434,9 @@ impl GuiApp {
                     self.delete_module(&manifest, self.delete_module_purge);
                     self.delete_module_purge = false;
                 }
-                ConfirmAction::DiscardEdits => self.discard_module(),
+                ConfirmAction::DiscardEdits { pending_nav } => {
+                    self.apply_discard_edits(pending_nav)
+                }
             }
             self.confirm = None;
             return true;
@@ -2699,7 +2885,9 @@ impl GuiApp {
             // Close doubles as Discard: warn before dropping unsaved edits.
             TopAction::Close => {
                 if dirty && editable {
-                    self.confirm = Some(ConfirmAction::DiscardEdits);
+                    // `pending_nav: None` — Close has no destination beyond the
+                    // remembered view `discard_module` already restores.
+                    self.confirm = Some(ConfirmAction::DiscardEdits { pending_nav: None });
                 } else {
                     self.exit_module_editor();
                 }
@@ -4225,9 +4413,13 @@ impl GuiApp {
             }
             if ui
                 .add_sized([w, 30.0], theme::secondary_button(format!("\u{f07b}{sep}Open Folder")))
+                .on_hover_text("Open the user extensions folder")
                 .clicked()
             {
-                let _ = Command::new("xdg-open").arg(self.paths.games_dir()).spawn();
+                // `user_extensions()` — this button sits under the *module* tree,
+                // so it opens where module manifests live. It used to open
+                // `games_dir()`, which had nothing to do with the column it was in.
+                let _ = Command::new("xdg-open").arg(self.paths.user_extensions()).spawn();
             }
         });
     }
@@ -5840,7 +6032,24 @@ impl GuiApp {
             });
 
         if let Some(cat) = nav_action {
-            self.select_nav_category(cat);
+            // The category tabs are the one route out of an open module editor
+            // that nothing else gates: the Config-mode nav tree and MODULES tree
+            // both lock while a draft is open, and Close already prompts — but the
+            // tabs sit *above* both trees and used to switch instantly, dropping a
+            // dirty draft on the floor (the frame-start guard in `ui()` discards it
+            // without a word). Prompt instead, carrying the destination so Confirm
+            // completes the click and Cancel leaves the editor exactly as it was.
+            //
+            // Gated on `dirty()`, not on "a draft exists": a clean draft is
+            // byte-identical to disk, so dropping it loses nothing and a prompt on
+            // every tab click would be pure noise.
+            let dirty = self.module_draft.as_ref().is_some_and(|d| d.dirty());
+            let ide_target = self.all_specs.get(self.ide_selected).map(|s| s.id());
+            if dirty && nav_category_drops_draft(cat, &self.nav_sel, ide_target.as_deref()) {
+                self.confirm = Some(ConfirmAction::DiscardEdits { pending_nav: Some(cat) });
+            } else {
+                self.select_nav_category(cat);
+            }
         }
         if let Some(id) = ide_open {
             self.open_module_editor(id);
@@ -5948,8 +6157,10 @@ impl GuiApp {
                 // Coming back from IDE mode `nav_sel` is still `ModuleEditor(_)`,
                 // which is not a config destination. `exit_module_editor` restores
                 // exactly what Close would (the remembered view, else the ambient
-                // game) and drops the draft — S3b is still single-draft, so leaving
-                // IDE mode discards it; S4 adds the combined "unsaved changes" notice.
+                // game) and drops the draft. Reaching here with a *dirty* draft
+                // means the user already confirmed the discard —
+                // `render_nav_panel` raises `ConfirmAction::DiscardEdits` before
+                // this method is ever called in that case.
                 if matches!(self.nav_sel, NavSel::ModuleEditor(_)) {
                     self.exit_module_editor();
                 }
@@ -6087,12 +6298,11 @@ impl GuiApp {
                 .on_hover_text("Open the user extensions folder")
                 .clicked()
             {
-                // `user_extensions()`, **not** `games_dir()` — IDE Mode edits module
-                // *manifests*, which live in `~/.config/ritz/extensions/`. The
-                // Config-mode module footer's identical-looking button still opens
-                // `games_dir()`; that is a pre-existing target bug on a different
-                // screen and is deliberately left alone here, so the two buttons
-                // now open different folders on purpose.
+                // `user_extensions()` — IDE Mode edits module *manifests*, which
+                // live in `~/.config/ritz/extensions/`. The Config-mode module
+                // footer's identical-looking button opens the same folder
+                // (`render_modules_footer`): both sit under a module tree, so both
+                // mean the same thing.
                 let _ = Command::new("xdg-open").arg(self.paths.user_extensions()).spawn();
             }
             if ui
@@ -8030,6 +8240,7 @@ mod tests {
             cur_specs: Vec::new(),
             cur_dirs: Vec::new(),
             cur_is_folder_ext: Vec::new(),
+            cur_specs_filter: None,
             group_by_author: true,
             show_inheritance: true,
             games: Vec::new(),
@@ -8242,5 +8453,202 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(lossy_env_overwrites(&[a, b], &Resolution::default()), Vec::new());
+    }
+
+    // ── Leaving the module editor with unsaved edits (2026-07-19) ───────────
+    //
+    // The bug these cover: clicking a category tab from an open editor switched
+    // instantly, and the frame-start draft-drop guard in `ui()` then destroyed the
+    // draft without a word. Every route out is now either locked (the Config-mode
+    // nav tree and MODULES tree, while a draft is open) or prompts.
+
+    /// The gate that decides whether a tab click needs a prompt at all. The two
+    /// config destinations always leave the editor; IDE Mode only does when the
+    /// tree's selection is a *different* module than the one under edit — clicking
+    /// IDE Mode while already on that module must stay a silent no-op.
+    #[test]
+    fn nav_category_gate_prompts_only_when_the_draft_would_be_dropped() {
+        let editing = NavSel::ModuleEditor("Ritze::Sample::1.0".to_string());
+        // Both config destinations abandon the editor, whatever the tree shows.
+        for cat in [NavCategory::GamesProfiles, NavCategory::GeneralSettings] {
+            assert!(nav_category_drops_draft(cat, &editing, Some("Ritze::Sample::1.0")));
+            assert!(nav_category_drops_draft(cat, &editing, None));
+        }
+        // IDE Mode re-opening the very module under edit changes nothing.
+        assert!(!nav_category_drops_draft(
+            NavCategory::Ide,
+            &editing,
+            Some("Ritze::Sample::1.0")
+        ));
+        // …but re-opening a different one replaces the draft.
+        assert!(nav_category_drops_draft(NavCategory::Ide, &editing, Some("Other::Mod::1.0")));
+        // No editor open ⇒ nothing to drop (unreachable in practice: a draft can
+        // only exist while `nav_sel` is `ModuleEditor(_)`).
+        assert!(!nav_category_drops_draft(
+            NavCategory::Ide,
+            &NavSel::Game("42".to_string()),
+            Some("Other::Mod::1.0")
+        ));
+    }
+
+    /// The prompt names the modules at risk, in the plural form multi-draft (S4)
+    /// will grow into without rewording the dialog.
+    #[test]
+    fn discard_prompt_names_only_dirty_modules() {
+        let mut app = test_app();
+        // A clean draft is byte-identical to disk: nothing at risk, nothing named.
+        app.module_draft = Some(draft_from(sample_manifest(), true));
+        assert_eq!(app.dirty_module_names(), Vec::<String>::new());
+        // Any edit makes it dirty and puts it in the prompt, by on-disk identity.
+        let mut draft = draft_from(sample_manifest(), true);
+        draft.ext.meta.version = "9.9".to_string();
+        assert!(draft.dirty());
+        app.module_draft = Some(draft);
+        assert_eq!(app.dirty_module_names(), vec!["Ritze::Sample".to_string()]);
+    }
+
+    /// Confirm on a tab-click prompt must do BOTH halves: drop the draft *and*
+    /// complete the navigation the user clicked. Dropping without navigating would
+    /// lose the edits and go nowhere — the worst of both.
+    #[test]
+    fn confirming_a_tab_click_discards_and_completes_the_switch() {
+        let mut app = test_app();
+        let mut draft = draft_from(sample_manifest(), true);
+        draft.ext.meta.version = "9.9".to_string();
+        app.module_draft = Some(draft);
+        app.nav_sel = NavSel::ModuleEditor("Ritze::Sample::1.0".to_string());
+        // Opened from the Global Profile screen, so that is where Close would land.
+        app.editor_return = Some(NavSel::GlobalSettings);
+
+        app.apply_discard_edits(Some(NavCategory::GeneralSettings));
+
+        assert!(app.module_draft.is_none(), "the confirmed discard must drop the draft");
+        assert_eq!(app.nav_sel, NavSel::GeneralSettings, "the click must still be applied");
+    }
+
+    /// Confirm on the *Close* prompt (`pending_nav: None`) keeps its old meaning:
+    /// discard and return to the remembered view, not to a category tab.
+    #[test]
+    fn confirming_close_discards_to_the_remembered_view() {
+        let mut app = test_app();
+        let mut draft = draft_from(sample_manifest(), true);
+        draft.ext.meta.version = "9.9".to_string();
+        app.module_draft = Some(draft);
+        app.nav_sel = NavSel::ModuleEditor("Ritze::Sample::1.0".to_string());
+        app.editor_return = Some(NavSel::Profile("Handhelds".to_string()));
+
+        app.apply_discard_edits(None);
+
+        assert!(app.module_draft.is_none());
+        assert_eq!(app.nav_sel, NavSel::Profile("Handhelds".to_string()));
+    }
+
+    // ── Which modules a screen lists (2026-07-19) ───────────────────────────
+
+    /// `cur_specs` used to be filtered by the last-selected game on every screen,
+    /// so the Global Profile and Profile screens — which apply across games — hid
+    /// modules gated to some other game's `AppIds`. They now list everything; the
+    /// Game screens still filter.
+    #[test]
+    fn only_the_game_screens_filter_the_module_list() {
+        let mut app = test_app();
+        let universal: Extension = serde_json::from_value(json!({
+            "Extension": { "Author": "T", "Name": "Universal", "Version": "1" }
+        }))
+        .unwrap();
+        let other_game: Extension = serde_json::from_value(json!({
+            "Extension": { "Author": "T", "Name": "OtherGame", "Version": "1" },
+            "AppIds": ["999"]
+        }))
+        .unwrap();
+        app.all_specs = vec![universal, other_game];
+        app.all_dirs = vec![PathBuf::from("a"), PathBuf::from("b")];
+        app.all_is_folder_ext = vec![false, false];
+
+        // Game screen (`appid == "42"`): the module gated to appid 999 is not
+        // applicable here, so it stays hidden.
+        app.nav_sel = NavSel::Game("42".to_string());
+        app.rebuild_cur_specs();
+        assert_eq!(names_of(&app.cur_specs), vec!["Universal"]);
+        assert_eq!(app.cur_dirs.len(), 1, "the aligned side lists must track the filter");
+        assert_eq!(app.cur_is_folder_ext.len(), 1);
+
+        // Global Profile and Profile apply across games: everything is listed.
+        for scope in [NavSel::GlobalSettings, NavSel::Profile("Handhelds".to_string())] {
+            app.nav_sel = scope;
+            app.rebuild_cur_specs();
+            assert_eq!(names_of(&app.cur_specs), vec!["Universal", "OtherGame"]);
+            assert_eq!(app.cur_dirs.len(), 2);
+        }
+    }
+
+    /// `selected_ext` is a raw index into `cur_specs`, so a list that changes
+    /// length must not silently re-point it at a different module.
+    #[test]
+    fn selection_follows_the_module_across_a_screen_change() {
+        let mut app = test_app();
+        let other_game: Extension = serde_json::from_value(json!({
+            "Extension": { "Author": "T", "Name": "OtherGame", "Version": "1" },
+            "AppIds": ["999"]
+        }))
+        .unwrap();
+        let universal: Extension = serde_json::from_value(json!({
+            "Extension": { "Author": "T", "Name": "Universal", "Version": "1" }
+        }))
+        .unwrap();
+        // Order matters: on the unfiltered screen "Universal" is at index 1, on the
+        // filtered one it is index 0. A naive index carry-over would move.
+        app.all_specs = vec![other_game, universal];
+        app.all_dirs = vec![PathBuf::from("a"), PathBuf::from("b")];
+        app.all_is_folder_ext = vec![false, false];
+
+        app.nav_sel = NavSel::GlobalSettings;
+        app.rebuild_cur_specs();
+        app.selected_ext = 1; // "Universal"
+        app.nav_sel = NavSel::Game("42".to_string());
+        app.rebuild_cur_specs();
+        assert_eq!(app.cur_specs[app.selected_ext].meta.name, "Universal");
+
+        // The selected module vanishing from the new list falls back to the first
+        // entry rather than leaving a dangling index.
+        app.nav_sel = NavSel::GlobalSettings;
+        app.rebuild_cur_specs();
+        app.selected_ext = names_of(&app.cur_specs)
+            .iter()
+            .position(|n| n == "OtherGame")
+            .unwrap();
+        app.nav_sel = NavSel::Game("42".to_string());
+        app.rebuild_cur_specs();
+        assert_eq!(app.selected_ext, 0);
+        assert_eq!(app.cur_specs[0].meta.name, "Universal");
+    }
+
+    /// The launch-command preview keeps the game filter on every screen: a launch
+    /// command is for one concrete game, so it must never assemble modules that
+    /// cannot apply to it — even while the Profile screen beside it lists them.
+    #[test]
+    fn the_launch_preview_stays_game_filtered_on_profile_screens() {
+        let mut app = test_app();
+        let universal: Extension = serde_json::from_value(json!({
+            "Extension": { "Author": "T", "Name": "Universal", "Version": "1" }
+        }))
+        .unwrap();
+        let other_game: Extension = serde_json::from_value(json!({
+            "Extension": { "Author": "T", "Name": "OtherGame", "Version": "1" },
+            "AppIds": ["999"]
+        }))
+        .unwrap();
+        app.all_specs = vec![universal, other_game];
+        app.all_dirs = vec![PathBuf::from("a"), PathBuf::from("b")];
+        app.all_is_folder_ext = vec![false, false];
+        app.nav_sel = NavSel::Profile("Handhelds".to_string());
+        app.rebuild_cur_specs();
+
+        assert_eq!(names_of(&app.cur_specs), vec!["Universal", "OtherGame"]);
+        assert_eq!(names_of(&app.game_specs()), vec!["Universal"]);
+    }
+
+    fn names_of(specs: &[Extension]) -> Vec<String> {
+        specs.iter().map(|s| s.meta.name.clone()).collect()
     }
 }

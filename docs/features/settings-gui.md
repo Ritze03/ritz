@@ -15,8 +15,8 @@ implementing `eframe::App`.
   closing. Both build a `crates/ritz-app/src/gui.rs:GuiApp` via
   `crates/ritz-app/src/gui.rs:GuiApp::new` and hand it to `eframe::run_native`.
 - **State** — `GuiApp` (`crates/ritz-app/src/gui.rs:GuiApp`, struct at line ~101) holds:
-  loaded extension specs (`all_specs` = every extension, `cur_specs` = only those
-  applicable to the current game per `Extension::applies_to`), the current
+  loaded extension specs (`all_specs` = every extension, `cur_specs` = the modules the
+  **current screen** lists — see "Which modules a screen lists" below), the current
   `NavSel` (which panel is being edited), the loaded `GameConfig`/`Preset`/global
   `Preset`, in-progress text-edit buffers, and a `Detect` handle for the async
   window-class detector. It is built once per window open and mutated in place every
@@ -32,10 +32,11 @@ implementing `eframe::App`.
   change" has to be collected explicitly from every widget's `.changed()`/`.clicked()`.
 - **Two resolutions per frame** — `crate::gui::GuiApp::resolve_for_editing` resolves
   against whichever scope `NavSel` currently points at (so field values in the editor
-  reflect that scope); `crate::gui::GuiApp::resolve_for_game` always resolves against the
-  *actual* game (so the launch-command preview reflects what would really launch, even
-  while editing an unrelated profile or global settings). Editing a profile that's also
-  the game's *active* profile makes `resolve_for_game` read the live in-memory
+  reflect that scope); the second, built in `GuiApp::ui` as
+  `resolve_specs_for_game(&game_specs())`, always resolves the *actual* game's module set
+  (so the launch-command preview reflects what would really launch, even while editing an
+  unrelated profile or global settings). Editing a profile that's also
+  the game's *active* profile makes that resolution read the live in-memory
   `editing_preset_buf` instead of the on-disk copy, so the preview reflects unsaved
   edits. See [scoped-config.md](scoped-config.md) for what `Provenance`/`Resolution`
   mean and how the four scopes (default/global/profile/game) stack.
@@ -474,11 +475,11 @@ the band swap on `Mode`.
 
   **Open Folder here opens `Paths::user_extensions()`** (`~/.config/ritz/extensions/`),
   not `games_dir()` — IDE Mode edits module *manifests*, and that is where they live
-  (2026-07-19). Note the Config-mode module footer (`GuiApp::render_modules_footer`) has
-  an identical-looking Open Folder button that still opens `games_dir()`; that is a
-  **pre-existing target bug on a different screen**, left alone deliberately because
-  changing it is a separate behaviour change needing its own decision. The two buttons
-  therefore open different folders on purpose — this is not drift.
+  (2026-07-19). The Config-mode module footer (`GuiApp::render_modules_footer`) has an
+  identical-looking Open Folder button; as of 2026-07-19 **it opens the same folder**,
+  with the same "Open the user extensions folder" hover tooltip. It used to open
+  `games_dir()`, which had nothing to do with the module tree it sits under — both
+  buttons live beneath a module tree, so both mean the same thing.
 
 - **`NavSel`** (`crates/ritz-app/src/gui.rs:NavSel`) is the four things the tree can
   select: `GeneralSettings`, `GlobalSettings`, `Profile(name)`, `Game(appid)`. Switching
@@ -516,10 +517,51 @@ the band swap on `Mode`.
   - *General Settings/Global Profile* — empty; their controls live in the central panel
     instead.
 
+## Which modules a screen lists (`cur_specs`)
+
+`cur_specs` (+ the index-aligned `cur_dirs` / `cur_is_folder_ext`) is the module set the
+**currently showing screen** lists, rebuilt by `GuiApp::rebuild_cur_specs` from
+`all_specs`. The filter it applies comes from `GuiApp::cur_specs_filter`:
+
+| Screen | Filter |
+| --- | --- |
+| Game (`NavSel::Game`), manifest editor, General Settings | `Extension::applies_to(appid)` — the ambient game |
+| **Global Profile** (`NavSel::GlobalSettings`), **Profile** (`NavSel::Profile`) | none — every loaded module |
+
+*Why the Global Profile and Profile screens take no filter* (2026-07-19): those scopes
+apply **across** games. Filtering them by whichever game happened to be selected last is
+meaningless — the ambient game is not what the screen is configuring — and it *hid*
+modules the user has to be able to set a global/profile value for. Before this, the
+filter was applied unconditionally because `rebuild_cur_specs` only ever ran from
+`switch_game`.
+
+Mechanics worth knowing:
+
+- **When it rebuilds** — `GuiApp::ui` compares the stored `cur_specs_filter` against
+  `cur_specs_filter()` once per frame and rebuilds on a change, so a screen switch costs
+  exactly one rebuild. `switch_game` / `reload_extensions` still rebuild eagerly (they
+  change the underlying data, not just the filter). *Why the check lives in the frame
+  loop* rather than beside each assignment: `nav_sel` moves from a dozen call sites, and
+  the next one added would forget it.
+- **Selection safety** — `selected_ext` is a raw *index* into `cur_specs`, so a list that
+  changes length would otherwise re-point it at a different module. `rebuild_cur_specs`
+  re-finds the previously selected module by `Extension::id()` and only falls back to
+  index 0 when it is genuinely absent from the new list.
+- **This only ever widens the list.** `RequiresDesktop`-gated modules are dropped much
+  earlier — at load time in `crate::context::load_extensions`, shared by
+  `AppContext::load` and the GUI hot-reload — so they never reach `all_specs` and
+  dropping the `AppIds` filter cannot resurrect them.
+- **The launch preview keeps the game filter regardless** — `GuiApp::game_specs()` is
+  `all_specs` filtered by the ambient `appid` on *every* screen, and it (not `cur_specs`)
+  is what the launch-command preview and `ide_specs` assemble from. *Why:* a launch
+  command is by definition for one concrete game, so assembling it from modules that can
+  never apply to that game would print a command that will never be run. The two lists
+  are equal everywhere except the Global Profile / Profile screens.
+
 ## Module tree (`ext_list` panel)
 
-`crate::gui::GuiApp::render_ext_tree` renders `cur_specs` (only extensions applicable to
-the current game) either **grouped by Author** (`group_by_author: true`, the default —
+`crate::gui::GuiApp::render_ext_tree` renders `cur_specs` (the modules the current
+screen lists — see "Which modules a screen lists") either **grouped by Author** (`group_by_author: true`, the default —
 a flat `CollapsingHeader` per author) or **grouped by folder** (mirrors the nested
 `extensions/` directory layout on disk via `crates/ritz-app/src/gui.rs:TreeNode`, a
 simple trie built from each spec's `rel_dir`). *Why folder mode collapses single-leaf
@@ -749,6 +791,35 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   user lands back on the real module. *Why no separate Discard button:* Close already means
   "leave without saving"; two buttons for one outcome, with the warning attached to only one
   of them, was the confusing part.
+- **Leaving the editor with unsaved edits always asks first** (2026-07-19) — the three
+  **category tabs** (Profiles / IDE Mode / Settings) sit *above* both locked trees and
+  used to switch instantly, so clicking Profiles or Settings from a dirty editor let the
+  frame-start nav-away guard destroy the draft without a word. That was silent data loss,
+  and it is now gated: `GuiApp::render_nav_panel` raises
+  `ConfirmAction::DiscardEdits { pending_nav: Some(cat) }` instead of applying the click.
+  Confirm discards the draft **and completes the switch**; Cancel leaves the editor and
+  the draft exactly as they were.
+  - *Why the destination is a payload on the existing variant* rather than a second
+    variant: both cases render the identical dialog and differ only in what runs after
+    Confirm. `pending_nav: None` is the editor's own Close button (Close doubling as
+    Discard), which lands on the remembered view via `discard_module`.
+  - **Only when dirty.** A clean draft is byte-identical to disk, so dropping it loses
+    nothing and prompting on every tab click would be pure noise. The pure predicate
+    `nav_category_drops_draft` decides *which* clicks even qualify: the two config
+    destinations always leave the editor, while **IDE Mode** only does when the IDE
+    tree's selection is a *different* module than the one under edit (clicking IDE Mode
+    while already on that module is a genuine no-op and must not prompt).
+  - The prompt **names the modules at risk** — "These modules have unsaved changes:
+    Author::Name." — from `GuiApp::dirty_module_names`, which returns a list even though
+    S3b only ever holds one draft, so multi-draft (S4) grows the list without rewording
+    the dialog. Names come from the on-disk identity (`ext.meta`), not the staged rename
+    buffers: a half-typed rename is not what the user recognises the module by.
+  - Confirm runs `GuiApp::apply_discard_edits`, a method (not an inline match arm) *so it
+    can be tested* — inline in `render_confirm_dialog` it is only reachable through a
+    live egui frame.
+  - **Still unguarded, by design:** switching modules *within* the IDE tree replaces a
+    dirty draft silently. That tree is deliberately not lockable (see above) and per-row
+    dirty markers are the S4 answer; likewise Fork/Create from a dirty draft drops it.
 - **Locked trees while editing** — the nav-away guard above is now a *backstop*, not the
   normal path: while a draft exists the **MODULES tree** is wrapped
   in `ui.add_enabled_ui(module_draft.is_none(), …)`, so it greys out and can't swap the
@@ -1145,7 +1216,8 @@ already holds `&mut self`.
   only the game/profile layers are scratch. `resolve_specs_for_editing` is left untouched
   (a `nav_sel` arm there could not have distinguished the two columns anyway).
 - **One spec list for both halves.** `ide_specs` is `all_specs` filtered by
-  `applies_to(preview_appid)` when a preview game is selected, and `cur_specs` otherwise,
+  `applies_to(preview_appid)` when a preview game is selected, and `game_specs()` (the
+  ambient game's set) otherwise,
   with the draft snapshot spliced over its entry or **appended** when the module isn't in
   the list at all. *Why the preview-game filter:* with a game selected, filtering by the
   *ambient* `appid` would silently omit modules gated to the previewed game and include
@@ -1194,7 +1266,7 @@ dialog rather than firing immediately.
 ## Confirmation dialog
 
 Any destructive action (delete game/profile, clear settings, re-export resources,
-config cleanup) is staged into `GuiApp::confirm: Option<ConfirmAction>`
+config cleanup, discarding unsaved module edits) is staged into `GuiApp::confirm: Option<ConfirmAction>`
 (`crates/ritz-app/src/gui.rs:ConfirmAction`) instead of executing inline, and carried
 out by `crate::gui::GuiApp::render_confirm_dialog` only after the user clicks Confirm in
 a modal `egui::Window` (a full-screen `egui::Area` backdrop swallows clicks so only the
