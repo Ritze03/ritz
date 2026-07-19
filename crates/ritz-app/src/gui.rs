@@ -43,13 +43,13 @@ const NAV_W: f32 = 280.0;
 ///
 /// | term   | what it is                                                       |
 /// |--------|------------------------------------------------------------------|
-/// | `6.0`  | the frame's top inner margin                                     |
+/// | `14.0` | the frame's top inner margin — equal to its own left margin (below) and to Config mode's module-detail header top inset; see *Why 14 and not 6* |
 /// | `23.0` | the name/version/author + button row: `interact_size.y` (`theme.rs`), which is at or above the 19pt heading's galley |
 /// | `7.0`  | `item_spacing.y` (`theme.rs`) — egui's gap between those two rows |
 /// | `16.0` | [`IDE_HEADER_DESC_H`], the one-line description slot             |
-/// | `8.0`  | the frame's bottom inner margin                                  |
+/// | `10.0` | the frame's bottom inner margin — matches Config's `add_space(10.0)` gap between the description and its trailing separator; see *Why 10 and not 8* |
 ///
-/// *Why two rows and not one* (2026-07-19): the one-row band (`6 + 23 + 8 = 37`)
+/// *Why two rows and not one* (2026-07-19): the one-row band (`14 + 23 + 10 = 47`)
 /// read as a cramped strip next to Config mode's module header. That header
 /// (`GuiApp::render_module_detail_header`) has **no** fixed height — it is
 /// natural-sized — but its structure is fixed: `6` space, the same 23pt heading
@@ -57,7 +57,22 @@ const NAV_W: f32 = 280.0;
 /// reproduces it minus the two parts it does not own: the edit-context line (IDE
 /// Mode has no edit scope to name — the tree shows the selection) and the
 /// trailing separator (the panel's own `show_separator_line` draws that). What is
-/// left is heading row + description, which is the 60pt here.
+/// left is heading row + description, which is the 70pt here.
+///
+/// *Why 14 and not 6, and why the left margin also became 14* (2026-07-19):
+/// same-day fix to Config mode's module-detail header found its top inset (the
+/// `CentralPanel`'s 8px default margin + a 6px `add_space`) came out to 14
+/// against an unrelated 8px left margin — visibly lopsided, corner-unsquare
+/// (`GuiApp::render_module_detail_header`'s own doc comment has the fix).
+/// Rather than reproduce that exact 8+6 split here too, this band's frame
+/// margin folds the two into one literal, `top: 14.0, left: 14.0` (see the
+/// `.inner_margin(..)` call below) — same total breathing room Config now has,
+/// with top and left equal on both sides of the mode split.
+///
+/// *Why 10 and not 8:* Config's equivalent gap — between the description text
+/// and the separator drawn right after it — is `add_space(10.0)`, not a panel
+/// margin. `10.0` here reproduces that specific gap instead of an unrelated
+/// number that merely looked close.
 ///
 /// *Why `exact_height` and not auto-sizing:* the band spans the editor **and**
 /// preview columns, so any height change there reflows half the window. Pinning
@@ -65,7 +80,7 @@ const NAV_W: f32 = 280.0;
 /// [`GuiApp::editor_header_info`] returns `None` (a module switch, before
 /// `ensure_draft` catches up) — an auto-sized band would collapse to nothing and
 /// snap back, which reads as a flicker.
-const IDE_HEADER_H: f32 = 6.0 + 23.0 + 7.0 + IDE_HEADER_DESC_H + 8.0;
+const IDE_HEADER_H: f32 = 14.0 + 23.0 + 7.0 + IDE_HEADER_DESC_H + 10.0;
 
 /// Height of the header band's description slot, in points.
 ///
@@ -1608,18 +1623,24 @@ impl GuiApp {
                     // tried, seen, rejected.
                     .frame(egui::Frame::none()
                         .fill(theme::PANEL)
+                        // top/left both 14, bottom 10 — see [`IDE_HEADER_H`]'s
+                        // doc comment for the derivation and the 2026-07-19
+                        // symmetry fix that set these (was 8/16/6/8).
                         .inner_margin(egui::Margin {
-                            left: 8.0,
+                            left: 14.0,
                             right: 16.0,
-                            top: 6.0,
-                            bottom: 8.0,
+                            top: 14.0,
+                            bottom: 10.0,
                         }))
                     .show(ctx, |ui| {
                         // `None` renders an empty band rather than skipping the
                         // panel: `exact_height` holds the layout still while
                         // `ensure_draft` catches up with a module switch.
                         if let Some(info) = info {
-                            ide_action = render_editor_header_row(ui, cache, info);
+                            // `ide_mode: true` — this whole block only runs
+                            // under `self.mode == Mode::Ide` (see the
+                            // enclosing `if` a few lines up).
+                            ide_action = render_editor_header_row(ui, cache, info, true);
                             // Second row, full band width. *Why below the name row
                             // and not beside it:* the action cluster owns the right
                             // end of row one, so anything sharing that row competes
@@ -1730,14 +1751,29 @@ impl GuiApp {
             // and the settings body (ScrollArea + section/field loop + legend/hint)
             // are extracted methods so S3b can call the body a second time for a
             // read-only preview column without duplicating this layout.
-            self.render_module_detail_header(ui, &spec);
+            //
+            // *Why the extra 6px left inset* (2026-07-19): `CentralPanel::default()`
+            // (this whole panel's frame, shared with the General Settings and
+            // Config-mode module-editor branches above) gives an 8px margin on
+            // every side. `render_module_detail_header` then adds its own
+            // `add_space(6.0)` above the heading, so the header sat at top = 14
+            // (8 + 6) but left = 8 — visibly closer to the left edge than the
+            // top, which read as lopsided. This local `Frame` adds 6px on the
+            // left ONLY for this branch, bringing left to 14 too, without
+            // touching the shared panel margin the other `nav_sel` arms render
+            // through (they were never part of this complaint).
+            egui::Frame::none()
+                .inner_margin(egui::Margin { left: 6.0, right: 0.0, top: 0.0, bottom: 0.0 })
+                .show(ui, |ui| {
+                    self.render_module_detail_header(ui, &spec);
 
-            let ext_id = spec.id();
-            let ext_res = edit_resolution.exts.get(&ext_id);
-            let full_width = self.general_config.full_width;
-            if self.render_module_settings_body(ui, &spec, ext_res, full_width, false) {
-                changed = true;
-            }
+                    let ext_id = spec.id();
+                    let ext_res = edit_resolution.exts.get(&ext_id);
+                    let full_width = self.general_config.full_width;
+                    if self.render_module_settings_body(ui, &spec, ext_res, full_width, false) {
+                        changed = true;
+                    }
+                });
         });
 
         // IDE mode's header band produced its click before the preview column and
@@ -2024,11 +2060,34 @@ struct EditorHeaderInfo {
 /// fixed-height panel spanning both columns, so anything that changed height
 /// here would reflow the editor *and* the preview column. The `editable`-gated
 /// Delete / Rename buttons are safe: `editable` is fixed per module, and they
-/// grow the row horizontally, never vertically.
+/// grow the row horizontally, never vertically. The `ide_mode`-gated Save /
+/// Close below are safe for the same reason: `ide_mode` is fixed for the
+/// whole session (it's `self.mode`), so a given call site's row width never
+/// changes frame to frame.
+///
+/// `ide_mode` distinguishes the two call sites, which want different
+/// behaviour for a **bundled** (non-editable) module (2026-07-19):
+///
+/// - **Config mode** (`GuiApp::render_module_editor`'s `header_inline` call):
+///   keeps Save and Close always — Save disabled with a "Fork to edit"
+///   tooltip (the established way Config teaches the fork gesture), and Close
+///   genuinely returns to the previous view (`GuiApp::exit_module_editor` via
+///   `editor_exit_target`), useful regardless of editability.
+/// - **IDE mode** (the `ide_module_header` panel): hides both for a bundled
+///   module. Save can never be enabled there (nothing to save — the fields
+///   render disabled). Close is not "leave the editor": IDE mode's
+///   `nav_sel == NavSel::ModuleEditor(_)` invariant reopens whatever the tree
+///   has selected the next frame (see the guard right after the doc comment
+///   on `Mode::Ide`, and `GuiApp::dispatch_top_action`'s `TopAction::Close`
+///   arm), so in IDE mode Close only ever discards-and-reloads the current
+///   selection. On a bundled module there is nothing to discard, so the
+///   reload is a no-op — the button did nothing observable, which is exactly
+///   why it is hidden here rather than left disabled.
 fn render_editor_header_row(
     ui: &mut egui::Ui,
     cache: &mut IconCenterCache,
     info: &EditorHeaderInfo,
+    ide_mode: bool,
 ) -> TopAction {
     let mut action = TopAction::None;
     ui.horizontal(|ui| {
@@ -2038,21 +2097,26 @@ fn render_editor_header_row(
         ui.label(egui::RichText::new(format!("by {}", info.author)).color(theme::FAINT));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // Right-to-left layout: added first == drawn rightmost, so this
-            // reads [Fork] [Delete] [Close] [Save] on screen.
-            let mut save = ui.add_enabled(info.save_on, theme::primary_button("Save"));
-            if !info.editable {
-                save = save.on_hover_text("Fork to edit");
-            }
-            if save.clicked() {
-                action = TopAction::Save;
-            }
-            // Always-present exit. Doubles as Discard: with unsaved edits it
-            // asks for confirmation first, otherwise it just leaves.
-            if icon_button(ui, cache, "\u{f00d}", "Close", IconBtn::Secondary, true)
-                .on_hover_text("Leave the editor (discards unsaved edits)")
-                .clicked()
-            {
-                action = TopAction::Close;
+            // reads [Fork] [Delete] [Close] [Save] on screen — Close and Save
+            // only when the module is editable OR this is Config mode; see
+            // the `ide_mode` doc comment above for why the two modes differ.
+            if info.editable || !ide_mode {
+                let mut save = ui.add_enabled(info.save_on, theme::primary_button("Save"));
+                if !info.editable {
+                    save = save.on_hover_text("Fork to edit");
+                }
+                if save.clicked() {
+                    action = TopAction::Save;
+                }
+                // Doubles as Discard: with unsaved edits it asks for
+                // confirmation first, otherwise it just leaves (Config mode)
+                // or discards-and-reloads (IDE mode).
+                if icon_button(ui, cache, "\u{f00d}", "Close", IconBtn::Secondary, true)
+                    .on_hover_text("Leave the editor (discards unsaved edits)")
+                    .clicked()
+                {
+                    action = TopAction::Close;
+                }
             }
             if info.editable
                 && ui
@@ -2361,7 +2425,9 @@ impl GuiApp {
 
         ui.add_space(6.0);
         if header_inline {
-            action = render_editor_header_row(ui, &mut cache, &info);
+            // `ide_mode: false` — `header_inline` is only ever `true` when
+            // `self.mode == Mode::Config` (see this method's doc comment).
+            action = render_editor_header_row(ui, &mut cache, &info, false);
         }
         render_editor_status_lines(ui, &info);
         ui.add_space(10.0);

@@ -154,6 +154,21 @@ The module header — name, version, author, and the `[Fork] [Delete] [✕ Close
 Rendered by the free function `render_editor_header_row`; see "Header / status / body
 split" under the manifest editor for how the state reaches it across panel closures.
 
+*Save/Close hidden for a bundled module in IDE mode* (2026-07-19): `render_editor_header_row`
+takes an `ide_mode: bool` (`true` from this band, `false` from Config mode's inline call in
+`render_module_editor`) and skips Save and Close entirely when `!info.editable && ide_mode`
+— leaving only `[Fork]`. Save can never be enabled on a bundled module (nothing to save —
+the fields render disabled) and, in IDE mode specifically, Close is not "leave the editor":
+the `Mode::Ide` invariant (`nav_sel` is always `NavSel::ModuleEditor(_)`) reopens whatever
+the tree has selected on the very next frame (the guard in `GuiApp::ui` right after the
+draft-drop guard), so Close in IDE mode only ever discards-and-reloads the current
+selection — see `GuiApp::dispatch_top_action`'s `TopAction::Close` arm. On a bundled module
+there is nothing to discard, so the reload was a no-op; hiding the button removes a control
+that did nothing observable. **Config mode keeps both for bundled modules, unchanged**:
+Close there genuinely returns to the previous view (`editor_exit_target`), and Save's
+disabled "Fork to edit" tooltip is the established way Config teaches the fork gesture —
+this fix does not touch that path.
+
 *Why full-width and not inside the editor column* (2026-07-19): the action cluster plus
 the heading needs roughly 500pt of row. Inside the editor's half — `(window − 280) / 2`
 — that made the **button row the thing setting the editor column's minimum usable
@@ -165,17 +180,25 @@ decouples the editor column's width from the button row outright, rather than mo
 the problem somewhere else.
 
 - **`exact_height(IDE_HEADER_H)`**, where
-  `IDE_HEADER_H = 6.0 + 23.0 + 7.0 + 16.0 + 8.0 = 60.0` — top inset, the
+  `IDE_HEADER_H = 14.0 + 23.0 + 7.0 + 16.0 + 10.0 = 70.0` — top inset, the
   `interact_size.y` heading/button row, one `item_spacing.y`, the
-  `IDE_HEADER_DESC_H` description slot, bottom inset. *Where 60 comes from*
-  (2026-07-19): the first cut was one row (`6 + 23 + 8 = 37`) and read as a cramped
-  strip beside Config mode's module header. That header
-  (`render_module_detail_header`) is **not** fixed-height — it is natural-sized — but
-  its structure is: `6` space, the same 23pt heading row, an edit-context line, the
-  description, `10` space, a separator. The band reproduces it minus the two pieces it
-  does not own — the edit-context line (IDE Mode has no edit scope to name; the tree
-  shows the selection) and the trailing separator (`show_separator_line` draws that) —
-  which leaves heading row + description. *Why pinned rather than auto-sized:*
+  `IDE_HEADER_DESC_H` description slot, bottom inset. The frame's `inner_margin` is
+  `{ left: 14.0, right: 16.0, top: 14.0, bottom: 10.0 }`. *Where 70 comes from*
+  (2026-07-19): the first cut was one row (`6 + 23 + 8 = 37`), then two rows at
+  `6 + 23 + 7 + 16 + 8 = 60` (top/bottom inset `6`/`8`) — both read as cramped beside
+  Config mode's module header. That header (`render_module_detail_header`) is **not**
+  fixed-height — it is natural-sized — but its structure is: `6` space (on top of the
+  enclosing `CentralPanel`'s own 8px margin — 14 total), the same 23pt heading row, an
+  edit-context line, the description, `10` space, a separator. The band reproduces it
+  minus the two pieces it does not own — the edit-context line (IDE Mode has no edit
+  scope to name; the tree shows the selection) and the trailing separator
+  (`show_separator_line` draws that) — which leaves heading row + description, now at
+  the same 14px top inset as Config's fixed same-day fix (see "Header top/left
+  symmetry" under the manifest editor's "Module editor" section). The frame's *left*
+  margin was raised from 8 to 14 to match, for the same top-vs-left symmetry reason,
+  and the *bottom* margin was raised from 8 to 10 to match Config's `add_space(10.0)`
+  gap between the description and its trailing separator — the closest analogue to
+  this frame's own bottom margin. *Why pinned rather than auto-sized:*
   the band spans half the window, so any height change reflows both columns; and on the
   frames where `GuiApp::editor_header_info` returns `None` (a module switch, before
   `ensure_draft` catches up) an auto-sized band would collapse to nothing and snap back,
@@ -519,6 +542,18 @@ free-form args/env at 16. `multi_string` is that primitive now — no cap, and n
 manifest concept was needed: the backend pre-pass just expands one `multi_string` list
 into N vars/args at build time instead of the GUI faking the list with numbered fields.
 
+*Header top/left symmetry* (2026-07-19): `render_module_detail_header` sits inside
+`CentralPanel::default()`'s frame, which gives an 8px margin on every side; the header
+then adds its own `add_space(6.0)` above the heading, putting its top inset at 14px
+against an unrelated 8px left inset — the header read closer to the left edge than the
+top, i.e. not square in its corner. Fixed with a local `egui::Frame` (6px left-only
+inner margin) wrapped around just the header + settings-body call in `GuiApp::ui`,
+bringing the left inset to 14px too — without touching the shared `CentralPanel` frame
+the General Settings and Config-mode module-editor branches render through, which were
+never part of the complaint. `IDE_HEADER_H`, below, imports this same left = top = 14
+spacing to give IDE mode's header band the same breathing room the fix gave Config
+mode's.
+
 ### Field rendering — `render_field`
 
 `crate::gui::GuiApp::render_field` draws one row per field inside a scope-tinted
@@ -690,9 +725,11 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
     version, author and every gate flag (`editable`, `dirty`, `save_on`, `has_identity`,
     `identity_err`, `sections_unique`, `validate_err`, `req_ok`) out of the draft. It takes
     `&self` only, so it can run **before any panel is declared**.
-  - `render_editor_header_row(ui, cache, info) -> TopAction` draws the name/version/author
-    heading and the `[Fork] [Delete] [✕] [Save]` (+ `Rename`) cluster, and *returns* the
-    click rather than acting on it.
+  - `render_editor_header_row(ui, cache, info, ide_mode) -> TopAction` draws the
+    name/version/author heading and the `[Fork] [Delete] [✕] [Save]` (+ `Rename`)
+    cluster, and *returns* the click rather than acting on it. `ide_mode` hides
+    Save/Close for a bundled module in IDE mode only — see "IDE-mode header band"
+    above.
   - `render_editor_status_lines(ui, info)` draws the dirty/validation/identity lines.
 
   *Why the snapshot struct rather than passing `&ModuleDraft`:* IDE mode renders the header
@@ -757,7 +794,9 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
 - **Fork / Create / Delete** (Phase 3 stage 2a) — the editor header carries a **Fork**
   button (on *any* module, bundled or user) and a **Delete** button (only when
   `editable`), laid out **[Fork] [Delete] [Close] [Save]** left→right (plus **Rename** when an
-  identity edit is staged). Creating a new module is reached only via IDE Mode's
+  identity edit is staged). In **IDE mode**, a bundled (non-`editable`) module drops
+  Close and Save too, leaving just **[Fork]** — see "IDE-mode header band" above; this
+  is unchanged in Config mode. Creating a new module is reached only via IDE Mode's
   **+ New Module** button (see the nav-panel bottom band above) — the Config-mode
   `ext_list` header's own glyph-only **+** button and the read-only module detail
   view's **✎ Edit** button were both removed on 2026-07-19 as redundant now that IDE
