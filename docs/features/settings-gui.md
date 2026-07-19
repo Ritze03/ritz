@@ -24,8 +24,8 @@ implementing `eframe::App`.
   directly.
 - **Frame loop** — `crates/ritz-app/src/gui.rs:GuiApp::ui` (the `eframe::App::update`
   body) runs once per frame: handles Ctrl+R hot-reload, resolves the config twice (see
-  below), lays out four panels (title bar, nav panel, module-tree panel, launch-preview
-  footer, central field editor), then persists if anything changed. It doesn't diff
+  below), lays out the panels for the current `Mode` (see Layout below), then persists if
+  anything changed. It doesn't diff
   state — `changed` is a `bool` threaded through every render call, and `true` at the
   end triggers `crate::gui::GuiApp::persist` unconditionally. *Why:* egui is
   immediate-mode with no widget change events outside the frame, so "did anything
@@ -40,7 +40,22 @@ implementing `eframe::App`.
   edits. See [scoped-config.md](scoped-config.md) for what `Provenance`/`Resolution`
   mean and how the four scopes (default/global/profile/game) stack.
 
-### Layout: four panels per frame
+### Two modes: `Mode::Config` and `Mode::Ide`
+
+`crates/ritz-app/src/gui.rs:Mode` selects which *shape* the window takes. It is
+**orthogonal to `NavSel`**, held in memory only, and never written to any config file
+(reopening the settings window always lands in `Config`).
+
+*Why a separate axis and not another `NavSel` variant:* `NavSel` answers "which config
+scope am I editing"; `Mode` answers "which shape is the window in". Folding the two
+together would force every exhaustive `match self.nav_sel` in `gui.rs` to grow an arm
+with nothing to say about scopes — and would collide with `NavSel::ModuleEditor`, which
+IDE Mode *uses* as its "which module is open" carrier. IDE mode maintains the invariant
+`nav_sel == NavSel::ModuleEditor(_)` at all times (re-established at the top of
+`GuiApp::ui` if anything clears it, which is what makes the editor's Close button read
+as "discard and reload" there).
+
+### Layout: `Mode::Config` — four panels per frame
 
 ```
 ┌───────────── titlebar (render_title_bar) ─────────────────┐
@@ -62,12 +77,88 @@ selected — General Settings has no modules to browse), a bottom
 editor. *Why hide the module list for General Settings:* that screen edits app-wide
 preferences, not extension variables, so a module tree would have nothing to select.
 
+### Layout: `Mode::Ide` — module tree | manifest editor | read-only preview
+
+```
+┌───────────── titlebar (render_title_bar) ─────────────────────────┐
+├────────────────┬──────────────────────┬─────────────────────────┤
+│ ┌ GENERAL ───┐ │  manifest editor      │  PREVIEW (read-only)     │
+│ │ Gen. Set.  │ │  (render_module_      │  (render_module_settings │
+│ │ IDE Mode   │ │   editor, full-width) │   _body, read_only=true) │
+│ │ Games/Prof.│ │                       │                          │
+│ └────────────┘ │                       │                          │
+│ ⚠ errors banner│                       │                          │
+│ [module tree,  │                       │                          │
+│  all_specs]    │                       │                          │
+├────────────────┼──────────────────────┼─────────────────────────┤
+│ Group by Author│  ide_editor_band      │  ide_launch_band         │
+│ [+ New Module ]│  (198px, declared     │  (launch command, nested │
+│ [Open Folder  ]│   but empty)          │   inside the preview)    │
+└────────────────┴──────────────────────┴─────────────────────────┘
+```
+
+**Panel declaration order is load-bearing** — egui hands each panel the rect left over
+by the panels declared before it, so `GuiApp::ui` declares, in this order: titlebar →
+`SidePanel::left("nav")` → `SidePanel::right("ide_preview")` →
+`TopBottomPanel::bottom("ide_editor_band")` → `CentralPanel`. Declaring the right panel
+first is what makes the bottom band span only the editor column instead of the whole
+window.
+
+- The `ext_list` column is **dropped entirely** in IDE mode (its tree moves into the nav
+  column); a second copy would be redundant and would eat the width the editor/preview
+  split needs.
+- The full-width `preview` footer is **skipped entirely**, not emptied. *Why:* a
+  zero-content bottom panel still reserves height across the full window width, which
+  would stack a dead strip under the editor column on top of `ide_editor_band`.
+- `ide_editor_band` is deliberately **declared but empty**, reserved for a future
+  diagnostics pane. Its `exact_height(198.0)` matches the nav footer band so the two
+  bottom edges align.
+- `ide_preview` is `resizable(true)` with `width_range(400.0..=900.0)`, defaulting to
+  ~45% of everything right of the fixed 280px nav — favouring the editor rather than a
+  hard 50/50.
+- The editor column renders at `body_max_width(ui, full_width = true)`: the 743px clamp
+  exists for Config mode's wider unsplit central panel and would only add a dead gutter
+  here.
+
 ## Navigation panel
 
-`crate::gui::GuiApp::render_nav_panel` splits into a header ("Profiles / Games"), a
-scrollable tree (`crate::gui::GuiApp::render_nav_tree`), and a fixed-height (198px)
-bottom settings band (`crate::gui::GuiApp::render_nav_settings`) that shows
-context-specific controls for whatever's selected.
+`crate::gui::GuiApp::render_nav_panel` splits into a header, a scrollable body, and a
+fixed-height (198px) bottom band. The header is constant across both modes; the body and
+the band swap on `Mode`.
+
+- **Header — the GENERAL category box** (`GuiApp::render_nav_category_box`): a bordered
+  frame (the `editor_card` border idiom, rebuilt locally — `editor_card` itself is
+  specialised for the manifest editor) titled `GENERAL`, containing three
+  `full_selectable` rows: **General Settings**, **IDE Mode**, **Games / Profiles**. It
+  replaced the old single `header_label("Profiles / Games")`. *Why a box and not two
+  top-level categories:* it is the cheapest change that splits the old
+  "Profiles / Games" destination in two — the nav's existing "fixed header box above a
+  scrolling tree" shape is reused verbatim and only the body's data source swaps.
+  Clicks are collected as a `NavCategory` and applied after the render closure by
+  `GuiApp::select_nav_category` (the closure already holds `&mut self`).
+  - *Games / Profiles* from IDE mode calls `exit_module_editor`, which restores the
+    remembered view (else the ambient game) and drops the draft.
+  - *IDE Mode* opens `all_specs[ide_selected]` in the editor, establishing the
+    `nav_sel == ModuleEditor(_)` invariant IDE mode's columns rely on.
+- **Body** — `Mode::Config`: `GuiApp::render_nav_tree`, wrapped in the `nav_live`
+  disable-while-dirty gate. `Mode::Ide`: `GuiApp::render_ide_module_tree` — the
+  load-error banner (rehomed from `ext_list`, which IDE mode drops; losing it in an
+  *authoring* mode would mean writing broken JSON and getting silence) over
+  `render_ext_tree` across the unfiltered `all_specs`, with `show_inheritance = false`
+  (IDE mode edits manifests, not scopes, so inheritance badges describe nothing).
+  **The IDE tree is deliberately NOT gated by `add_enabled_ui`** — it is the primary
+  navigation there, and locking it on a dirty draft would mean you can never leave the
+  module you just typed into. Per-row dirty markers replace locking (S4).
+  Selection lives in `ide_selected` (an index into `all_specs`, distinct from
+  `selected_ext`, which indexes `cur_specs` — different lengths and orderings). `leaf`
+  writes the index directly and never opens the editor, so the click is turned into an
+  `open_module_editor` call *after* the tree renders.
+- **Bottom band** — `Mode::Config`: `GuiApp::render_nav_settings`, context-specific
+  controls for whatever's selected. `Mode::Ide`: `GuiApp::render_ide_nav_footer` —
+  Group by Author, a full-width **+ New Module** (same dialog as the `ext_list` header's
+  `+` glyph), and Open Folder. It deliberately omits **Show Inheritance** (no scope in
+  IDE mode) and **Clear Settings** (it clears stored *config*; IDE Mode edits manifests
+  and must never touch config).
 
 - **`NavSel`** (`crates/ritz-app/src/gui.rs:NavSel`) is the four things the tree can
   select: `GeneralSettings`, `GlobalSettings`, `Profile(name)`, `Game(appid)`. Switching
@@ -465,7 +556,10 @@ before resolving, so the launch command reflects unsaved edits.
 
 ## Launch-command preview footer
 
-The bottom `preview` panel (in `GuiApp::ui`) is either a fixed 198px band or, if
+Two different panels depending on `Mode`. In `Mode::Ide` the full-width footer below is
+not declared at all — see **IDE-mode preview column** further down.
+
+The bottom `preview` panel (in `GuiApp::ui`, `Mode::Config` only) is either a fixed 198px band or, if
 `GeneralConfig::dynamic_preview` is on, sized to its content. It shows the **About**
 box (repo link + credits, `crate::gui::GuiApp::render_about`) when `NavSel` is
 `GeneralSettings` — there's no launch command to preview there — otherwise it calls
@@ -480,6 +574,48 @@ assembled command is rendered with `crates/ritz-app/src/gui.rs:command_job`,
 which highlights every `%command%` token in the accent color. See
 [launch-command-assembly.md](launch-command-assembly.md) for what `assemble_launch`
 does with the resolved fields.
+
+## IDE-mode preview column (`GuiApp::render_ide_preview_panel`)
+
+The right-hand `ide_preview` `SidePanel` in `Mode::Ide`: a WYSIWYG render of the module
+under edit — `render_module_settings_body(.., full_width = true, read_only = true)` —
+over a nested `TopBottomPanel::bottom("ide_launch_band")`. The band is declared **before**
+the inner `CentralPanel`; nested panels obey declaration order exactly like top-level
+ones. *Why nest it here instead of a full-width footer:* the launch string belongs to the
+preview, and the space under the editor column is the reserved diagnostics band.
+
+- **Strictly read-only.** `read_only = true` gates every write at the `editable` flag in
+  `render_field` / `render_value_editor` / `render_multi_string_field` /
+  `render_env_pair_field` (including the `window_class` **Detect** button), so nothing
+  from this column can reach `set_scoped` — whose `ModuleEditor(_)` arm writes the *real*
+  game config. A `debug_assert!` on the returned `changed` bool guards the invariant.
+- **One spec list for both halves.** `ide_specs` = `cur_specs` with the draft snapshot
+  spliced over its entry, or **appended** when the module isn't in `cur_specs` at all.
+  *Why the append:* the IDE tree browses the unfiltered `all_specs`, so opening a module
+  that doesn't apply to the ambient game would otherwise show a preview that silently
+  ignores everything you type. The body resolves via
+  `GuiApp::resolve_specs_for_editing(&ide_specs)` and the band assembles from the same
+  list, so the two can never disagree.
+- **`resolve_specs_for_editing`** (new in S3b) is `resolve_for_editing` with the spec list
+  as a parameter; `resolve_for_editing` delegates to it with `cur_specs`. *Why it was
+  needed:* every arm previously said `&self.cur_specs` literally, ignoring any list the
+  caller had in hand — inert while the only consumers used `cur_specs`, but it silently
+  blanks badges and whole preview bodies for any module outside it. `render_ext_tree` now
+  resolves against its own `specs` parameter for the same reason.
+- **No "Previewing against: {game}" line**, unlike the Config-mode footer: IDE Mode is
+  specified to resolve against nothing by default, so naming a game would advertise a
+  binding the design doesn't want. (The empty scratch-layer `preview_config` that makes
+  that literally true is S5; S3b still resolves against the ambient game underneath.)
+- **`ui.push_id("ide_preview", ..)` wraps the entire body.** The editor and preview
+  columns render the same module in the same frame, and the body mints position-derived
+  auto-ids — plus `ComboBox::from_id_salt(&field.variable)`, salted by variable name
+  *alone* — so without a namespace the two columns fight over widget state. It must wrap
+  the whole body, not just the combo: the multi_string and env-pair renderers auto-id
+  their `TextEdit`s, `+ Add` buttons and `icon_button`s too. This is the only `push_id`
+  in `gui.rs`; S4 replaces the per-widget salts properly.
+- If the module resolves to no `ExtResolution`, the column renders an **explicit notice**
+  rather than staying blank — a blank column reads as "this module has no settings",
+  which is a very different (and wrong) message.
 
 ## General Settings panel
 

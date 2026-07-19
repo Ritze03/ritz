@@ -348,6 +348,59 @@ renames in the scratch preview."
 
 ---
 
+## Applied
+
+### 2026-07-19 — S3b shipped (the IDE shell)
+
+`Mode { Config, Ide }`, the GENERAL category box, the mode-swapped nav body/footer, the
+`ide_preview` right panel with its nested launch band, and the reserved
+`ide_editor_band`. Behaviour and rationale are documented in
+[`../features/settings-gui.md`](../features/settings-gui.md) (sections "Two modes",
+"Layout: `Mode::Ide`", "Navigation panel", "IDE-mode preview column"); only the
+corrections to *this* plan are recorded here.
+
+**Corrections to the plan, found against the code:**
+
+- **`resolve_for_editing` was hardwired to `cur_specs` in every arm** — the plan didn't
+  list this among the confirmed findings, but it is a real defect the moment the tree
+  renders `all_specs`: a spec outside `cur_specs` gets no `ExtResolution`, so its badges
+  and its entire preview body silently come up empty. Fixed by adding
+  `resolve_specs_for_editing(&self, specs)` and delegating; `render_ext_tree` now
+  resolves against its own `specs` parameter.
+- **`NavSel::ModuleEditor` is not merely tolerated in S3b, it is load-bearing.** The plan
+  frames it as a lie to be deleted in S4. It is — but until then it is also the only
+  carrier for "which module is open", and IDE mode leans on it deliberately: the invariant
+  `mode == Ide ⟹ nav_sel == ModuleEditor(_)` is re-established at the top of `GuiApp::ui`
+  every frame. That single line is what lets the whole existing draft lifecycle
+  (`ensure_draft`, the nav-away guard, Ctrl+S, the autosave interlock) work in IDE mode
+  with **zero** changes. S4 must replace the invariant, not just delete the variant.
+- **The reserved band under the editor was an open item ("will look broken; leave it
+  unallocated").** The user overrode this: it is declared, empty, at `exact_height(198.0)`
+  so its bottom edge aligns with the nav footer band.
+- **The `ext_list` header's `+` glyph button is the only create-module entry point**, so
+  IDE mode's `+ New Module` had to re-raise `open_create_dialog` itself — there was no
+  shared handler to call.
+- **The launch band needs `cur_specs` + *append*, not just splice.** The plan's splice
+  (`position(|s| s.id() == draft.id)`) no-ops when the edited module doesn't apply to the
+  ambient game — which is routine once the tree browses `all_specs`. S3b appends in that
+  case so the band always reflects what you're typing.
+
+**Deliberately left for S4/S5 (not defects):**
+
+- Single `Option<ModuleDraft>` — no multi-draft, no per-row dirty dots. Switching modules
+  in the IDE tree discards the open draft (via the existing nav-away guard).
+- Scope *colours* are still painted on the preview's controls even though the legend is
+  suppressed — the plan's MEDIUM open item on neutralising them is untouched.
+- The preview still resolves against the ambient game underneath; the empty scratch
+  `preview_config` that makes "resolves against nothing" literally true is S5. Only the
+  user-visible "Previewing against: {game}" line was dropped.
+- `Mode::Config`'s nav tree still carries its own **General Settings** row, now duplicated
+  by the GENERAL box above it. Left in place because removing it would change Config-mode
+  rendering, which S3b was required not to do; it is a one-line cleanup for a later stage.
+- Pre-existing and out of scope: the Config-mode module footer's **Open Folder** opens
+  `paths.games_dir()`, not the extensions dir, despite sitting under the *module* tree.
+  IDE mode mirrors it rather than silently diverging.
+
 ## Staging (S1–S6)
 
 - **S1 — Writer identity fix.** Remove the `cur_specs[self.selected_ext]` lookup from

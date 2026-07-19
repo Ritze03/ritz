@@ -40,6 +40,37 @@ enum NavSel {
     ModuleEditor(String),
 }
 
+/// Which top-level area of the window is showing.
+///
+/// *Why this is a separate axis and not another [`NavSel`] variant:* `NavSel`
+/// answers "which config scope am I editing", `Mode` answers "which shape is the
+/// window in". Folding IDE Mode into `NavSel` would force every exhaustive
+/// `match self.nav_sel` in this file to grow an arm that has nothing to say
+/// about scopes — and would collide with `NavSel::ModuleEditor`, which IDE Mode
+/// *uses* as its "which module is open" carrier. The two are orthogonal:
+/// `Mode::Ide` always runs with `nav_sel == NavSel::ModuleEditor(_)`.
+///
+/// Deliberately **not persisted** — IDE Mode is a workbench you enter for a
+/// session, not a preference. Reopening the settings window always lands in
+/// `Config`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// The classic three-column config editor (nav | modules | fields).
+    Config,
+    /// The module-authoring workbench (module tree | manifest editor | preview).
+    Ide,
+}
+
+/// A click on one of the three rows in the nav's GENERAL category box. Collected
+/// during render and applied afterwards (the render closure already holds
+/// `&mut self`).
+#[derive(Debug, Clone, Copy)]
+enum NavCategory {
+    GeneralSettings,
+    Ide,
+    GamesProfiles,
+}
+
 /// A destructive action awaiting confirmation in a small dialog.
 #[derive(Debug, Clone)]
 enum ConfirmAction {
@@ -169,6 +200,14 @@ pub struct GuiApp {
     detect: Option<Detect>,
     // Navigator panel state
     nav_sel: NavSel,
+    /// Which top-level area is showing (see [`Mode`]). Orthogonal to `nav_sel`;
+    /// in-memory only, never written to any config file.
+    mode: Mode,
+    /// Index into `all_specs` of the module the IDE column has selected. Kept
+    /// separate from `selected_ext` (which indexes `cur_specs`) because the IDE
+    /// tree browses the *unfiltered* module set — the two lists have different
+    /// lengths and orderings, so one index cannot serve both.
+    ide_selected: usize,
     all_presets: Vec<String>,
     /// Pinned profiles: name → slot id (1–10), cached from the preset files.
     preset_pins: HashMap<String, u8>,
@@ -595,6 +634,8 @@ impl GuiApp {
             outcome: Arc::new(Mutex::new(close_outcome)),
             detect: None,
             nav_sel: NavSel::Game(appid.to_string()),
+            mode: Mode::Config,
+            ide_selected: 0,
             all_presets,
             preset_pins: HashMap::new(),
             general_config,
@@ -756,10 +797,24 @@ impl GuiApp {
 
     /// Resolution used for the extension editor (reflects whichever layer is being edited).
     fn resolve_for_editing(&self) -> Resolution {
+        self.resolve_specs_for_editing(&self.cur_specs)
+    }
+
+    /// Like [`resolve_for_editing`] but over an explicit spec list.
+    ///
+    /// *Why this exists (S3b):* every arm below used to say `&self.cur_specs`
+    /// literally. That was inert while the only caller resolved `cur_specs`
+    /// anyway, but the IDE column's tree and preview browse the **unfiltered**
+    /// `all_specs` — and a spec absent from `cur_specs` resolves to no
+    /// `ExtResolution` at all, so its badges and its whole preview body would
+    /// silently come up empty. Taking the list as a parameter makes the
+    /// resolution match the data actually on screen. `resolve_for_editing`
+    /// delegates here with `cur_specs`, so Config-mode behaviour is byte-identical.
+    fn resolve_specs_for_editing(&self, specs: &[Extension]) -> Resolution {
         let global = Some(&self.global_config);
         match &self.nav_sel {
             NavSel::GeneralSettings => {
-                resolve::resolve(&self.cur_specs, Some(&self.game_config), self.preset.as_ref(), global)
+                resolve::resolve(specs, Some(&self.game_config), self.preset.as_ref(), global)
             }
             // ModuleEditor is a read-only view over one module, not a config-edit
             // scope — resolve as if the ambient game were selected.
@@ -771,20 +826,20 @@ impl GuiApp {
                     Some(base)
                 });
                 let effective = merged.as_ref().map(|p| p as &Preset).or(self.preset.as_ref());
-                resolve::resolve(&self.cur_specs, Some(&self.game_config), effective, global)
+                resolve::resolve(specs, Some(&self.game_config), effective, global)
             }
             NavSel::GlobalSettings => {
                 let fake = preset_as_fake_game(&self.global_config);
-                resolve::resolve(&self.cur_specs, Some(&fake), None, None)
+                resolve::resolve(specs, Some(&fake), None, None)
             }
             NavSel::Profile(_) => match &self.editing_preset_buf {
                 Some(p) => {
                     let parent = p.parent.as_ref()
                         .map(|n| collect_parent_chain(&self.paths, n));
                     let fake = preset_as_fake_game(p);
-                    resolve::resolve(&self.cur_specs, Some(&fake), parent.as_ref(), global)
+                    resolve::resolve(specs, Some(&fake), parent.as_ref(), global)
                 }
-                None => resolve::resolve(&self.cur_specs, None, None, global),
+                None => resolve::resolve(specs, None, None, global),
             },
         }
     }
@@ -1286,6 +1341,20 @@ impl GuiApp {
             self.flush_config_writes_if_clean();
         }
 
+        // IDE-mode invariant: a module is ALWAYS open. `nav_sel` is IDE mode's
+        // "which module" carrier, so anything that clears it (the editor's Close
+        // button, a Save, a Delete) would otherwise drop the central column into
+        // Config mode's module-detail view inside an IDE-shaped window. Re-open the
+        // tree's current selection instead, which makes Close read as
+        // "discard and reload" — the right meaning when there is nowhere to close to.
+        // Runs AFTER the draft-drop guard above so Close's discard still happens.
+        if self.mode == Mode::Ide && !matches!(self.nav_sel, NavSel::ModuleEditor(_)) {
+            if let Some(spec) = self.all_specs.get(self.ide_selected) {
+                let id = spec.id();
+                self.open_module_editor(id);
+            }
+        }
+
         // Keep the module-editor draft in sync with the selected module.
         if let NavSel::ModuleEditor(id) = self.nav_sel.clone() {
             self.ensure_draft(&id);
@@ -1318,7 +1387,10 @@ impl GuiApp {
         // `poll_detect` re-checks at the end of the frame to catch the other nav sites.
         self.cancel_stale_detect();
 
-        if !matches!(self.nav_sel, NavSel::GeneralSettings) {
+        // The module-list column exists only in Config mode: IDE mode moves the
+        // module tree into the nav column, so a second copy here would be redundant
+        // (and would eat the width the editor/preview split needs).
+        if self.mode == Mode::Config && !matches!(self.nav_sel, NavSel::GeneralSettings) {
         let mut open_create = false;
         egui::SidePanel::left("ext_list")
             .exact_width(280.0)
@@ -1403,11 +1475,45 @@ impl GuiApp {
         }
         } // end if !GeneralSettings
 
+        // The spec list both IDE columns (preview body + launch band) resolve and
+        // assemble against: the ambient game's applicable modules, with the module
+        // under edit spliced over its entry — or *appended* when it isn't in
+        // `cur_specs` at all. The append matters because the IDE tree browses the
+        // unfiltered `all_specs`: without it, opening a module that doesn't apply to
+        // this game would show a preview that silently ignores everything you type.
+        // Empty (and never used) outside IDE mode, so Config mode is untouched.
+        let ide_specs: Vec<Extension> = if self.mode == Mode::Ide {
+            let mut specs = self.cur_specs.clone();
+            if let NavSel::ModuleEditor(id) = self.nav_sel.clone() {
+                let snap = self
+                    .module_draft
+                    .as_ref()
+                    .filter(|d| d.id == id)
+                    .map(|d| d.snapshot())
+                    .or_else(|| self.all_specs.iter().find(|s| s.id() == id).cloned());
+                if let Some(snap) = snap {
+                    match specs.iter().position(|s| s.id() == id) {
+                        Some(pos) => specs[pos] = snap,
+                        None => specs.push(snap),
+                    }
+                }
+            }
+            specs
+        } else {
+            Vec::new()
+        };
+
         // Assemble the launch preview. In the module editor, splice the in-memory
         // draft over its on-disk entry so the preview reflects unsaved edits, and
         // lint for set/set env collisions across modules.
-        let (preview, collisions): (String, Vec<String>) =
-            if matches!(self.nav_sel, NavSel::ModuleEditor(_)) {
+        let (preview, collisions): (String, Vec<String>) = if self.mode == Mode::Ide {
+            let res = self.resolve_specs_for_game(&ide_specs);
+            let text = context::assemble_launch(&ide_specs, &res, &self.game_command)
+                .map(|lc| lc.to_string())
+                .unwrap_or_else(|e| format!("<error: {e}>"));
+            let coll = set_set_collisions(&ide_specs, &res);
+            (text, coll)
+        } else if matches!(self.nav_sel, NavSel::ModuleEditor(_)) {
                 match &self.module_draft {
                     Some(draft) => {
                         let mut preview_specs = self.cur_specs.clone();
@@ -1440,7 +1546,30 @@ impl GuiApp {
             };
 
         let dynamic_preview = self.general_config.dynamic_preview;
-        {
+
+        // ── Panel declaration order is load-bearing ──────────────────────────
+        // egui hands each panel the rect left over by the panels declared before
+        // it. Order here is: nav (above) → ide_preview (full height, right) →
+        // ide_editor_band (bottom, in what's left) → CentralPanel (the editor).
+        if self.mode == Mode::Ide {
+            self.render_ide_preview_panel(ctx, &ide_specs, &preview, &collisions, dynamic_preview);
+            // Reserved, declared-but-empty: the future diagnostics pane under the
+            // editor column. `exact_height(198.0)` is the same band height as the
+            // nav footer, so the two bottom edges align across the window.
+            egui::TopBottomPanel::bottom("ide_editor_band")
+                .exact_height(198.0)
+                .show_separator_line(true)
+                .frame(egui::Frame::none()
+                    .fill(theme::PANEL2)
+                    .inner_margin(egui::Margin::same(16.0)))
+                .show(ctx, |_ui| {});
+        }
+
+        // Config mode only. *Why skipped entirely rather than emptied:* a
+        // zero-content bottom panel still reserves its height across the FULL window
+        // width, which would push a dead strip under the IDE editor column on top of
+        // the band declared above.
+        if self.mode == Mode::Config {
             let mut panel = egui::TopBottomPanel::bottom("preview")
                 .show_separator_line(true)
                 .frame(egui::Frame::none()
@@ -1768,7 +1897,10 @@ impl GuiApp {
     /// `Extension::id()`; the draft is (re)loaded by [`ensure_draft`] each frame.
     fn render_module_editor(&mut self, ui: &mut egui::Ui, id: &str) {
         let touch = self.general_config.touch_mode;
-        let full_width = self.general_config.full_width;
+        // IDE mode always runs full-width: its editor column is already sized by the
+        // nav/preview split, so the 743px clamp (built for Config mode's wider,
+        // unsplit central panel) would only add a dead gutter.
+        let full_width = self.general_config.full_width || self.mode == Mode::Ide;
         let mut action = TopAction::None;
         // Hoisted out of the draft borrow below so the action dispatch can see them.
         let (dirty, editable);
@@ -3140,6 +3272,157 @@ impl GuiApp {
         });
     }
 
+    /// IDE mode's right-hand column: a read-only WYSIWYG render of the module
+    /// under edit, over a nested launch-command band.
+    ///
+    /// *Why the launch band is nested inside this side panel* rather than being a
+    /// full-width bottom panel: it belongs to the preview, not to the editor — the
+    /// space under the editor column is the reserved diagnostics band. The nesting
+    /// idiom (`TopBottomPanel::bottom(..).show_inside(..)`) is the same one
+    /// `group_toggle` and `nav_settings` already use. Nested panels obey
+    /// declaration order exactly like top-level ones, so the band is declared
+    /// **before** the inner `CentralPanel` or it would be laid out over the body.
+    fn render_ide_preview_panel(
+        &mut self,
+        ctx: &egui::Context,
+        ide_specs: &[Extension],
+        preview: &str,
+        collisions: &[String],
+        dynamic_preview: bool,
+    ) {
+        let NavSel::ModuleEditor(id) = self.nav_sel.clone() else {
+            return;
+        };
+        // Resolve over the SAME spliced list the launch band assembled from, so the
+        // two halves of the column can never disagree. Resolving over `cur_specs`
+        // (what `resolve_for_editing` hardwired before S3b) would return `None` for
+        // any module that doesn't apply to the ambient game and blank the body.
+        let resolution = self.resolve_specs_for_editing(ide_specs);
+        let spec = ide_specs.iter().find(|s| s.id() == id).cloned();
+        let touch = self.general_config.touch_mode;
+        // Favour the editor: ~45% of everything right of the fixed 280px nav.
+        let default_w = ((ctx.screen_rect().width() - 280.0) * 0.45).clamp(400.0, 900.0);
+
+        egui::SidePanel::right("ide_preview")
+            .resizable(true)
+            .width_range(400.0..=900.0)
+            .default_width(default_w)
+            .frame(egui::Frame::none().fill(theme::PANEL))
+            .show(ctx, |ui| {
+                let mut band = egui::TopBottomPanel::bottom("ide_launch_band")
+                    .show_separator_line(true)
+                    .frame(egui::Frame::none()
+                        .fill(theme::PANEL2)
+                        .inner_margin(egui::Margin::same(16.0)));
+                if !dynamic_preview {
+                    band = band.exact_height(198.0);
+                }
+                band.show_inside(ui, |ui| {
+                    ui.label(theme::header_label("Launch command preview"));
+                    // No "Previewing against: {game}" line here, unlike Config mode:
+                    // IDE Mode is specified to resolve against nothing by default, so
+                    // naming a game would advertise a binding the design doesn't want
+                    // (the real scratch-layer resolution lands in S5).
+                    for var in collisions {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "\u{f071} Two modules both Set {var} — one value will be lost.",
+                            ))
+                            .color(theme::COL_GLOBAL)
+                            .small(),
+                        );
+                    }
+                    ui.add_space(8.0);
+                    egui::Frame::none()
+                        .fill(theme::FIELD)
+                        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+                        .rounding(egui::Rounding::same(8.0))
+                        .inner_margin(egui::Margin::symmetric(13.0, 11.0))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            if !dynamic_preview {
+                                let box_h = ui.available_height();
+                                ui.set_min_height((box_h - 22.0).max(0.0));
+                            }
+                            egui::ScrollArea::vertical()
+                                .id_salt("ide_launch_scroll")
+                                .auto_shrink([false, dynamic_preview])
+                                .drag_to_scroll(touch)
+                                .show(ui, |ui| {
+                                    ui.add(egui::Label::new(command_job(preview)).wrap());
+                                });
+                        });
+                });
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::none()
+                        .fill(theme::PANEL)
+                        .inner_margin(egui::Margin { left: 16.0, right: 8.0, top: 14.0, bottom: 0.0 }))
+                    .show_inside(ui, |ui| {
+                        // ── Id namespace ────────────────────────────────────────
+                        // The editor column and this one render the same module in
+                        // the same frame. `render_module_settings_body` mints
+                        // position-derived auto-ids (and `ComboBox::from_id_salt`
+                        // salted by variable name ALONE) — identical in both columns,
+                        // so without a namespace the two would fight over widget
+                        // state. `push_id` must wrap the WHOLE body, not just the
+                        // combo: the multi_string and env-pair renderers auto-id
+                        // their TextEdits, "+ Add" buttons and icon_buttons too.
+                        // This is the only `push_id` in the file; S4 replaces the
+                        // per-widget salts properly.
+                        ui.push_id("ide_preview", |ui| {
+                            ui.label(theme::header_label("Preview"));
+                            let Some(spec) = spec.as_ref() else {
+                                ui.add_space(8.0);
+                                ui.label(
+                                    egui::RichText::new(
+                                        "This module isn't loaded — nothing to preview.",
+                                    )
+                                    .color(theme::DIM),
+                                );
+                                return;
+                            };
+                            ui.add_space(2.0);
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} v{} by {}",
+                                    spec.meta.name, spec.meta.version, spec.meta.author
+                                ))
+                                .color(theme::FAINT)
+                                .small(),
+                            );
+                            ui.add_space(8.0);
+                            ui.separator();
+                            let Some(ext_res) = resolution.exts.get(&spec.id()) else {
+                                // Explicit notice rather than an empty panel: a blank
+                                // column reads as "this module has no settings", which
+                                // is a very different (and wrong) message.
+                                ui.add_space(8.0);
+                                ui.label(
+                                    egui::RichText::new(
+                                        "\u{f071} Couldn't resolve this module — preview unavailable.",
+                                    )
+                                    .color(theme::COL_GLOBAL),
+                                );
+                                return;
+                            };
+                            // `full_width = true`: the 743px clamp exists for Config
+                            // mode's narrow column and would leave a dead gutter here.
+                            let changed = self.render_module_settings_body(
+                                ui,
+                                spec,
+                                Some(ext_res),
+                                true,
+                                true,
+                            );
+                            // Zero write-path risk is the entire point of this stage:
+                            // any write from here would reach `set_scoped`, whose
+                            // `ModuleEditor(_)` arm writes the REAL game config.
+                            debug_assert!(!changed, "read-only preview reported a change");
+                        });
+                    });
+            });
+    }
+
     /// Detail header for the selected module in the central panel: the
     /// name/version/author heading row (with the "Edit" icon button that opens the
     /// manifest editor), the "Editing Game/Profile/Global: X" context label, the
@@ -4398,6 +4681,15 @@ impl GuiApp {
 
 impl GuiApp {
     fn render_nav_panel(&mut self, ui: &mut egui::Ui) {
+        // Deferred intents collected inside the panel closures, applied after them.
+        // *Why deferred:* every closure below already holds `&mut self`, so the
+        // handlers (which also need `&mut self`) can't run inline. Same pattern as
+        // the `open_create` bool in `ui()`'s `ext_list` block.
+        let mut nav_action: Option<NavCategory> = None;
+        let mut ide_open: Option<String> = None;
+        let mut open_create = false;
+        let mode = self.mode;
+
         // Always show the bottom band (it's empty for General Settings/Global Profile).
         egui::TopBottomPanel::bottom("nav_settings")
             .exact_height(198.0)
@@ -4406,7 +4698,10 @@ impl GuiApp {
                 .fill(theme::PANEL2)
                 .inner_margin(egui::Margin::same(14.0)))
             .show_inside(ui, |ui| {
-                self.render_nav_settings(ui);
+                match mode {
+                    Mode::Config => self.render_nav_settings(ui),
+                    Mode::Ide => open_create = self.render_ide_nav_footer(ui),
+                }
             });
         egui::TopBottomPanel::top("nav_header")
             .show_separator_line(false)
@@ -4414,7 +4709,7 @@ impl GuiApp {
                 .fill(theme::PANEL)
                 .inner_margin(egui::Margin { left: 16.0, right: 16.0, top: 14.0, bottom: 8.0 }))
             .show_inside(ui, |ui| {
-                ui.label(theme::header_label("Profiles / Games"));
+                nav_action = self.render_nav_category_box(ui);
             });
         egui::CentralPanel::default()
             .frame(egui::Frame::none()
@@ -4425,17 +4720,165 @@ impl GuiApp {
                     .drag_to_scroll(self.general_config.touch_mode)
                     .show(ui, |ui| {
                         ui.add_space(4.0);
-                        // The left nav retargets the editor's live preview, so it
-                        // stays usable with a *clean* draft. Once the draft is
-                        // dirty it locks: navigating away drops the draft, and a
-                        // stray click must not silently discard unsaved edits.
-                        let nav_live =
-                            !self.module_draft.as_ref().map_or(false, |d| d.dirty());
-                        ui.add_enabled_ui(nav_live, |ui| {
-                            self.render_nav_tree(ui);
-                        });
+                        match mode {
+                            Mode::Config => {
+                                // The left nav retargets the editor's live preview, so it
+                                // stays usable with a *clean* draft. Once the draft is
+                                // dirty it locks: navigating away drops the draft, and a
+                                // stray click must not silently discard unsaved edits.
+                                let nav_live =
+                                    !self.module_draft.as_ref().map_or(false, |d| d.dirty());
+                                ui.add_enabled_ui(nav_live, |ui| {
+                                    self.render_nav_tree(ui);
+                                });
+                            }
+                            Mode::Ide => ide_open = self.render_ide_module_tree(ui),
+                        }
                     });
             });
+
+        if let Some(cat) = nav_action {
+            self.select_nav_category(cat);
+        }
+        if let Some(id) = ide_open {
+            self.open_module_editor(id);
+        }
+        if open_create {
+            self.open_create_dialog();
+        }
+    }
+
+    /// The bordered GENERAL category box that sits above the nav tree: the three
+    /// top-level destinations. Replaces the old single `header_label("Profiles /
+    /// Games")` — the header is now the box's title and the destinations are rows
+    /// inside it, so the thing the tree below is showing is always named on screen.
+    ///
+    /// Border idiom copied from [`editor_card`] rather than reusing it:
+    /// `editor_card` is specialised for the manifest editor (it takes an
+    /// `IconCenterCache` and returns a `RowAction`), neither of which applies here.
+    fn render_nav_category_box(&mut self, ui: &mut egui::Ui) -> Option<NavCategory> {
+        let mut action = None;
+        // Selection is a function of BOTH axes: `mode` picks IDE vs. the two config
+        // destinations, `nav_sel` disambiguates those two.
+        let is_ide = self.mode == Mode::Ide;
+        let is_general = !is_ide && matches!(self.nav_sel, NavSel::GeneralSettings);
+        let is_games = !is_ide && !is_general;
+        egui::Frame::none()
+            .fill(theme::PANEL2)
+            .stroke(egui::Stroke::new(1.0, theme::BORDER))
+            .rounding(egui::Rounding::same(8.0))
+            .inner_margin(egui::Margin::symmetric(8.0, 8.0))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(theme::header_label("General"));
+                ui.add_space(4.0);
+                if full_selectable(ui, is_general, "General Settings").clicked() {
+                    action = Some(NavCategory::GeneralSettings);
+                }
+                if full_selectable(ui, is_ide, "IDE Mode").clicked() {
+                    action = Some(NavCategory::Ide);
+                }
+                if full_selectable(ui, is_games, "Games / Profiles").clicked() {
+                    action = Some(NavCategory::GamesProfiles);
+                }
+            });
+        ui.add_space(2.0);
+        action
+    }
+
+    /// Apply a click on the GENERAL category box.
+    fn select_nav_category(&mut self, cat: NavCategory) {
+        match cat {
+            NavCategory::GeneralSettings => {
+                self.mode = Mode::Config;
+                self.nav_sel = NavSel::GeneralSettings;
+            }
+            NavCategory::GamesProfiles => {
+                self.mode = Mode::Config;
+                // Coming back from IDE mode `nav_sel` is still `ModuleEditor(_)`,
+                // which is not a config destination. `exit_module_editor` restores
+                // exactly what Close would (the remembered view, else the ambient
+                // game) and drops the draft — S3b is still single-draft, so leaving
+                // IDE mode discards it; S4 adds the combined "unsaved changes" notice.
+                if matches!(self.nav_sel, NavSel::ModuleEditor(_)) {
+                    self.exit_module_editor();
+                }
+            }
+            NavCategory::Ide => {
+                self.mode = Mode::Ide;
+                // IDE mode is only coherent with a module open — `nav_sel ==
+                // ModuleEditor(_)` is the invariant every IDE column relies on.
+                if let Some(spec) = self.all_specs.get(self.ide_selected) {
+                    self.open_module_editor(spec.id());
+                }
+            }
+        }
+    }
+
+    /// The IDE column's module tree: the load-error banner, then the whole
+    /// (unfiltered) module set. Returns the id to open when the selection moved.
+    ///
+    /// *Why no `add_enabled_ui` gate here, unlike the Config-mode nav:* in IDE mode
+    /// this tree IS the primary navigation. Locking it while a draft is dirty —
+    /// which is what Config mode does — would mean you can never leave the module
+    /// you just typed into. The plan flags this exact shape as a dead end; per-row
+    /// dirty markers replace locking in S4.
+    fn render_ide_module_tree(&mut self, ui: &mut egui::Ui) -> Option<String> {
+        // Rehomed from the `ext_list` block, which IDE mode drops entirely. Losing
+        // it in an *authoring* mode would be the worst outcome of this restructure:
+        // you'd write broken JSON and get silence.
+        self.render_ext_errors_banner(ui);
+
+        // Clone out of `self` first — `render_ext_tree` takes `&mut self`, so it
+        // can't also borrow `self.all_specs` / `&mut self.ide_selected`.
+        let specs = self.all_specs.clone();
+        let dirs = self.all_dirs.clone();
+        let is_folder_ext = self.all_is_folder_ext.clone();
+        let before = self.ide_selected.min(specs.len().saturating_sub(1));
+        let mut selected = before;
+        // `show_inheritance = false`: IDE mode edits manifests, not config scopes,
+        // so inheritance/edit badges have no scope to describe.
+        self.render_ext_tree(ui, &specs, &dirs, &is_folder_ext, &mut selected, false);
+        self.ide_selected = selected;
+        // `leaf` writes `selected` directly and never calls `open_module_editor`, so
+        // the tree click has to be turned into an editor open here, after the render.
+        if selected != before {
+            specs.get(selected).map(|s| s.id())
+        } else {
+            None
+        }
+    }
+
+    /// IDE-mode replacement for [`render_nav_settings`] in the nav's bottom band.
+    /// Returns true when "New Module" was clicked.
+    ///
+    /// Deliberately omits two controls the Config-mode module footer has:
+    /// **Show Inheritance** (no scope in IDE mode, so the badges it toggles are
+    /// meaningless) and **Clear Settings** (it clears stored *config*; IDE Mode
+    /// edits manifests and must never touch config).
+    fn render_ide_nav_footer(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut open_create = false;
+        styled_checkbox(ui, &mut self.group_by_author, "Group by Author");
+        let sep = icon_sep(self.general_config.mono_ui);
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+            // bottom_up: first added sits at the bottom, so Open Folder ends up
+            // below New Module.
+            let w = ui.available_width();
+            if ui
+                .add_sized([w, 30.0], theme::secondary_button(format!("\u{f07b}{sep}Open Folder")))
+                .clicked()
+            {
+                let _ = Command::new("xdg-open").arg(self.paths.games_dir()).spawn();
+            }
+            if ui
+                .add_sized([w, 30.0], theme::primary_button(format!("\u{f067}{sep}New Module")))
+                .on_hover_text("Create a new custom module")
+                .clicked()
+            {
+                open_create = true;
+            }
+        });
+        open_create
     }
 
     fn render_nav_tree(&mut self, ui: &mut egui::Ui) {
@@ -5098,7 +5541,10 @@ impl GuiApp {
     ) {
         // Build per-extension icon lists: each entry is (icon_glyph, color).
         // Inheritance from a lower layer → ICON_INHERIT; edit at current scope → ICON_EDIT.
-        let resolution = self.resolve_for_editing();
+        // Resolve against the list actually being rendered, NOT `cur_specs`: the IDE
+        // column passes `all_specs`, and a spec missing from the resolution gets no
+        // badges at all (see `resolve_specs_for_editing`).
+        let resolution = self.resolve_specs_for_editing(specs);
         let mono = self.general_config.mono_ui;
         let nav_sel = &self.nav_sel;
         let global_modules = &self.global_config.modules;
