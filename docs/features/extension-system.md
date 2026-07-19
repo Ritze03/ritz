@@ -67,6 +67,24 @@ at load time by `crates/ritz-core/src/variables.rs:ui_requires_is_valid`. *Why t
 rejection:* GUI field visibility is evaluated per-module before the global map exists,
 so a `global:` reference there would silently always be false.
 
+**Nothing in the load / validate path checks that a referenced variable exists.** An
+undeclared name is simply falsy in a `Requires` and interpolates to the empty string, so a
+misspelling on either side of the field↔builder link fails silently — the symptom is a
+control that does nothing, not an error. As of 2026-07-19 (issue #10) the **module editor**
+catches this as a diagnostic rather than the loader: `crate::gui::variable_reference_lints`
+reports both directions (a reference no field declares, and a field nothing references) in
+the IDE diagnostics band. See `settings-gui.md`, "What `variable_reference_lints` detects".
+
+*Why a GUI lint and not a `validate` error:* `crates/ritz-core/src/extension.rs:validate`
+is a load-time gate, and failing it would make a manifest **unloadable**. A half-typed
+manifest passes through the undeclared state constantly — rename a field and every
+reference to it is briefly undeclared — so hard-failing would refuse to load modules that
+are merely mid-edit, and would break a user's existing custom modules on upgrade. The
+editor is where the author is, and a diagnostic there is advisory: it names the problem
+without refusing anything. This is the same division `settings-gui.md` documents for
+`lossy_env_overwrites` — core owns what the builder *does*, the GUI owns what the editor
+*says about it*.
+
 ### 3. Build — enabled builders into a launch command
 
 `crates/ritz-core/src/builder.rs:build` runs each block through its own assembler,

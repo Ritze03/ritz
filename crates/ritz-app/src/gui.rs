@@ -2,7 +2,7 @@
 //! honors `Requires` visibility, shows tri-state inheritance (default / preset /
 //! game override) with reset-to-inherit, and previews the live launch command.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -19,7 +19,7 @@ use ritz_core::schema::{
     apply_var_renames, ArgSpec, EnvBuilderEntry, EnvOp, EnvVarSpec, Extension, FieldType,
     OptionsSpec, UiField, WrapperBuilderEntry, WrapperSpec,
 };
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use serde_json::{json, Value};
 
 use crate::context::{self, chain_would_have_cycle, collect_parent_chain, collect_parent_presets, merge_modules, AppContext};
@@ -3260,7 +3260,7 @@ impl GuiApp {
         // Assemble the launch preview. In the module editor, splice the in-memory
         // draft over its on-disk entry so the preview reflects unsaved edits, and
         // lint for env values one module discards out from under another.
-        let (preview, diagnostics): (String, Vec<EnvOverwrite>) = if self.mode == Mode::Ide {
+        let (preview, diagnostics): (String, Vec<DiagEntry>) = if self.mode == Mode::Ide {
             // S5b: resolve the band through the scratch layer, the same way
             // `render_ide_preview_panel` resolves its form. `resolve_specs_for_game`
             // would assemble against the ambient game's stored config, so the band
@@ -3271,7 +3271,7 @@ impl GuiApp {
             let text = context::assemble_launch(&ide_specs, &res, &self.game_command)
                 .map(|lc| lc.to_string())
                 .unwrap_or_else(|e| format!("<error: {e}>"));
-            let coll = lossy_env_overwrites(&ide_specs, &res);
+            let coll = preview_lints(&ide_specs, &res);
             (text, coll)
         } else if self.focused_module().is_some() {
                 match self.draft() {
@@ -3287,7 +3287,7 @@ impl GuiApp {
                             context::assemble_launch(&preview_specs, &res, &self.game_command)
                                 .map(|lc| lc.to_string())
                                 .unwrap_or_else(|e| format!("<error: {e}>"));
-                        let coll = lossy_env_overwrites(&preview_specs, &res);
+                        let coll = preview_lints(&preview_specs, &res);
                         (text, coll)
                     }
                     None => (String::new(), Vec::new()),
@@ -3442,11 +3442,21 @@ impl GuiApp {
                 // Config mode to move it *to* — `ide_editor_band` is declared only
                 // under `self.mode == Mode::Ide`. Same corrected detection, same
                 // `icon_sep` spacing; only the IDE surface relocates.
+                //
+                // Icon and colour now come from the entry's own `DiagSeverity`
+                // rather than the literal warning glyph + `COL_GLOBAL` this loop
+                // hardcoded (2026-07-19, issue #11). That pair *was* correct when
+                // the only source here was `lossy_env_overwrites`, whose every
+                // entry is a `Warning`; now that `preview_lints` feeds it several
+                // checks that each pick their own rank, hardcoding one would
+                // mislabel any future non-warning. It renders identically today —
+                // every current preview lint is a `Warning` — so this is a
+                // correctness fix ahead of a visible change, not a restyle.
                 let sep = icon_sep(self.general_config.mono_ui);
                 for d in &diagnostics {
                     ui.label(
-                        egui::RichText::new(format!("\u{f071}{sep}{}", d.message()))
-                            .color(theme::COL_GLOBAL)
+                        egui::RichText::new(format!("{}{sep}{}", d.severity.icon(), d.text))
+                            .color(d.severity.color())
                             .small(),
                     );
                 }
@@ -5826,6 +5836,366 @@ fn lossy_env_overwrites(specs: &[Extension], res: &Resolution) -> Vec<EnvOverwri
     out
 }
 
+/// Every `{name}` an interpolated template references, in source order, with
+/// `{{`/`}}` escapes and unterminated braces handled **exactly** as
+/// [`ritz_core::variables::VarStore::interpolate`] handles them.
+///
+/// *Why this mirrors `interpolate` rather than running a regex over the string*
+/// (2026-07-19, issue #10): the two must agree on what counts as a reference, or
+/// the lint reports names the interpolator never looks up (and misses ones it
+/// does). A regex gets `{{literal}}` wrong — that is an *escaped brace*, not a
+/// reference, and flagging it would fire on any manifest emitting a literal
+/// `{`. The unterminated-`{` case matters for the same reason: `interpolate`
+/// emits it verbatim rather than treating the tail as a name, so neither does
+/// this. Trimming matches `interpolate`'s `name.trim()`.
+///
+/// This is the interpolation half of the declared-vs-referenced check; the
+/// condition half goes through [`ritz_core::condition::parse`] instead, so both
+/// halves read names the way the runtime reads them.
+fn interpolated_vars(template: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let chars: Vec<char> = template.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '{' if chars.get(i + 1) == Some(&'{') => i += 2,
+            '}' if chars.get(i + 1) == Some(&'}') => i += 2,
+            '{' => {
+                let start = i + 1;
+                let mut j = start;
+                while j < chars.len() && chars[j] != '}' {
+                    j += 1;
+                }
+                if j < chars.len() {
+                    let name: String = chars[start..j].iter().collect();
+                    let name = name.trim();
+                    if !name.is_empty() {
+                        out.push(name.to_string());
+                    }
+                    i = j + 1;
+                } else {
+                    // No closing brace: `interpolate` emits the `{` literally and
+                    // moves on, so there is no reference here to report.
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    out
+}
+
+/// Every variable name a `Requires` expression references, via the real parser.
+///
+/// An expression that does not parse yields nothing: `all_requires_parse`
+/// already raises its own `Error` for that, and guessing at identifiers inside
+/// broken syntax would stack a speculative second complaint on top of the real
+/// one while the user is still mid-keystroke.
+fn condition_vars(requires: Option<&str>) -> Vec<String> {
+    requires
+        .and_then(|s| condition::parse(s).ok().flatten())
+        .map(|e| e.referenced_vars())
+        .unwrap_or_default()
+}
+
+/// UI-side lint over the launch preview: wrappers from **different** modules
+/// declared at the same `Priority`.
+///
+/// `ritz_core::builder::build_wrappers` sorts by `(priority, extension_index)`,
+/// so a tie is broken by module **load order** — which is not a declared
+/// property of either manifest. Enable a module, rename one, ship a new bundled
+/// one, and the assembled chain can reorder with nothing in either JSON having
+/// changed. That is the bug: not that the order is wrong, but that it is not
+/// *authored*.
+///
+/// **Severity is [`DiagSeverity::Warning`], not `Error`** (2026-07-19, issue #9):
+/// a tie is frequently harmless — two wrappers that do not interact genuinely do
+/// not care which runs first, and demanding a total order over things whose
+/// order is irrelevant is busywork. Nothing is refused because of one, and this
+/// band's `Error` rank is reserved by contract for *the reason an action is
+/// refused* (every `ModuleDraft::save_enabled` gate, plus a blocked Rename) — so
+/// an `Error` here would make the heading tally claim a blocker while Save sits
+/// happily enabled. `Info` is not available either: [`editor_status_lines`]
+/// guarantees **exactly one** `Info` entry, the pinned state line, and the
+/// band's pinning and tally both lean on that (see
+/// `status_lines_have_exactly_one_pinned_info_line`). `Warning` — "unfinished,
+/// but nothing is being refused" — is both the accurate rank and the only
+/// non-blocking one the vocabulary offers.
+///
+/// **Scope is across all enabled modules, not within one manifest** — and
+/// same-module ties are deliberately *not* reported:
+///
+/// - Across modules is where a tie actually bites, because that is where the
+///   chain is assembled and where the tiebreak (load order) is invisible to the
+///   author. The module editor edits one manifest at a time, but this lint runs
+///   over the same resolved spec set the launch preview beside it does, so it
+///   sees the real chain rather than a fragment of it.
+/// - Within one manifest the tiebreak is **declaration order**, which the author
+///   controls and can see: `sort_by` is stable and both entries carry the same
+///   `extension_index`, so two tied wrappers keep the order they were written
+///   in. That is authored intent, exactly like a single module's `Builder` step
+///   sequence — which [`lossy_env_overwrites`] excludes for the same reason.
+///
+/// Only wrappers whose `Requires` actually passes are considered: a wrapper
+/// gated off never reaches `build_wrappers`, so its priority cannot collide with
+/// anything and warning about it would be pure noise.
+fn wrapper_priority_ties(specs: &[Extension], res: &Resolution) -> Vec<DiagEntry> {
+    // priority → module display names that reach the chain at it, in spec order.
+    let mut by_priority: IndexMap<i64, Vec<String>> = IndexMap::new();
+    for spec in specs {
+        let vars = res.var_store(&spec.id());
+        let lookup = vars.lookup_fn();
+        for w in &spec.wrappers {
+            // Matches `lossy_env_overwrites`: an unparseable `Requires` means the
+            // assembler fails outright, so nothing from this spec lands.
+            if !condition::eval_opt(w.requires.as_deref(), &lookup).unwrap_or(false) {
+                continue;
+            }
+            let holders = by_priority.entry(w.priority).or_default();
+            // One module contributing two wrappers at one priority is its own
+            // declaration order, not a load-order tie — count the module once.
+            if !holders.contains(&spec.meta.name) {
+                holders.push(spec.meta.name.clone());
+            }
+        }
+    }
+    let mut out: Vec<DiagEntry> = Vec::new();
+    for (priority, mods) in by_priority {
+        if mods.len() < 2 {
+            continue;
+        }
+        out.push(DiagEntry {
+            severity: DiagSeverity::Warning,
+            text: format!(
+                "{} declare wrapper Priority {priority} \u{2014} their order in the launch chain \
+                 comes from module load order, not from anything either declares.",
+                join_names(&mods)
+            ),
+        });
+    }
+    out
+}
+
+/// `["A"]` → `A`; `["A", "B"]` → `A and B`; `["A", "B", "C"]` → `A, B and C`.
+fn join_names(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// UI-side lint: `UiField` variables declared but never referenced, and names
+/// referenced but never declared. Both directions of issue #10.
+///
+/// A module's variables are the only thing connecting its UI to its launch
+/// blocks, and misspelling one on either side of that link fails **silently** —
+/// an undeclared name is falsy in a `Requires` forever and interpolates to the
+/// empty string, so the symptom is a control that does nothing rather than an
+/// error anyone sees. That is the single most common module-authoring mistake
+/// and nothing in the load/validate path catches it.
+///
+/// ## What counts as declared
+///
+/// Locals resolve per module (`Resolution::var_store` fills the store from that
+/// extension's own resolved fields and nothing else), so a bare name is checked
+/// against **this module's** `UiField.variable` set. A `global:`-prefixed name
+/// resolves out of the shared global pool, so it is checked against the
+/// `global:` fields declared by **any** loaded module — a reference to
+/// `global:hdr_on` satisfied by a different manifest is correct and must not be
+/// reported. (`VarStore::get` strips the prefix and looks in `global`; this
+/// mirrors that split exactly.)
+///
+/// ## Severities, and why they differ
+///
+/// - **Undeclared reference → [`DiagSeverity::Warning`].** This is close to
+///   certainly a defect: nothing else in the system can define the name, so the
+///   gate is dead. It is deliberately *not* an `Error`, because it does not gate
+///   Save and must not start to — a half-typed manifest passes through this
+///   state constantly (rename a field, and every reference to it is briefly
+///   undeclared), and refusing to save mid-edit would be hostile. `Error` in
+///   this band means "the reason an action is refused"; nothing is refused here.
+/// - **Unreferenced field → also `Warning`, but behind a much stricter rule.**
+///   It is far weaker evidence — a module may legitimately expose a field no
+///   JSON block reads. The severity vocabulary has no rank quieter than
+///   `Warning` available (`Info` is reserved for the single pinned state line,
+///   by an invariant the tally and pinning both depend on), so the noise has to
+///   come out of the **rule** instead of the rank: see the suppression below,
+///   which is what keeps this from firing on six of the project's own bundled
+///   manifests. A fourth, quieter `Hint` rank is the honest fix and would let
+///   these two split; it is not invented here for the same reason issue #39
+///   leaves the palette alone.
+///
+/// ## Why the dead-field half is suppressed for backend / hook / script modules
+///
+/// Measured against the bundled set (2026-07-19): with no suppression, the
+/// unreferenced-field half fires on **six of thirteen** bundled manifests —
+/// `custom-args`, `custom-env`, `custom-game-env`, `hypr-monctl`, `lsfg-vk` and
+/// `scripts`. Every one is a false positive, and they share a cause: their
+/// fields are consumed by a **Rust backend handler**, a **hook script**, or a
+/// **`ScriptBuilders` script**, none of which this walk can see, because none of
+/// them is expressed in the manifest. A lint that is wrong about half the
+/// project's own modules is worse than no lint, so a module carrying any of
+/// those three opaque consumers is exempt from the dead-field half entirely.
+///
+/// The undeclared-reference half stays on for those modules: an opaque consumer
+/// explains a field with no *reader*, but nothing explains a `Requires` naming a
+/// variable that does not exist. It reports nothing on any bundled manifest.
+fn variable_reference_lints(specs: &[Extension]) -> Vec<DiagEntry> {
+    // Global names are published into one shared pool, so declaration by ANY
+    // module satisfies a `global:` reference from any other.
+    let declared_globals: HashSet<&str> = specs
+        .iter()
+        .flat_map(|s| s.ui.values().flatten())
+        .filter(|f| f.is_global())
+        .map(|f| f.variable.as_str())
+        .collect();
+
+    let mut out: Vec<DiagEntry> = Vec::new();
+    for spec in specs {
+        let declared: IndexSet<&str> = spec
+            .ui
+            .values()
+            .flatten()
+            .map(|f| f.variable.as_str())
+            .collect();
+
+        // Referenced names, split by how they are read: a condition reference
+        // that is undeclared is permanently false, an interpolation that is
+        // undeclared silently expands to nothing. Same bug, different symptom,
+        // and naming the right one is what makes the message actionable.
+        let mut cond_refs: IndexSet<String> = IndexSet::new();
+        let mut interp_refs: IndexSet<String> = IndexSet::new();
+        let cond = |r: Option<&str>, into: &mut IndexSet<String>| {
+            into.extend(condition_vars(r));
+        };
+        for f in spec.ui.values().flatten() {
+            cond(f.requires.as_deref(), &mut cond_refs);
+        }
+        for e in spec.env_vars.iter().chain(spec.game_env_vars.iter()) {
+            cond(e.requires.as_deref(), &mut cond_refs);
+            interp_refs.extend(interpolated_vars(&e.name));
+            for b in &e.builder {
+                cond(b.requires.as_deref(), &mut cond_refs);
+                interp_refs.extend(interpolated_vars(b.value.as_deref().unwrap_or("")));
+            }
+        }
+        for w in &spec.wrappers {
+            cond(w.requires.as_deref(), &mut cond_refs);
+            // `{OPTIONS}` is `build_wrappers`' own placeholder for the assembled
+            // builder output — substituted *before* interpolation runs, so it is
+            // never looked up as a variable and must never be reported as one.
+            interp_refs.extend(
+                interpolated_vars(&w.command_syntax)
+                    .into_iter()
+                    .filter(|n| n != WRAPPER_OPTIONS_PLACEHOLDER),
+            );
+            for b in &w.builder {
+                cond(b.requires.as_deref(), &mut cond_refs);
+                interp_refs.extend(interpolated_vars(&b.value));
+            }
+        }
+        for a in &spec.game_launch_args {
+            cond(a.requires.as_deref(), &mut cond_refs);
+            interp_refs.extend(interpolated_vars(&a.value));
+        }
+
+        let resolves = |name: &str| match name.strip_prefix(GLOBAL_PREFIX) {
+            Some(_) => declared_globals.contains(name),
+            None => declared.contains(name),
+        };
+
+        for (name, how) in cond_refs
+            .iter()
+            .map(|n| (n, "condition"))
+            .chain(interp_refs.iter().map(|n| (n, "interpolation")))
+        {
+            if resolves(name) {
+                continue;
+            }
+            let effect = if how == "condition" {
+                "that condition is never true"
+            } else {
+                "it expands to nothing"
+            };
+            out.push(DiagEntry {
+                severity: DiagSeverity::Warning,
+                text: format!(
+                    "{}: no field declares `{name}`, referenced in a {how} \u{2014} {effect}.",
+                    spec.meta.name
+                ),
+            });
+        }
+
+        // The dead-field half. See the doc comment: a backend handler, a hook
+        // script or a `ScriptBuilders` script reads fields in code this walk
+        // cannot inspect, so "nothing references it" carries no information for
+        // such a module.
+        if has_opaque_var_consumer(spec) {
+            continue;
+        }
+        for name in &declared {
+            if cond_refs.iter().any(|r| r == name) || interp_refs.iter().any(|r| r == name) {
+                continue;
+            }
+            out.push(DiagEntry {
+                severity: DiagSeverity::Warning,
+                text: format!(
+                    "{}: nothing in this module references `{name}` \u{2014} the field may have \
+                     no effect.",
+                    spec.meta.name
+                ),
+            });
+        }
+    }
+    out
+}
+
+/// True if this module reads its variables somewhere the manifest cannot show:
+/// a Rust runtime backend, a lifecycle hook script, or a `ScriptBuilders`
+/// script. Such a module's fields can be perfectly live with zero references in
+/// its JSON, so the unreferenced-field lint has nothing to say about it.
+fn has_opaque_var_consumer(spec: &Extension) -> bool {
+    spec.backend.is_some() || spec.hooks.is_some() || !spec.script_builders.is_empty()
+}
+
+/// `build_wrappers`' placeholder inside `CommandSyntax`, replaced with the
+/// assembled builder output before interpolation ever runs — so it is not a
+/// variable reference.
+const WRAPPER_OPTIONS_PLACEHOLDER: &str = "OPTIONS";
+
+/// The prefix marking a reference to the shared global build-phase scope,
+/// mirroring `ritz_core::variables`' own constant.
+const GLOBAL_PREFIX: &str = "global:";
+
+/// Every lint the diagnostics band runs over the assembled preview, in display
+/// order: env-value losses, then wrapper `Priority` ties, then declared-vs-
+/// referenced variable problems.
+///
+/// *Why one producer returning `Vec<DiagEntry>`* (2026-07-19, issue #11): each
+/// check used to hand back its own shape — [`lossy_env_overwrites`] a
+/// `Vec<EnvOverwrite>`, and the two added here would have been a third and a
+/// fourth — leaving every caller to re-derive a severity the check itself had
+/// already decided. The band's call site literally hardcoded
+/// `DiagSeverity::Warning` next to every entry, which meant a check could not
+/// have chosen a different rank even if it wanted one. Collapsing the family to
+/// a single `-> Vec<DiagEntry>` boundary puts severity where the judgement is
+/// made, and makes adding a fifth check an append here rather than a new arm at
+/// every consumer.
+///
+/// [`lossy_env_overwrites`] keeps its structured `EnvOverwrite` return: its
+/// tests assert on the individual `var` / `culprit` / `victims` fields, which a
+/// formatted string would throw away. It converts at this boundary instead.
+fn preview_lints(specs: &[Extension], res: &Resolution) -> Vec<DiagEntry> {
+    let mut out: Vec<DiagEntry> = lossy_env_overwrites(specs, res)
+        .into_iter()
+        .map(|d| DiagEntry { severity: DiagSeverity::Warning, text: d.message() })
+        .collect();
+    out.extend(wrapper_priority_ties(specs, res));
+    out.extend(variable_reference_lints(specs));
+    out
+}
+
 /// How serious one entry in the IDE diagnostics band is.
 ///
 /// *Why a three-level vocabulary* (2026-07-19, issue #26): the band used to hold
@@ -5915,7 +6285,7 @@ struct DiagEntry {
 /// are computed independently of the draft.
 fn ide_diagnostic_entries(
     info: Option<&EditorHeaderInfo>,
-    diagnostics: &[EnvOverwrite],
+    diagnostics: &[DiagEntry],
 ) -> Vec<DiagEntry> {
     let mut out: Vec<DiagEntry> = Vec::new();
     if let Some(info) = info {
@@ -5924,7 +6294,7 @@ fn ide_diagnostic_entries(
         }
     }
     for d in diagnostics {
-        out.push(DiagEntry { severity: DiagSeverity::Warning, text: d.message() });
+        out.push(DiagEntry { severity: d.severity, text: d.text.clone() });
     }
     out
 }
@@ -5968,7 +6338,7 @@ fn ide_diagnostic_entries(
 fn render_ide_diagnostics_band(
     ui: &mut egui::Ui,
     info: Option<&EditorHeaderInfo>,
-    diagnostics: &[EnvOverwrite],
+    diagnostics: &[DiagEntry],
     mono: bool,
 ) {
     let sep = icon_sep(mono);
@@ -10094,11 +10464,19 @@ mod tests {
     #[test]
     fn diagnostic_entries_pin_the_info_line_and_rank_env_warnings() {
         let info = worst_case_header_info();
-        let env = [EnvOverwrite {
-            var: "DXVK_HUD".to_string(),
-            victims: vec!["MangoHud".to_string()],
-            culprit: "Gamescope".to_string(),
-            by_unset: false,
+        // As of issue #11 the band takes `DiagEntry` rather than `EnvOverwrite`:
+        // every preview lint decides its own rank at the `preview_lints`
+        // boundary instead of the band stamping `Warning` on whatever arrives.
+        // Built through `EnvOverwrite::message` so this still pins the real text.
+        let env = [DiagEntry {
+            severity: DiagSeverity::Warning,
+            text: EnvOverwrite {
+                var: "DXVK_HUD".to_string(),
+                victims: vec!["MangoHud".to_string()],
+                culprit: "Gamescope".to_string(),
+                by_unset: false,
+            }
+            .message(),
         }];
         let entries = ide_diagnostic_entries(Some(&info), &env);
 
@@ -13425,6 +13803,325 @@ mod tests {
             empty_central_message(true),
             empty_central_message(false),
             "the two empty states have different causes and must not share one string"
+        );
+    }
+
+    // ---- Preview lints: wrapper Priority ties (#9) and declared-vs-referenced
+    // ---- UiField variables (#10). ------------------------------------------
+
+    /// Every bundled manifest, as the app loads them.
+    fn bundled_specs() -> Vec<Extension> {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../resources/extensions")
+            .canonicalize()
+            .expect("bundled extensions dir");
+        let (exts, errors) = core_extension::discover(&dir).expect("discover");
+        assert!(errors.is_empty(), "bundled modules failed to load: {errors:?}");
+        assert!(exts.len() >= 6, "expected the full bundled set, got {}", exts.len());
+        exts.into_iter().map(|e| e.spec).collect()
+    }
+
+    /// **The false-positive guard, and the most important test of the three
+    /// checks.** Every lint `preview_lints` runs must be completely silent on
+    /// the project's own bundled modules.
+    ///
+    /// A lint that fires on the manifests shipped as the reference examples is
+    /// not a lint, it is noise — and the user would be trained to ignore the
+    /// band before it ever caught a real bug. This is the assertion that pinned
+    /// the design: the unreferenced-field half of `variable_reference_lints`
+    /// fired on **six of thirteen** bundled modules before
+    /// `has_opaque_var_consumer` was added (`custom-args`, `custom-env`,
+    /// `custom-game-env`, `hypr-monctl`, `lsfg-vk`, `scripts` — five backend
+    /// modules and one hook module, every one a false positive), which is what
+    /// established that a module whose fields are read by Rust or by a shell
+    /// script cannot be judged by walking its JSON.
+    ///
+    /// If this test starts failing after a bundled manifest changes, the
+    /// question to ask first is whether the *lint* is wrong, not the manifest.
+    #[test]
+    fn preview_lints_are_silent_on_every_bundled_module() {
+        let specs = bundled_specs();
+        let entries = preview_lints(&specs, &Resolution::default());
+        let texts: Vec<&str> = entries.iter().map(|e| e.text.as_str()).collect();
+        assert!(
+            entries.is_empty(),
+            "the bundled modules must not trip any preview lint, got: {texts:#?}"
+        );
+    }
+
+    /// Same guard, one layer down: the dead-field half specifically. Without the
+    /// `has_opaque_var_consumer` exemption this is the set that lit up, so assert
+    /// the exemption is what is doing the work rather than some accident of the
+    /// walk finding no fields at all.
+    #[test]
+    fn bundled_backend_and_hook_modules_are_exempt_from_the_dead_field_lint() {
+        let specs = bundled_specs();
+        let opaque: Vec<&str> = specs
+            .iter()
+            .filter(|s| has_opaque_var_consumer(s))
+            .map(|s| s.meta.name.as_str())
+            .collect();
+        assert!(
+            opaque.len() >= 6,
+            "expected the backend/hook modules to be recognised as opaque, got: {opaque:?}"
+        );
+        // Each one really does declare fields — so the exemption is suppressing
+        // real would-be reports, not vacuously passing over empty modules.
+        for spec in specs.iter().filter(|s| has_opaque_var_consumer(s)) {
+            assert!(
+                spec.ui.values().flatten().next().is_some(),
+                "{} was expected to declare fields",
+                spec.meta.name
+            );
+        }
+    }
+
+    /// Build a module with one wrapper at `priority`.
+    fn wrapper_module(name: &str, priority: i64, requires: Option<&str>) -> Extension {
+        let mut w = json!({ "CommandSyntax": format!("{name} --"), "Priority": priority });
+        if let Some(r) = requires {
+            w["Requires"] = json!(r);
+        }
+        serde_json::from_value(json!({
+            "Extension": { "Author": "T", "Name": name, "Version": "1" },
+            "WRAPPERS": [w]
+        }))
+        .unwrap()
+    }
+
+    /// #9, the firing case: two *different* modules at one priority. The chain
+    /// order then comes from load order, which neither manifest declares.
+    #[test]
+    fn wrappers_from_two_modules_at_one_priority_tie() {
+        let specs = [wrapper_module("A", 100, None), wrapper_module("B", 100, None)];
+        let ties = wrapper_priority_ties(&specs, &Resolution::default());
+        assert_eq!(ties.len(), 1, "got: {:?}", ties.iter().map(|d| &d.text).collect::<Vec<_>>());
+        assert_eq!(ties[0].severity, DiagSeverity::Warning);
+        assert!(ties[0].text.contains("A and B"), "got: {}", ties[0].text);
+        assert!(ties[0].text.contains("Priority 100"), "got: {}", ties[0].text);
+    }
+
+    /// #9's false-positive guards — the half that matters. Three ways a
+    /// same-priority pair is *not* a reportable tie.
+    #[test]
+    fn wrapper_priority_ties_stay_silent_when_the_order_is_authored() {
+        let res = Resolution::default();
+
+        // 1. Distinct priorities: the ordinary, correct case.
+        assert!(wrapper_priority_ties(
+            &[wrapper_module("A", 100, None), wrapper_module("B", 200, None)],
+            &res
+        )
+        .is_empty());
+
+        // 2. TWO WRAPPERS IN ONE MODULE at the same priority. `build_wrappers`
+        //    sorts by `(priority, extension_index)` with a stable sort and both
+        //    share an index, so they keep the order the author wrote them in —
+        //    authored intent, exactly like a single module's `Builder` step
+        //    sequence, which `lossy_env_overwrites` also declines to police.
+        let two_in_one: Extension = serde_json::from_value(json!({
+            "Extension": { "Author": "T", "Name": "Solo", "Version": "1" },
+            "WRAPPERS": [
+                { "CommandSyntax": "first --", "Priority": 50 },
+                { "CommandSyntax": "second --", "Priority": 50 }
+            ]
+        }))
+        .unwrap();
+        assert!(
+            wrapper_priority_ties(&[two_in_one], &res).is_empty(),
+            "a module's own wrapper order is declaration order, not a load-order tie"
+        );
+
+        // 3. A wrapper gated OFF never reaches `build_wrappers`, so its priority
+        //    cannot collide with anything. `Resolution::default()` has no
+        //    variables, so `never_set` is falsy.
+        assert!(
+            wrapper_priority_ties(
+                &[wrapper_module("A", 100, None), wrapper_module("B", 100, Some("never_set"))],
+                &res
+            )
+            .is_empty(),
+            "a gated-off wrapper is not in the chain and cannot tie"
+        );
+    }
+
+    /// #10, the firing case: a `Requires` naming a variable no field declares.
+    /// This is the typo the check exists for — the gate is false forever.
+    #[test]
+    fn a_requires_referencing_an_undeclared_variable_is_reported() {
+        let spec: Extension = serde_json::from_value(json!({
+            "Extension": { "Author": "T", "Name": "M", "Version": "1" },
+            "UI": { "S": [ { "Type": "toggle", "Variable": "enabled" } ] },
+            // `enabeld` is the typo; `enabled` is what was meant.
+            "ENV_VARS": [
+                { "Name": "V", "Builder": [ { "Type": "set", "Value": "1",
+                                              "Requires": "enabeld" } ] }
+            ]
+        }))
+        .unwrap();
+        let out = variable_reference_lints(&[spec]);
+        // Both halves fire, and that is the correct reading of a typo: `enabeld`
+        // is declared by nothing, and the `enabled` it was meant to name is now
+        // referenced by nothing. The pair is the signature of a misspelling —
+        // one undeclared reference next to one orphaned field.
+        assert_eq!(out.len(), 2, "got: {:?}", out.iter().map(|d| &d.text).collect::<Vec<_>>());
+        assert!(out.iter().all(|d| d.severity == DiagSeverity::Warning));
+        assert!(out
+            .iter()
+            .any(|d| d.text.contains("`enabeld`") && d.text.contains("never true")));
+        assert!(out
+            .iter()
+            .any(|d| d.text.contains("`enabled`") && d.text.contains("may have no effect")));
+    }
+
+    /// #10's other direction: an interpolation naming nothing, which expands to
+    /// the empty string rather than erroring. Reported with its own symptom.
+    #[test]
+    fn an_interpolation_of_an_undeclared_variable_is_reported() {
+        let spec: Extension = serde_json::from_value(json!({
+            "Extension": { "Author": "T", "Name": "M", "Version": "1" },
+            "UI": { "S": [ { "Type": "integer", "Variable": "sharpness" } ] },
+            "ENV_VARS": [
+                { "Name": "V", "Builder": [ { "Type": "set", "Value": "{sharpnes}" } ] }
+            ]
+        }))
+        .unwrap();
+        let out = variable_reference_lints(&[spec]);
+        assert_eq!(out.len(), 2, "got: {:?}", out.iter().map(|d| &d.text).collect::<Vec<_>>());
+        // Both directions fire here, and that is right: `sharpnes` is undeclared
+        // AND `sharpness` is now referenced by nothing.
+        assert!(out.iter().any(|d| d.text.contains("`sharpnes`")
+            && d.text.contains("expands to nothing")));
+        assert!(out.iter().any(|d| d.text.contains("`sharpness`")
+            && d.text.contains("may have no effect")));
+    }
+
+    /// **#10's false-positive guards — the half that matters most.** Four
+    /// legitimate patterns that must stay silent, each one a way an earlier or
+    /// more naive version of this check would have cried wolf.
+    #[test]
+    fn variable_reference_lints_stay_silent_on_legitimate_patterns() {
+        // 1. A `global:` reference satisfied by a DIFFERENT module. Globals live
+        //    in one shared pool (`VarStore::get` strips the prefix and looks in
+        //    `global`), so this is correct cross-module usage, not a typo — the
+        //    single most important negative case in this test.
+        let publisher: Extension = serde_json::from_value(json!({
+            "Extension": { "Author": "T", "Name": "Pub", "Version": "1" },
+            "UI": { "S": [ { "Type": "toggle", "Variable": "global:hdr_on" } ] },
+            "ENV_VARS": [ { "Name": "HDR", "Builder": [
+                { "Type": "set", "Value": "{global:hdr_on}" } ] } ]
+        }))
+        .unwrap();
+        let consumer: Extension = serde_json::from_value(json!({
+            "Extension": { "Author": "T", "Name": "Sub", "Version": "1" },
+            "ENV_VARS": [ { "Name": "X", "Builder": [
+                { "Type": "set", "Value": "1", "Requires": "global:hdr_on" } ] } ]
+        }))
+        .unwrap();
+        let out = variable_reference_lints(&[publisher, consumer]);
+        assert!(
+            out.is_empty(),
+            "a global declared by another module is not undeclared, got: {:?}",
+            out.iter().map(|d| &d.text).collect::<Vec<_>>()
+        );
+
+        // 2. `{OPTIONS}` in a wrapper's `CommandSyntax` is `build_wrappers`' own
+        //    placeholder, substituted before interpolation runs. It is not a
+        //    variable and must never be reported as one — this would otherwise
+        //    fire on gamescope, the flagship bundled module.
+        let gs: Extension = serde_json::from_value(json!({
+            "Extension": { "Author": "T", "Name": "GS", "Version": "1" },
+            "UI": { "S": [ { "Type": "integer", "Variable": "sharpness" } ] },
+            "WRAPPERS": [ { "CommandSyntax": "gamescope {OPTIONS} --", "Priority": 100,
+                            "Builder": [ { "Value": "--sharpness {sharpness}" } ] } ]
+        }))
+        .unwrap();
+        assert!(
+            variable_reference_lints(&[gs]).is_empty(),
+            "{{OPTIONS}} is a wrapper placeholder, not a variable"
+        );
+
+        // 3. `{{` / `}}` are ESCAPED BRACES, not a reference. A regex-based
+        //    extractor gets this wrong and would fire on any manifest emitting a
+        //    literal brace; `interpolated_vars` mirrors `VarStore::interpolate`
+        //    precisely so it does not.
+        let braces: Extension = serde_json::from_value(json!({
+            "Extension": { "Author": "T", "Name": "B", "Version": "1" },
+            "GAME_LAUNCH_ARGS": [ { "Value": "--json {{not_a_var}}" } ]
+        }))
+        .unwrap();
+        assert!(
+            variable_reference_lints(&[braces]).is_empty(),
+            "an escaped brace is a literal, not a variable reference"
+        );
+
+        // 4. A field consumed by a Rust BACKEND. Nothing in the manifest
+        //    references it and nothing ever will — this is the shape of all six
+        //    bundled false positives.
+        let backend: Extension = serde_json::from_value(json!({
+            "Extension": { "Author": "T", "Name": "BE", "Version": "1" },
+            "Backend": "lsfg-vk",
+            "UI": { "S": [ { "Type": "integer", "Variable": "multiplier" } ] }
+        }))
+        .unwrap();
+        assert!(
+            variable_reference_lints(&[backend]).is_empty(),
+            "a backend module reads its fields in Rust; the JSON walk cannot see it"
+        );
+    }
+
+    /// A field referenced only by another field's `Requires` is live: that is
+    /// how a module gates one control on another, and it is the most common
+    /// reason a variable has no *builder* reference. Firing here would flag
+    /// every master/detail toggle pair in existence.
+    #[test]
+    fn a_field_referenced_only_by_another_fields_requires_is_not_dead() {
+        let spec: Extension = serde_json::from_value(json!({
+            "Extension": { "Author": "T", "Name": "M", "Version": "1" },
+            "UI": { "S": [
+                { "Type": "toggle", "Variable": "enabled" },
+                { "Type": "integer", "Variable": "level", "Requires": "enabled" }
+            ] },
+            "ENV_VARS": [ { "Name": "V", "Builder": [
+                { "Type": "set", "Value": "{level}" } ] } ]
+        }))
+        .unwrap();
+        assert!(
+            variable_reference_lints(&[spec]).is_empty(),
+            "`enabled` gates another field, so it is referenced"
+        );
+    }
+
+    /// `preview_lints` is the one boundary the band consumes, and every entry it
+    /// emits carries its own severity — issue #11's point. Nothing downstream
+    /// re-derives one.
+    #[test]
+    fn preview_lints_carries_every_check_through_one_typed_boundary() {
+        // One env loss + one priority tie + one undeclared reference, together.
+        let a: Extension = serde_json::from_value(json!({
+            "Extension": { "Author": "T", "Name": "A", "Version": "1" },
+            "ENV_VARS": [ { "Name": "V", "Builder": [ { "Type": "set", "Value": "a" } ] } ],
+            "WRAPPERS": [ { "CommandSyntax": "a --", "Priority": 10 } ]
+        }))
+        .unwrap();
+        let b: Extension = serde_json::from_value(json!({
+            "Extension": { "Author": "T", "Name": "B", "Version": "1" },
+            // Unconditional, so it really does overwrite A's `V` — gating it on
+            // the undeclared name would make the step falsy and silence the env
+            // lint, which is the mistake the first draft of this test made.
+            "ENV_VARS": [ { "Name": "V", "Builder": [ { "Type": "set", "Value": "b" } ] } ],
+            "WRAPPERS": [ { "CommandSyntax": "b --", "Priority": 10 } ],
+            "GAME_LAUNCH_ARGS": [ { "Value": "--x", "Requires": "nope" } ]
+        }))
+        .unwrap();
+        let out = preview_lints(&[a, b], &Resolution::default());
+        let texts: Vec<&str> = out.iter().map(|e| e.text.as_str()).collect();
+        assert!(texts.iter().any(|t| t.contains("overwrites V")), "got: {texts:#?}");
+        assert!(texts.iter().any(|t| t.contains("Priority 10")), "got: {texts:#?}");
+        assert!(texts.iter().any(|t| t.contains("`nope`")), "got: {texts:#?}");
+        assert!(
+            out.iter().all(|e| e.severity == DiagSeverity::Warning),
+            "every preview lint is a Warning today; none may be refusing an action"
         );
     }
 }

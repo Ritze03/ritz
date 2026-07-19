@@ -1782,7 +1782,9 @@ The list holds two sources, assembled in display order by
 
 1. **The open draft's status messages** (`crate::gui::editor_status_lines`) — the state
    line, then whatever is blocking Save or Rename.
-2. **The launch-preview lint** `crate::gui::lossy_env_overwrites`, described below.
+2. **The launch-preview lints** (`crate::gui::preview_lints`) — three checks over the
+   assembled preview, described below: `lossy_env_overwrites`,
+   `wrapper_priority_ties` and `variable_reference_lints`.
 
 It was laid out as a **down payment** on the full ok/warning/error diagnostics panel the
 IDE plan calls for, and issue #26 spent part of it: the heading is a row with a
@@ -1868,6 +1870,129 @@ always visible, so "nothing is wrong" and "the lint never ran" would look identi
 rendered empty — precisely the distinction a diagnostics surface exists to make. `FAINT`
 rather than a success green because the absence of a problem shouldn't be the loudest
 thing on screen.
+
+### The preview-lint boundary (`crate::gui::preview_lints`)
+
+All three launch-preview checks return `Vec<DiagEntry>` from one producer, which the band
+concatenates after the draft's status lines. **Each check chooses its own severity**; no
+caller re-derives one.
+
+*Why one typed boundary* (2026-07-19, issue #11): before it, every check returned a
+different shape — `lossy_env_overwrites` a `Vec<EnvOverwrite>`, `validate` a `Result<()>`,
+`name_error` / `identity_error` bare `Option<String>`, `all_requires_parse` /
+`sections_unique` bare `bool` — and nothing could aggregate them. Commit `62eb53d` had
+already solved **half** of it: `DiagSeverity` + `DiagEntry` exist, and the draft-side
+checks all flow through `editor_status_lines`, which attaches a severity to each message.
+The stragglers were the *preview* lints, which reached the band as bespoke structs with
+the band stamping `DiagSeverity::Warning` on every one at the call site — meaning a check
+structurally **could not** pick a different rank even where it should. Issue #9 and #10
+would each have added a third and fourth bespoke shape. `preview_lints` collapses the
+family to one `-> Vec<DiagEntry>` boundary, so adding a fifth check is an append there
+rather than a new arm at every consumer.
+
+`lossy_env_overwrites` keeps its structured `EnvOverwrite` return and converts at the
+boundary: its tests assert on the individual `var` / `culprit` / `victims` fields, which a
+pre-formatted string would discard.
+
+**Config mode's inline copy of these lints** now paints from `DiagSeverity::icon()` /
+`color()` instead of the hardcoded warning glyph + `COL_GLOBAL` it used. That pair was
+correct while `lossy_env_overwrites` was the only source (every entry a `Warning`); with
+several checks each picking a rank, hardcoding one would mislabel any future non-warning.
+It renders identically today.
+
+### What `wrapper_priority_ties` detects (issue #9)
+
+Wrappers from **two or more different modules** declared at the same `Priority`.
+`ritz_core::builder::build_wrappers` sorts by `(priority, extension_index)`, so a tie
+falls through to **module load order** — which neither manifest declares. Enabling a
+module, renaming one, or shipping a new bundled one can reorder the assembled chain with
+nothing in either JSON having changed. The defect is not that the order is wrong; it is
+that the order is **not authored**.
+
+**Severity: `Warning`.** A tie is frequently harmless — two wrappers that do not interact
+genuinely do not care which runs first, and demanding a total order over things whose
+order is irrelevant is busywork. It is deliberately **not** `Error`: this band's `Error`
+rank means *the reason an action is refused* (a `save_enabled` gate or a blocked Rename),
+and an `Error` here would make the heading tally claim a blocker while Save sits enabled.
+`Info` is unavailable — `editor_status_lines` guarantees **exactly one** `Info` entry, the
+pinned state line, and both the pinning and the tally depend on that invariant. `Warning`
+is therefore both the accurate rank and the only non-blocking one the vocabulary offers.
+
+**Scope: across all enabled modules; same-module ties are deliberately silent.**
+
+- Across modules is where a tie bites, because that is where the chain is assembled and
+  where the tiebreak is invisible. The editor edits one manifest at a time, but this lint
+  runs over the same resolved spec set the launch preview beside it uses, so it sees the
+  real chain rather than a fragment.
+- Within one manifest the tiebreak is **declaration order**: `sort_by` is stable and both
+  entries carry the same `extension_index`, so two tied wrappers keep the order they were
+  written in. That is authored intent — exactly like a single module's `Builder` step
+  sequence, which `lossy_env_overwrites` declines to police for the same reason.
+
+Wrappers whose `Requires` does not pass are skipped: a gated-off wrapper never reaches
+`build_wrappers`, so its priority cannot collide with anything.
+
+### What `variable_reference_lints` detects (issue #10)
+
+Both directions of the link between a `UiField`'s `Variable` and the places that read it.
+Misspelling a name on either side fails **silently** — an undeclared name is falsy in a
+`Requires` forever and interpolates to the empty string — so the symptom is a control that
+does nothing rather than an error anyone sees.
+
+| direction | severity | message |
+|---|---|---|
+| referenced in a `Requires`, declared by nothing | `Warning` | *"no field declares `x`, referenced in a condition — that condition is never true."* |
+| interpolated as `{x}`, declared by nothing | `Warning` | *"…referenced in an interpolation — it expands to nothing."* |
+| declared, referenced by nothing | `Warning`, behind a much stricter rule | *"nothing in this module references `x` — the field may have no effect."* |
+
+**What counts as declared.** Locals resolve per module (`Resolution::var_store` fills the
+store from that extension's own resolved fields and nothing else), so a bare name is
+checked against **this module's** `UiField.variable` set. A `global:`-prefixed name
+resolves out of the shared global pool, so it is checked against the `global:` fields of
+**any** loaded module — a reference to `global:hdr_on` satisfied by a different manifest is
+correct usage and must not be reported. This mirrors `VarStore::get`, which strips the
+prefix and looks in `global`.
+
+**Why the two directions share `Warning` despite very different confidence.** An
+undeclared reference is near-certainly a defect: nothing else in the system can define the
+name. An unreferenced field is far weaker evidence — a module may legitimately expose a
+control no JSON block reads. The vocabulary has no rank quieter than `Warning` available
+(`Info` is reserved for the single pinned state line), so **the noise comes out of the
+rule instead of the rank** — see the suppression below. A fourth, quieter `Hint` rank is
+the honest fix and would let these split cleanly; it is not invented here for the same
+reason issue #39 leaves the palette alone.
+
+**Why the dead-field half is suppressed for backend / hook / script modules**
+(`crate::gui::has_opaque_var_consumer`). Measured against the bundled set: with no
+suppression, that half fires on **six of thirteen** bundled manifests — `custom-args`,
+`custom-env`, `custom-game-env`, `hypr-monctl`, `lsfg-vk` and `scripts`. Every one is a
+false positive, and they share a cause: their fields are consumed by a **Rust backend
+handler**, a **hook script**, or a **`ScriptBuilders` script** — none of which the walk can
+see, because none is expressed in the manifest. A lint wrong about half the project's own
+modules is worse than no lint, so a module carrying any of those three opaque consumers is
+exempt from the dead-field half entirely. The undeclared-reference half stays on for them:
+an opaque consumer explains a field with no *reader*, but nothing explains a `Requires`
+naming a variable that does not exist.
+
+**Two extraction details that keep it honest.** `{OPTIONS}` in a wrapper's `CommandSyntax`
+is `build_wrappers`' own placeholder, substituted *before* interpolation runs, so it is
+never a variable reference (flagging it would fire on Gamescope). And identifiers come
+from the real readers — `condition::parse` for `Requires`, and
+`crate::gui::interpolated_vars`, which mirrors `VarStore::interpolate` exactly — never a
+regex. A regex mishandles `{{escaped}}` braces, which are literals rather than references.
+
+### All three lints are silent on every bundled module
+
+Pinned by `preview_lints_are_silent_on_every_bundled_module`, which loads
+`resources/extensions/` through `core_extension::discover` and asserts an empty result. As
+of 2026-07-19 the bundled set has **no wrapper `Priority` ties** (Gamescope at 100,
+`gamemoderun` at 200) and **no undeclared references at all**; the dead-field half is
+silenced by the opaque-consumer exemption above.
+
+*Why this is a test and not a note:* a lint that fires on the manifests shipped as the
+reference examples is not a lint, it is noise — and the user would learn to ignore the band
+before it ever caught a real bug. If that test fails after a bundled manifest changes, the
+first question is whether the **lint** is wrong, not the manifest.
 
 ### What `lossy_env_overwrites` detects
 
