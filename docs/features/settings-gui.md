@@ -837,23 +837,25 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   used to switch instantly, so clicking Profiles or Settings from a dirty editor let the
   frame-start nav-away guard destroy the draft without a word. That was silent data loss,
   and it is now gated: `GuiApp::render_nav_panel` raises
-  `ConfirmAction::DiscardEdits { pending_nav: Some(cat) }` instead of applying the click.
-  Confirm discards the draft **and completes the switch**; Cancel leaves the editor and
-  the draft exactly as they were.
-  - *Why the destination is a payload on the existing variant* rather than a second
-    variant: both cases render the identical dialog and differ only in what runs after
-    Confirm. `pending_nav: None` is the editor's own Close button (Close doubling as
-    Discard), which drops the focused draft via `discard_module` and clears focus — there
-    is no separate "remembered view" to land on any more (S4b); in IDE mode the reopen
-    invariant picks the tree's current selection up again the next frame.
+  `ConfirmAction::DiscardEdits { then: DiscardThen::Nav(cat) }` instead of applying the
+  click. Confirm discards the draft **and completes the switch**; Cancel leaves the editor
+  and the draft exactly as they were.
+  - *Why the destination is a payload on the existing variant* rather than three
+    variants: all three cases render the identical dialog and differ only in what runs
+    after Confirm. `DiscardThen::CloseEditor` is the editor's own Close button (Close
+    doubling as Discard), which drops the focused draft via `discard_module` and clears
+    focus — there is no separate "remembered view" to land on any more (S4b); in IDE mode
+    the reopen invariant picks the tree's current selection up again the next frame.
+    `DiscardThen::ExitApp` is the whole window closing — see "Closing the window" below.
   - **Only when there is unsaved work.** A clean draft is byte-identical to disk *and* has
     no staged rename, so dropping it loses nothing and prompting on every tab click would
     be pure noise. The gate is `ModuleDraft::has_unsaved_work`, not `dirty()` — see
     "Unsaved work vs. dirty" below. The pure predicate
     `nav_category_drops_draft` decides *which* clicks even qualify: the two config
-    destinations always leave the editor, while **IDE Mode** only does when the IDE
-    tree's selection is a *different* module than the one under edit (clicking IDE Mode
-    while already on that module is a genuine no-op and must not prompt).
+    destinations always leave the editor (Confirm clears the whole draft map), while
+    **IDE Mode** never does — since S4a made `drafts` a keyed map, switching modules
+    inside IDE mode destroys nothing, so a prompt on the mode's primary gesture would be
+    pure noise.
   - The prompt **names the modules at risk** — "These modules have unsaved changes:
     Author::Name." — from `GuiApp::unsaved_module_names`, which returns a list even though
     S3b only ever holds one draft, so multi-draft (S4) grows the list without rewording
@@ -865,6 +867,66 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   - **Still unguarded, by design:** switching modules *within* the IDE tree replaces a
     dirty draft silently. That tree is deliberately not lockable (see above) and per-row
     dirty markers are the S4 answer; likewise Fork/Create from a dirty draft drops it.
+- **Closing the window with unsaved edits asks the same question** (2026-07-19, issue
+  #33) — closing the settings window used to drop every open draft in silence. It now
+  raises **the same `ConfirmAction::DiscardEdits` dialog** the Profiles-tab switch does:
+  same title, same "These modules have unsaved changes: …" list, same buttons, carrying
+  `DiscardThen::ExitApp(outcome)`. *Why the same dialog and not a bespoke "quit anyway?"
+  prompt:* the user asked for exactly that — "when I close, it shows the same discard
+  dialogue that I get when I would switch to profiles" — and a second prompt would be a
+  second thing to keep in step with the first.
+  - **Both close entry points are guarded**, which is the whole point. There are exactly
+    two in `gui.rs`:
+    1. the **OS close** — X button, Alt+F4, window-manager close — intercepted by
+       `GuiApp::handle_close_request`, which reads `close_requested()` near the top of
+       `GuiApp::ui` (right after the frame's `refresh_unsaved_drafts`, before any panel
+       renders) and answers with `egui::ViewportCommand::CancelClose`;
+    2. the launch-mode title-bar **"Launch Game" / "Cancel Launch"** buttons, which now
+       call `GuiApp::request_app_close` instead of sending `Close` themselves.
+
+    *Why (2) matters as much as (1):* it is the more frequently clicked path, and this
+    codebase already had three bypasses of exactly this shape (Ctrl+S around the Save
+    button's guard, Ctrl+E around its button, Ctrl+R around the modal). So the file now
+    has **one** `ViewportCommand::Close` send site — the tail of `GuiApp::ui`, driven by
+    the `GuiApp::pending_close` flag. Everything that wants the window shut sets that
+    flag; there is no second door to leave unguarded. (`splash.rs` has its own two
+    `Close` sends; the splash holds no drafts and is a separate window.)
+  - **The gate is `has_unsaved_work()`, never `dirty()`** — the pure predicate
+    `close_needs_confirm(any_unsaved, already_approved)` reads the same frame-cached
+    `unsaved_drafts` set the tab guard does. A staged-but-uncommitted rename is unsaved
+    work and `apply_discard_edits` destroys it along with the draft; asking `dirty()`
+    here would reintroduce issue #34's blind spot on the *one* path where the loss is
+    permanent, because the process exits straight afterwards. **No unsaved work → the
+    window closes on one click**, no dialog: the common case must not pay for the guard.
+  - **The close genuinely happens after Confirm.** `CancelClose` makes eframe skip
+    setting its internal `close` flag, so nothing closes the window afterwards unless it
+    is asked again — and `ViewportCommand::Close` only arrives back as `close_requested()`
+    on the *following* frame. Confirm therefore sets `pending_close`, whose two jobs are
+    (a) making the tail of `ui()` re-send `Close` and (b) making `close_needs_confirm`
+    wave that re-issued close through, so the guard doesn't cancel its own approved close
+    forever.
+  - **Launch mode still launches.** The outcome (`EditOutcome::Continue` / `Cancel`) is
+    carried *in* `DiscardThen::ExitApp` and applied only when Confirm runs — not when the
+    button is clicked. *Why:* a user who clicks "Launch Game", sees the prompt and cancels
+    must not be left with `outcome` silently flipped to `Continue`, or the next plain
+    X-close would launch the game instead of honouring their "Editor closing action"
+    setting. *Why Launch is guarded at all, given the issue is about closing:* launching
+    **is** closing — the window goes away and the drafts go with it, so the loss is
+    identical. Auto-saving drafts on launch was rejected instead: Save has its own gate
+    (validation, name collisions, the pending-rename prompt), and writing a half-valid
+    manifest unasked at launch time is worse than one question.
+  - **Re-entrancy: an existing dialog wins.** If a close is requested while any
+    `ConfirmAction` is already on screen, the close is cancelled and the pending dialog is
+    left untouched rather than overwritten. *Why:* clobbering a half-made decision (say a
+    pending "Delete Module") would silently cancel something the user had already chosen,
+    and the modal backdrop means only one question can be answered at a time anyway.
+    Pressing Alt+F4 again after answering works.
+  - **What is not covered by tests:** the viewport round-trip itself. `close_requested()`
+    / `CancelClose` / `Close` exist only inside a live eframe event loop, which needs a
+    window server. The tests cover the *decision* — `close_needs_confirm`, the prompt
+    `request_app_close` raises (including for a rename-only draft), what
+    `apply_discard_edits(ExitApp)` does to drafts/outcome/`pending_close`, Cancel leaving
+    the app usable, and the re-entrancy rule.
 - **Locked trees while editing** — the nav-away guard above is now a *backstop*, not the
   normal path: while a draft exists the **MODULES tree** is wrapped
   in `ui.add_enabled_ui(module_draft.is_none(), …)`, so it greys out and can't swap the

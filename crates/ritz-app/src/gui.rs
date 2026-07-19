@@ -282,6 +282,34 @@ enum NavCategory {
     GamesProfiles,
 }
 
+/// What happens *after* the user confirms a [`ConfirmAction::DiscardEdits`]
+/// prompt — i.e. what they were trying to do when the unsaved-work guard stopped
+/// them.
+///
+/// *Why one payload enum and not three `ConfirmAction` variants* (2026-07-19,
+/// issue #33): all three render the identical dialog — same title ("Discard
+/// Changes"), same message listing the affected modules, same buttons — and
+/// differ only in the follow-up. Three variants would triple the message arm in
+/// [`GuiApp::render_confirm_dialog`] to carry one word of state, and the user's
+/// acceptance criterion for the window-close case was explicitly *"the same
+/// discard dialogue that I get when I would switch to profiles"*, so a bespoke
+/// second prompt was never an option.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiscardThen {
+    /// The editor's own Close button (Close doubling as Discard). Confirm runs
+    /// [`GuiApp::discard_module`], dropping the *focused* draft only and landing
+    /// on the remembered view exactly as a clean Close would.
+    CloseEditor,
+    /// A category tab (Profiles / Settings / IDE Mode) was clicked. Confirm drops
+    /// every draft and then applies that click.
+    Nav(NavCategory),
+    /// The whole window is closing — the OS close (X / Alt+F4 / the window
+    /// manager) or a launch-mode title-bar button. Confirm drops every draft,
+    /// records `EditOutcome` (so "Launch Game" still launches), and closes for
+    /// real via [`GuiApp::pending_close`].
+    ExitApp(EditOutcome),
+}
+
 /// A destructive action awaiting confirmation in a small dialog.
 #[derive(Debug, Clone)]
 enum ConfirmAction {
@@ -293,21 +321,13 @@ enum ConfirmAction {
     /// Delete a user-authored module manifest. `label` is `Author::Name` for the
     /// prompt; `manifest` is the file to remove.
     DeleteModule { manifest: PathBuf, label: String },
-    /// Leave the open module editor while its draft has unsaved edits.
+    /// Leave the open module editor — or the whole window — while some draft
+    /// holds unsaved work.
     ///
-    /// `pending_nav` is **where the user was trying to go** when the prompt was
-    /// raised, so Confirm can complete the switch instead of merely discarding:
-    /// - `None` — the editor's own Close button (Close doubling as Discard).
-    ///   Confirm runs [`GuiApp::discard_module`], which lands on the remembered
-    ///   view exactly as a clean Close would.
-    /// - `Some(cat)` — a category tab (Profiles / Settings / IDE Mode) was
-    ///   clicked. Confirm drops the draft and then applies that click.
-    ///
-    /// *Why a payload and not two variants:* both cases render the identical
-    /// dialog (same title, same message, same buttons) and differ only in what
-    /// runs after Confirm. A second variant would duplicate the whole message arm
-    /// in [`GuiApp::render_confirm_dialog`] just to carry one word of state.
-    DiscardEdits { pending_nav: Option<NavCategory> },
+    /// `then` is **what the user was trying to do** when the prompt was raised,
+    /// so Confirm completes it instead of merely discarding. See
+    /// [`DiscardThen`] for the three destinations and why they share one variant.
+    DiscardEdits { then: DiscardThen },
     /// Save was pressed while the open draft has a **staged identity change**
     /// (Author / Name / an existing field's `Variable`) sitting in
     /// `ModuleDraft::identity`.
@@ -566,6 +586,29 @@ pub struct GuiApp {
     /// frame. Anything that mutates a draft outside the render path must call
     /// `refresh_unsaved_drafts` itself.
     unsaved_drafts: std::collections::HashSet<PathBuf>,
+    /// Set once a window close has been **approved** — either because there was
+    /// no unsaved work to lose, or because the user confirmed the discard prompt
+    /// ([`DiscardThen::ExitApp`]). Two jobs, both required (2026-07-19, issue
+    /// #33):
+    ///
+    /// 1. **Re-issue the close.** The guard answers the OS close request with
+    ///    `ViewportCommand::CancelClose`, which eframe honours by *not* setting
+    ///    its `close` flag ([`eframe`]'s `EpiIntegration::update`). Nothing will
+    ///    close the window afterwards unless we ask again, so the tail of
+    ///    [`GuiApp::ui`] sends `ViewportCommand::Close` on every frame this is
+    ///    set. That command round-trips through the backend as a
+    ///    `ViewportEvent::Close`, arriving as `close_requested()` on the *next*
+    ///    frame — a close genuinely cannot happen within the frame that asks.
+    /// 2. **Let that next frame through.** The guard checks this flag first, so
+    ///    the re-issued close is not caught and cancelled by the very guard that
+    ///    raised the prompt (an infinite "cancel, ask, cancel" loop).
+    ///
+    /// *Why a flag and not a direct `send_viewport_cmd` from the confirm arm:*
+    /// [`GuiApp::apply_discard_edits`] takes no `&egui::Context` on purpose — it
+    /// is the one part of the confirmation that unit tests drive directly (see
+    /// its doc comment). Threading a context through it would make the
+    /// close-decision untestable again.
+    pending_close: bool,
     /// The open Fork / Create-new module dialog, if any.
     module_dialog: Option<ModuleDialog>,
     /// "Also purge stored config" checkbox state for the pending Delete-module
@@ -805,6 +848,24 @@ fn save_gate(dirty: bool, valid: bool, requires_all_parse: bool, name_error: boo
 ///
 /// The two config destinations still prompt, because `apply_discard_edits` clears
 /// the whole map on confirm — that is a real, user-approved loss.
+/// Pure predicate (factored out for testing): must a request to close the whole
+/// window stop and ask, or may it close immediately? (2026-07-19, issue #33.)
+///
+/// `any_unsaved` is `!unsaved_drafts.is_empty()` — the same frame-cached set, and
+/// so the same [`ModuleDraft::has_unsaved_work`] predicate, the category-tab
+/// guard above uses. **Not bare `dirty()`**: a staged-but-uncommitted rename is
+/// unsaved work, `apply_discard_edits` destroys it along with the draft, and
+/// closing the window destroys it just as thoroughly as switching to Profiles
+/// does. Asking `dirty()` here would reintroduce issue #34's blind spot on the
+/// one path where the loss is permanent — the process is gone afterwards.
+///
+/// `already_approved` is [`GuiApp::pending_close`]: once the user has confirmed
+/// the discard (or there was nothing to confirm), the close we re-issue must not
+/// be caught by the guard that raised the prompt.
+fn close_needs_confirm(any_unsaved: bool, already_approved: bool) -> bool {
+    any_unsaved && !already_approved
+}
+
 fn nav_category_drops_draft(cat: NavCategory, any_unsaved: bool) -> bool {
     match cat {
         // Both land on a config scope and drop every draft.
@@ -1053,6 +1114,7 @@ impl GuiApp {
             logo: None,
             drafts: IndexMap::new(),
             unsaved_drafts: std::collections::HashSet::new(),
+            pending_close: false,
             module_dialog: None,
             delete_module_purge: false,
             carryover_report: None,
@@ -1807,19 +1869,94 @@ impl GuiApp {
     /// happens. Inline in `render_confirm_dialog` it is only reachable through a
     /// live egui frame, so it could never be tested; as a method it is exercised
     /// directly against a real `GuiApp` (see the tests at the bottom of this file).
-    fn apply_discard_edits(&mut self, pending_nav: Option<NavCategory>) {
-        match pending_nav {
+    fn apply_discard_edits(&mut self, then: DiscardThen) {
+        match then {
             // Close acting as Discard: drop the focused draft only.
-            None => self.discard_module(),
+            DiscardThen::CloseEditor => self.discard_module(),
             // A category tab was clicked and the user approved the discard. Drop
             // **every** draft: the prompt named them all ("These modules have
             // unsaved changes: …"), so keeping any back would contradict what the
             // user just agreed to.
-            Some(cat) => {
+            DiscardThen::Nav(cat) => {
                 self.drafts.clear();
                 self.refresh_unsaved_drafts();
                 self.select_nav_category(cat);
             }
+            // The window is closing. Same reasoning as the nav arm — the prompt
+            // named every unsaved module, so every draft goes.
+            //
+            // The outcome is applied *here*, not when the button was clicked: a
+            // launch-mode "Launch Game" that the user then cancelled out of must
+            // leave `outcome` exactly as it was, or the next plain X-close would
+            // silently launch the game instead of doing what the user's
+            // "Editor closing action" setting says.
+            DiscardThen::ExitApp(outcome) => {
+                self.drafts.clear();
+                self.refresh_unsaved_drafts();
+                *self.outcome.lock().unwrap() = outcome;
+                self.pending_close = true;
+            }
+        }
+    }
+
+    /// Ask to close the whole settings window with `outcome`, guarded.
+    ///
+    /// **The single funnel for every in-app close.** Both launch-mode title-bar
+    /// buttons route through it, and the OS-close interceptor
+    /// ([`Self::handle_close_request`]) applies the same predicate. Nothing in
+    /// `gui.rs` may send `ViewportCommand::Close` outside the one tail-of-frame
+    /// site driven by [`Self::pending_close`] — a second raw send site is exactly
+    /// how the Ctrl+S / Ctrl+E / Ctrl+R bypasses of earlier stages happened.
+    ///
+    /// Takes no `&egui::Context` on purpose, so the decision it makes ("prompt or
+    /// close") is unit-testable; the actual viewport command is issued from the
+    /// tail of [`Self::ui`]. Callers must have a fresh `unsaved_drafts`.
+    fn request_app_close(&mut self, outcome: EditOutcome) {
+        if !close_needs_confirm(!self.unsaved_drafts.is_empty(), self.pending_close) {
+            *self.outcome.lock().unwrap() = outcome;
+            self.pending_close = true;
+            return;
+        }
+        // Re-entrancy: a confirmation is already on screen. Leave it alone rather
+        // than overwriting the decision the user is mid-way through making — the
+        // modal backdrop means they can still only answer one question at a time,
+        // and clobbering (say) a pending "Delete Module" with a discard prompt
+        // would silently cancel an action they had already chosen. The close is
+        // simply dropped; asking again once the dialog is answered works.
+        if self.confirm.is_none() {
+            self.confirm =
+                Some(ConfirmAction::DiscardEdits { then: DiscardThen::ExitApp(outcome) });
+        }
+    }
+
+    /// Intercept the **OS** window close — the X button, Alt+F4, or a window
+    /// manager close — and stop it if some draft holds unsaved work.
+    ///
+    /// Also catches the close this app re-issues itself, since eframe routes
+    /// `ViewportCommand::Close` back through the same `close_requested()` flag;
+    /// [`Self::pending_close`] is what lets an approved close pass straight
+    /// through.
+    ///
+    /// Must run after the frame's [`Self::refresh_unsaved_drafts`] and before the
+    /// dialog renders, so the prompt it raises is visible on the same frame the
+    /// close was cancelled.
+    fn handle_close_request(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|i| i.viewport().close_requested()) {
+            return;
+        }
+        if !close_needs_confirm(!self.unsaved_drafts.is_empty(), self.pending_close) {
+            // Nothing to lose: let it close. Not making the common case cost a
+            // click is the whole reason this is a guard and not a "really quit?"
+            // prompt.
+            return;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        // The OS close carries no outcome of its own, so it keeps whatever the
+        // "Editor closing action" setting put in `outcome` (`GuiApp::new`).
+        let outcome = *self.outcome.lock().unwrap();
+        if self.confirm.is_none() {
+            self.confirm =
+                Some(ConfirmAction::DiscardEdits { then: DiscardThen::ExitApp(outcome) });
         }
     }
 
@@ -2312,6 +2449,11 @@ impl GuiApp {
             self.refresh_identity_state();
         }
         self.refresh_unsaved_drafts();
+        // Guard the OS window close (X / Alt+F4 / WM) against unsaved drafts.
+        // Placed right after the dirty set is rebuilt and well before any panel
+        // renders, so the prompt it may raise shows on this very frame — the
+        // frame in which the close was cancelled.
+        self.handle_close_request(ctx);
         if self.focused_module().is_some() {
             // Ctrl+S: Save when the editor is open and the Save gate is satisfied
             // (same condition as the button); a no-op otherwise. Save exits the
@@ -2807,6 +2949,17 @@ impl GuiApp {
         if changed {
             self.persist();
         }
+
+        // The only `ViewportCommand::Close` send site in this file. Everything
+        // that wants the window shut sets `pending_close` (via
+        // `request_app_close` or the confirmed `DiscardThen::ExitApp`) and lands
+        // here, so the unsaved-work guard cannot be routed around. Re-sent every
+        // frame the flag is set rather than once: the command only takes effect
+        // on the following frame, and an idempotent resend is cheaper than
+        // reasoning about which single frame is the right one.
+        if self.pending_close {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
     }
 
     /// Render the pending-confirmation modal, if any. Returns true if a
@@ -2980,9 +3133,7 @@ impl GuiApp {
                     self.delete_module(&manifest, self.delete_module_purge);
                     self.delete_module_purge = false;
                 }
-                ConfirmAction::DiscardEdits { pending_nav } => {
-                    self.apply_discard_edits(pending_nav)
-                }
+                ConfirmAction::DiscardEdits { then } => self.apply_discard_edits(then),
                 // `blocked.is_none()` = the staged identity is committable, so
                 // commit it (Rename carries the body with it). Otherwise the user
                 // has explicitly accepted a body-only save under the old identity.
@@ -3541,9 +3692,11 @@ impl GuiApp {
             // Close doubles as Discard: warn before dropping unsaved edits.
             TopAction::Close => {
                 if unsaved && editable {
-                    // `pending_nav: None` — Close has no destination to complete
-                    // beyond what `discard_module` already does on Confirm.
-                    self.confirm = Some(ConfirmAction::DiscardEdits { pending_nav: None });
+                    // `CloseEditor` — the editor Close has no destination to
+                    // complete beyond what `discard_module` already does on
+                    // Confirm.
+                    self.confirm =
+                        Some(ConfirmAction::DiscardEdits { then: DiscardThen::CloseEditor });
                 } else {
                     // `discard_module`: S4a made Discard a per-module action that
                     // (in IDE mode) re-seeds the focused draft from disk and stays
@@ -5306,15 +5459,20 @@ impl GuiApp {
                         ui.with_layout(
                             egui::Layout::right_to_left(egui::Align::Center),
                             |ui| {
+                                // Both buttons close the window, so both go
+                                // through the same unsaved-work guard the X
+                                // button does — these are the *more* frequently
+                                // clicked close path, and leaving them raw would
+                                // be a hole straight through the fix. The outcome
+                                // is passed along rather than applied here, so a
+                                // cancelled prompt leaves `outcome` untouched.
                                 if ui.add(theme::primary_button(format!("\u{f04b}{sep}Launch Game"))).clicked()
                                 {
-                                    *self.outcome.lock().unwrap() = EditOutcome::Continue;
-                                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                    self.request_app_close(EditOutcome::Continue);
                                 }
                                 ui.add_space(8.0);
                                 if ui.add(theme::danger_button("Cancel Launch")).clicked() {
-                                    *self.outcome.lock().unwrap() = EditOutcome::Cancel;
-                                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                    self.request_app_close(EditOutcome::Cancel);
                                 }
                             },
                         );
@@ -7002,7 +7160,8 @@ impl GuiApp {
             // draft is byte-identical to disk, so dropping it loses nothing and a
             // prompt on every tab click would be pure noise.
             if nav_category_drops_draft(cat, !self.unsaved_drafts.is_empty()) {
-                self.confirm = Some(ConfirmAction::DiscardEdits { pending_nav: Some(cat) });
+                self.confirm =
+                    Some(ConfirmAction::DiscardEdits { then: DiscardThen::Nav(cat) });
             } else {
                 self.select_nav_category(cat);
             }
@@ -9690,6 +9849,7 @@ mod tests {
             logo: None,
             drafts: IndexMap::new(),
             unsaved_drafts: std::collections::HashSet::new(),
+            pending_close: false,
             module_dialog: None,
             delete_module_purge: false,
             carryover_report: None,
@@ -10361,7 +10521,7 @@ mod tests {
         }
         app.focused_module = Some(beta_id);
 
-        app.apply_discard_edits(None);
+        app.apply_discard_edits(DiscardThen::CloseEditor);
 
         assert_eq!(app.drafts.len(), 1, "only the focused draft may be discarded");
         assert!(app.drafts.contains_key(&PathBuf::from("/x/alpha.json")));
@@ -10388,7 +10548,7 @@ mod tests {
         app.drafts.insert(draft.manifest.clone(), draft);
         app.focused_module = Some("Ritze::Sample::1.0".to_string());
 
-        app.apply_discard_edits(Some(NavCategory::GeneralSettings));
+        app.apply_discard_edits(DiscardThen::Nav(NavCategory::GeneralSettings));
 
         assert!(app.drafts.is_empty(), "the confirmed discard must drop every draft");
         assert_eq!(app.mode, Mode::Config, "the click must still be applied");
@@ -10396,7 +10556,7 @@ mod tests {
         assert_eq!(app.focused_module, None, "focus must be cleared along with the mode switch");
     }
 
-    /// Confirm on the *Close* prompt (`pending_nav: None`) discards the focused
+    /// Confirm on the *Close* prompt ([`DiscardThen::CloseEditor`]) discards the focused
     /// draft and clears focus.
     ///
     /// Rewritten for S4b: the pre-S4b version of this test asserted `nav_sel`
@@ -10415,7 +10575,7 @@ mod tests {
         app.focused_module = Some("Ritze::Sample::1.0".to_string());
         app.nav_sel = NavSel::Profile("Handhelds".to_string());
 
-        app.apply_discard_edits(None);
+        app.apply_discard_edits(DiscardThen::CloseEditor);
 
         assert!(app.drafts.is_empty());
         assert_eq!(app.focused_module, None, "focus must be cleared");
@@ -10878,7 +11038,7 @@ mod tests {
         assert!(
             matches!(
                 app.confirm,
-                Some(ConfirmAction::DiscardEdits { pending_nav: None })
+                Some(ConfirmAction::DiscardEdits { then: DiscardThen::CloseEditor })
             ),
             "Close must confirm before dropping a staged rename; got {:?}",
             app.confirm
@@ -11044,4 +11204,190 @@ mod tests {
         assert_eq!(app.draft().unwrap().identity.name, "Renamed");
     }
 
+    // ── Closing the window with unsaved drafts (2026-07-19, issue #33) ───────
+    //
+    // The data-loss path these cover: closing the settings window — the X
+    // button, Alt+F4, or either launch-mode title-bar button — dropped every
+    // open module draft without a word. The process exits immediately after, so
+    // this is the one loss with no way back.
+    //
+    // What is NOT covered here, honestly: the viewport round-trip itself.
+    // `close_requested()` / `CancelClose` / `Close` only exist inside a live
+    // eframe event loop, and driving one needs a window server. Everything below
+    // tests the *decision* (`close_needs_confirm` and the state it reads and
+    // writes); the frame that carries `pending_close` out to the backend is a
+    // single `ctx.send_viewport_cmd` at the tail of `ui()`.
+
+    #[test]
+    fn close_gate_predicate_asks_only_when_there_is_unsaved_work_to_lose() {
+        assert!(close_needs_confirm(true, false), "unsaved work must stop the close");
+        assert!(!close_needs_confirm(false, false), "a clean app must close on one click");
+        // Once approved, the close we re-issue must sail through the same guard —
+        // otherwise it cancels itself forever and the window can never shut.
+        assert!(!close_needs_confirm(true, true));
+        assert!(!close_needs_confirm(false, true));
+    }
+
+    /// The common case must not cost a click: no drafts → the close is approved
+    /// on the spot and the outcome is applied.
+    #[test]
+    fn closing_with_no_unsaved_work_closes_immediately() {
+        let mut app = test_app();
+        app.refresh_unsaved_drafts();
+
+        app.request_app_close(EditOutcome::Cancel);
+
+        assert!(app.confirm.is_none(), "a clean close must not raise a dialog");
+        assert!(app.pending_close, "and must actually ask the window to close");
+        assert_eq!(*app.outcome.lock().unwrap(), EditOutcome::Cancel);
+    }
+
+    /// The acceptance criterion: closing with unsaved work raises **the same**
+    /// `DiscardEdits` prompt the Profiles-tab switch raises, naming the same
+    /// modules, and closes nothing until it is answered.
+    #[test]
+    fn closing_with_unsaved_work_raises_the_discard_prompt_instead() {
+        let mut app = test_app();
+        insert_draft(&mut app, "Ritze", "Alpha", "/x/alpha.json");
+        app.drafts.get_mut(&PathBuf::from("/x/alpha.json")).unwrap().ext.meta.version =
+            "9.9".to_string();
+        app.refresh_unsaved_drafts();
+
+        app.request_app_close(EditOutcome::Continue);
+
+        assert!(
+            matches!(
+                app.confirm,
+                Some(ConfirmAction::DiscardEdits { then: DiscardThen::ExitApp(_) })
+            ),
+            "the close must reuse the DiscardEdits prompt; got {:?}",
+            app.confirm
+        );
+        assert!(!app.pending_close, "nothing may close before the prompt is answered");
+        assert_eq!(app.drafts.len(), 1, "and the draft must still be there");
+        // Same message the Profiles-tab switch produces — same list, same source.
+        assert_eq!(app.unsaved_module_names(), vec!["Ritze::Alpha".to_string()]);
+        // The outcome must NOT have moved yet: Cancel has to leave the
+        // "Editor closing action" default exactly as it was.
+        assert_eq!(*app.outcome.lock().unwrap(), EditOutcome::Continue);
+    }
+
+    /// **Issue #34's blind spot, on the path where it is unrecoverable.** A draft
+    /// whose *only* change is a staged rename is not `dirty()`, but it is unsaved
+    /// work — and closing the window destroys it. The guard must ask.
+    ///
+    /// Verified to bite: swapping `has_unsaved_work()` for `dirty()` in
+    /// `refresh_unsaved_drafts` leaves `confirm` at `None` and this fails.
+    #[test]
+    fn closing_prompts_for_a_rename_only_draft_too() {
+        let mut app = test_app();
+        insert_draft(&mut app, "Ritze", "Alpha", "/x/alpha.json");
+        {
+            let d = app.drafts.get_mut(&PathBuf::from("/x/alpha.json")).unwrap();
+            // Staged identity only — the body is byte-identical to disk.
+            d.identity.name = "Renamed".to_string();
+            assert!(!d.dirty(), "precondition: a rename-only draft is not dirty");
+            assert!(d.has_unsaved_work(), "but it is unsaved work");
+        }
+        app.refresh_unsaved_drafts();
+
+        app.request_app_close(EditOutcome::Continue);
+
+        assert!(
+            matches!(
+                app.confirm,
+                Some(ConfirmAction::DiscardEdits { then: DiscardThen::ExitApp(_) })
+            ),
+            "a staged rename must stop the close; got {:?}",
+            app.confirm
+        );
+    }
+
+    /// Confirm on the close prompt drops every draft, applies the carried
+    /// outcome, and marks the close approved so the tail of `ui()` re-issues it.
+    #[test]
+    fn confirming_the_close_prompt_discards_everything_and_approves_the_close() {
+        let mut app = test_app();
+        insert_draft(&mut app, "Ritze", "Alpha", "/x/alpha.json");
+        insert_draft(&mut app, "Ritze", "Beta", "/x/beta.json");
+        app.refresh_unsaved_drafts();
+
+        app.apply_discard_edits(DiscardThen::ExitApp(EditOutcome::Cancel));
+
+        assert!(app.drafts.is_empty(), "the prompt named them all, so they all go");
+        assert!(app.unsaved_drafts.is_empty(), "and the frame's set must follow");
+        assert!(app.pending_close, "the close must actually be re-issued");
+        assert_eq!(*app.outcome.lock().unwrap(), EditOutcome::Cancel);
+        // The re-issued close must now pass the guard rather than re-prompt.
+        assert!(!close_needs_confirm(!app.unsaved_drafts.is_empty(), app.pending_close));
+    }
+
+    /// Launch mode: "Launch Game" still launches after the user approves the
+    /// discard. The guard adds a question, it does not change the answer.
+    #[test]
+    fn confirming_the_close_prompt_from_launch_game_still_launches() {
+        let mut app = test_app();
+        app.launch_mode = true;
+        *app.outcome.lock().unwrap() = EditOutcome::Cancel; // the configured default
+        insert_draft(&mut app, "Ritze", "Alpha", "/x/alpha.json");
+        app.drafts.get_mut(&PathBuf::from("/x/alpha.json")).unwrap().ext.meta.version =
+            "9.9".to_string();
+        app.refresh_unsaved_drafts();
+
+        app.request_app_close(EditOutcome::Continue);
+        let Some(ConfirmAction::DiscardEdits { then }) = app.confirm.clone() else {
+            panic!("expected the discard prompt, got {:?}", app.confirm);
+        };
+        app.apply_discard_edits(then);
+
+        assert!(app.pending_close);
+        assert_eq!(
+            *app.outcome.lock().unwrap(),
+            EditOutcome::Continue,
+            "the button's outcome must survive the detour through the prompt"
+        );
+    }
+
+    /// Cancel on the close prompt leaves the app fully usable: drafts intact, no
+    /// half-closed state, and closing again re-raises the prompt.
+    #[test]
+    fn cancelling_the_close_prompt_leaves_the_app_open_with_its_drafts() {
+        let mut app = test_app();
+        insert_draft(&mut app, "Ritze", "Alpha", "/x/alpha.json");
+        app.drafts.get_mut(&PathBuf::from("/x/alpha.json")).unwrap().ext.meta.version =
+            "9.9".to_string();
+        app.refresh_unsaved_drafts();
+        app.request_app_close(EditOutcome::Continue);
+
+        // What `render_confirm_dialog`'s Cancel branch does, and all it does.
+        app.confirm = None;
+
+        assert_eq!(app.drafts.len(), 1, "Cancel must not cost the user anything");
+        assert!(!app.pending_close, "and must not leave the window half-closed");
+        app.refresh_unsaved_drafts();
+        app.request_app_close(EditOutcome::Continue);
+        assert!(app.confirm.is_some(), "asking again must work");
+    }
+
+    /// Re-entrancy: a close requested while *another* confirmation is already on
+    /// screen must not clobber it. The decision the user is part-way through
+    /// making wins; the close is dropped and can simply be asked again.
+    #[test]
+    fn a_close_request_does_not_clobber_a_dialog_already_on_screen() {
+        let mut app = test_app();
+        insert_draft(&mut app, "Ritze", "Alpha", "/x/alpha.json");
+        app.drafts.get_mut(&PathBuf::from("/x/alpha.json")).unwrap().ext.meta.version =
+            "9.9".to_string();
+        app.refresh_unsaved_drafts();
+        app.confirm = Some(ConfirmAction::DeleteGame("42".to_string()));
+
+        app.request_app_close(EditOutcome::Continue);
+
+        assert!(
+            matches!(app.confirm, Some(ConfirmAction::DeleteGame(_))),
+            "the pending decision must survive; got {:?}",
+            app.confirm
+        );
+        assert!(!app.pending_close);
+    }
 }
