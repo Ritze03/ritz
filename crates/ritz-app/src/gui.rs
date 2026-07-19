@@ -4332,6 +4332,25 @@ fn new_field(variable: String) -> UiField {
 
 /// The whole editable body: meta, UI sections (with fields), and the four output
 /// blocks. Structural edits are pushed to `deferred`; scalar edits mutate in place.
+/// The "(rename pending)" note shown under any staged identity edit — module
+/// Author, module Name, or a field's Variable.
+///
+/// Rendered on its own line so it can never shorten the input above it and
+/// break the shared control column. Red rather than green: green reads as
+/// "settled" everywhere else in the scope colors, and an unapplied rename is
+/// the opposite of settled — it is lost if the user walks away without
+/// pressing Rename.
+fn pending_rename_note(ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        editor_row_label(ui, "", 0.0);
+        ui.label(
+            egui::RichText::new("(rename pending)")
+                .color(theme::COL_GLOBAL)
+                .small(),
+        );
+    });
+}
+
 fn render_editor_body(
     ui: &mut egui::Ui,
     cache: &mut IconCenterCache,
@@ -4360,6 +4379,13 @@ fn render_editor_body(
                     .desired_width(w),
             );
         });
+        // Same note the Variable rows carry, on the same terms: compared raw
+        // (not trimmed) so it appears exactly when `has_pending_identity` does
+        // — a red note beside a field the Rename gate ignores, or a silent
+        // field the gate blocks on, would each be a lie about the same state.
+        if identity.author != ext.meta.author {
+            pending_rename_note(ui);
+        }
         ui.horizontal(|ui| {
             let w = editor_row_label(ui, "Name", 0.0);
             ui.add(
@@ -4368,6 +4394,9 @@ fn render_editor_body(
                     .desired_width(w),
             );
         });
+        if identity.name != ext.meta.name {
+            pending_rename_note(ui);
+        }
         ui.label(
             egui::RichText::new(
                 "Author & Name are applied via Rename (migrates saved settings). Version is fixed.",
@@ -4503,17 +4532,7 @@ fn render_field_editor(
         // Rendered on its own line so the note can never shorten the Variable
         // box and break the shared control column.
         if pending_rename {
-            ui.horizontal(|ui| {
-                editor_row_label(ui, "", 0.0);
-                ui.label(
-                    egui::RichText::new("(rename pending)")
-                        // Red, not green: this is unapplied work, and green
-                        // reads as "settled" everywhere else in the scope
-                        // colors. COL_GLOBAL doubles as the danger color.
-                        .color(theme::COL_GLOBAL)
-                        .small(),
-                );
-            });
+            pending_rename_note(ui);
         }
 
         // Type.
