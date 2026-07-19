@@ -3,8 +3,13 @@
 The settings manager is the whole visible surface of ritz: a native egui window with a
 navigation panel (games/profiles/general/global), a module tree, a dynamically-rendered
 field editor for whichever module is selected, and a live launch-command preview.
-Everything lives in `crates/ritz-app/src/gui.rs` (~3.4k lines), one `GuiApp` struct
-implementing `eframe::App`.
+Everything lives in `crates/ritz-app/src/gui.rs` (~14.4k lines as of 2026-07-19), one
+`GuiApp` struct implementing `eframe::App`.
+
+> The line count is stamped with the date it was measured rather than left bare: it
+> has been wrong twice already (the header claimed ~3.4k while the file was ~8.7k, and
+> was ~14.4k by the time that was noticed). A dated figure tells you how much to trust
+> it; an undated one just rots. Re-measure with `wc -l`, don't guess.
 
 ## How it works
 
@@ -130,23 +135,24 @@ call sites now share the single constant.
 ### Layout: `Mode::Ide` — module tree | manifest editor | interactive preview
 
 ```
-┌───────────── titlebar (render_title_bar) ─────────────────────────┐
-├────────────────┬─────────────────────────────────────────────────┤
-│ ┌────────────┐ │ ide_module_header — name v… by …   [Fork][🗑][✕][Save] │
-│ │Prof·IDE·Set│ │   description, one line, elided…                       │
-│ └────────────┘ ├──────────────────────┬─────────────────────────┤
-│                │  manifest editor      │  PREVIEW (interactive)   │
-│ ⚠ errors banner│  (render_module_      │  (render_module_settings │
-│ [module tree,  │   editor, full-width) │   _body → preview_config)│
-│  all_specs]    │←──── exactly half ───→│←──── exactly half ──────→│
-├────────────────┼──────────────────────┼─────────────────────────┤
-│ Group by Author│  ide_editor_band      │  ide_launch_band         │
-│ Preview against│  (198px, DIAGNOSTICS) │  (launch command, nested │
-│ [ None      ▾ ]│                       │   inside the preview)    │
-│ [+ New Module ]│                       │                          │
-│ [Open Folder →]│                       │                          │
-│  extensions/   │                       │                          │
-└────────────────┴──────────────────────┴─────────────────────────┘
+┌─────────────────── titlebar (render_title_bar) ───────────────────┐
+├────────────────┬──────────────────────────────────────────────────┤
+│ ┌────────────┐ │ ide_module_header — name v… by …                 │
+│ │Prof·IDE·Set│ │   [Rename][Fork][Del][Close][Save]               │
+│ └────────────┘ │   description, one line, elided…                 │
+│                ├────────────────────────┬─────────────────────────┤
+│                │  manifest editor       │  PREVIEW (interactive)  │
+│ ⚠ errors banner│  (render_module_       │  (render_module_settings│
+│ [module tree,  │   editor, full-width)  │   _body → preview_cfg)  │
+│  all_specs]    │←──── exactly half ────→│←──── exactly half ─────→│
+├────────────────┼────────────────────────┼─────────────────────────┤
+│ Group by Author│  ide_editor_band       │  ide_launch_band        │
+│ Preview against│  (BOTTOM_BAND_H,       │  (launch command,       │
+│ [ None      ▾ ]│   DIAGNOSTICS)         │   nested in the preview)│
+│ [+ New Module ]│                        │                         │
+│ [Open Folder →]│                        │                         │
+│  extensions/   │                        │                         │
+└────────────────┴────────────────────────┴─────────────────────────┘
 ```
 
 **Panel declaration order is load-bearing** — egui hands each panel the rect left over
