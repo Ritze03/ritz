@@ -674,11 +674,52 @@ struct PendingIdentity {
     var_edits: IndexMap<String, String>,
 }
 
+impl PendingIdentity {
+    /// The staged Author as every consumer must see it: **trimmed**.
+    ///
+    /// *Why an accessor and not `.trim()` at each call site* (2026-07-19): the
+    /// staged identity is read by the pending predicate, the two collision
+    /// checks, the identity validator, the rename commit, the confirm-dialog
+    /// label and the `(rename pending)` notes — and a site that forgot to trim
+    /// made a *trailing space* count as a rename. That is invisible on screen,
+    /// so the module went "unsaved", the discard prompt named it, and the Rename
+    /// button lit up, all with nothing to see. One accessor means the next
+    /// reader cannot get it wrong.
+    ///
+    /// **Never trim the buffer in place.** `author`/`name` are live
+    /// `TextEdit` buffers and module names legitimately contain interior spaces
+    /// ("LSFG VK"). Normalising the buffer every frame deletes the space the
+    /// instant it is typed, so the user can never reach the second word. Trim on
+    /// *read*, mutate never.
+    fn staged_author(&self) -> &str {
+        self.author.trim()
+    }
+    /// The staged Name, trimmed — see [`Self::staged_author`].
+    fn staged_name(&self) -> &str {
+        self.name.trim()
+    }
+    /// True when the staged `Variable` buffer for the field currently named
+    /// `key` is a real rename (whitespace-only differences are not).
+    fn staged_var_changed(var_edits: &IndexMap<String, String>, key: &str) -> bool {
+        var_edits.get(key).is_some_and(|b| b.trim() != key)
+    }
+}
+
 impl ModuleDraft {
     /// Fold `sections` back into `ext.ui` to produce the full [`Extension`].
+    /// Section names are folded in **trimmed** (2026-07-19, same
+    /// invisible-whitespace class as module identity): `ext.ui` is an
+    /// `IndexMap`, so `"General"` and `"General "` are two different sections
+    /// that look identical on screen. Trimming here — at the fold, not in the
+    /// live `sections` buffer — keeps interior spaces ("Advanced Options")
+    /// typable while making the written manifest canonical.
     fn snapshot(&self) -> Extension {
         let mut e = self.ext.clone();
-        e.ui = self.sections.iter().cloned().collect();
+        e.ui = self
+            .sections
+            .iter()
+            .map(|(k, v)| (k.trim().to_string(), v.clone()))
+            .collect();
         e
     }
     fn dirty(&self) -> bool {
@@ -701,8 +742,11 @@ impl ModuleDraft {
     /// Duplicate UI-section names collide when folded into `ext.ui` (an
     /// `IndexMap`), silently dropping a section on Save — block Save instead.
     fn sections_unique(&self) -> bool {
+        // Trimmed, to match how `snapshot` folds them: two names differing only
+        // by surrounding whitespace collapse into one map key on Save, so they
+        // must read as a collision here rather than silently dropping a section.
         let mut seen = std::collections::HashSet::new();
-        self.sections.iter().all(|(k, _)| seen.insert(k))
+        self.sections.iter().all(|(k, _)| seen.insert(k.trim()))
     }
     fn save_enabled(&self) -> bool {
         let snap = self.snapshot();
@@ -769,9 +813,16 @@ impl ModuleDraft {
     }
 
     /// True when the staged identity differs from the on-disk identity.
+    ///
+    /// Compared **trimmed on both sides** (2026-07-19): the staged side through
+    /// [`PendingIdentity::staged_author`], the disk side structurally by
+    /// `ritz_core::schema`'s trimming (de)serializer. Whitespace-only
+    /// differences are therefore not a pending rename — typing a trailing space
+    /// must not make a module report unsaved work, because the user has no way
+    /// to see what changed.
     fn has_pending_identity(&self) -> bool {
-        self.identity.author != self.ext.meta.author
-            || self.identity.name != self.ext.meta.name
+        self.identity.staged_author() != self.ext.meta.author
+            || self.identity.staged_name() != self.ext.meta.name
             || !self.changed_var_renames().is_empty()
     }
 
@@ -783,7 +834,7 @@ impl ModuleDraft {
         if !self.has_pending_identity() {
             return None;
         }
-        if self.identity.author.trim().is_empty() || self.identity.name.trim().is_empty() {
+        if self.identity.staged_author().is_empty() || self.identity.staged_name().is_empty() {
             return Some("Author and Name must not be empty".to_string());
         }
         if name_collides {
@@ -2005,8 +2056,8 @@ impl GuiApp {
         let (author, name) = (author.trim(), name.trim());
         self.drafts.iter().any(|(path, d)| {
             exclude != Some(path.as_path())
-                && d.identity.author.trim() == author
-                && d.identity.name.trim() == name
+                && d.identity.staged_author() == author
+                && d.identity.staged_name() == name
         })
     }
 
@@ -2041,12 +2092,12 @@ impl GuiApp {
             name_collides(
                 &self.all_specs,
                 &self.all_manifests,
-                d.identity.author.trim(),
-                d.identity.name.trim(),
+                d.identity.staged_author(),
+                d.identity.staged_name(),
                 Some(d.manifest.as_path()),
             ) || self.draft_identity_collides(
-                &d.identity.author,
-                &d.identity.name,
+                d.identity.staged_author(),
+                d.identity.staged_name(),
                 Some(d.manifest.as_path()),
             )
         });
@@ -2184,8 +2235,8 @@ impl GuiApp {
                     d.manifest.clone(),
                     d.ext.meta.author.clone(),
                     d.ext.meta.name.clone(),
-                    d.identity.author.trim().to_string(),
-                    d.identity.name.trim().to_string(),
+                    d.identity.staged_author().to_string(),
+                    d.identity.staged_name().to_string(),
                     d.changed_var_renames(),
                 )
             })
@@ -3034,7 +3085,7 @@ impl GuiApp {
                 let label = self
                     .draft()
                     .map(|d| {
-                        format!("{}::{}", d.identity.author.trim(), d.identity.name.trim())
+                        format!("{}::{}", d.identity.staged_author(), d.identity.staged_name())
                     })
                     .unwrap_or_default();
                 match blocked {
@@ -4379,11 +4430,12 @@ fn render_editor_body(
                     .desired_width(w),
             );
         });
-        // Same note the Variable rows carry, on the same terms: compared raw
-        // (not trimmed) so it appears exactly when `has_pending_identity` does
-        // — a red note beside a field the Rename gate ignores, or a silent
-        // field the gate blocks on, would each be a lie about the same state.
-        if identity.author != ext.meta.author {
+        // Same note the Variable rows carry, on the same terms: compared
+        // **trimmed**, through the same accessor `has_pending_identity` uses, so
+        // it appears exactly when the Rename gate agrees. A red note beside a
+        // field the gate ignores — which is what a raw comparison produced the
+        // moment a trailing space was typed — is a lie about the same state.
+        if identity.staged_author() != ext.meta.author {
             pending_rename_note(ui);
         }
         ui.horizontal(|ui| {
@@ -4394,7 +4446,7 @@ fn render_editor_body(
                     .desired_width(w),
             );
         });
-        if identity.name != ext.meta.name {
+        if identity.staged_name() != ext.meta.name {
             pending_rename_note(ui);
         }
         ui.label(
@@ -4519,7 +4571,10 @@ fn render_field_editor(
                         .id_salt(("field_var", si, fi))
                         .desired_width(w),
                 );
-                pending_rename = buf.trim() != key;
+                // `buf`'s borrow of `var_edits` ends with the `ui.add` above; the
+                // buffer itself is never normalised in place (that would eat the
+                // space mid-typing), only read trimmed.
+                pending_rename = PendingIdentity::staged_var_changed(var_edits, &key);
             } else {
                 ui.add(
                     egui::TextEdit::singleline(&mut field.variable)
@@ -9702,6 +9757,83 @@ mod tests {
         assert!(validate_var_renames(&current, &renames_of(&[("a", "")])).is_err());
         // No renames → trivially ok.
         assert!(validate_var_renames(&current, &IndexMap::new()).is_ok());
+    }
+
+    /// Regression (2026-07-19): surrounding whitespace in the staged identity is
+    /// **not** a rename. Pre-fix `has_pending_identity` compared the raw buffers,
+    /// so typing one trailing space made the module report a pending rename and
+    /// unsaved work — invisible on screen, and it lit the Rename button, the
+    /// `(rename pending)` note, the diagnostics warning and the discard prompt.
+    ///
+    /// Verified to bite: reverting `has_pending_identity` to the raw
+    /// `self.identity.author != self.ext.meta.author` comparison fails this test.
+    #[test]
+    fn whitespace_only_identity_edit_is_not_a_pending_rename() {
+        let mut draft = draft_from(sample_manifest(), true);
+        assert!(!draft.has_pending_identity());
+
+        // Pad every part of the identity with whitespace the user cannot see.
+        draft.identity.author = "  Ritze ".to_string();
+        draft.identity.name = "\tSample  ".to_string();
+        *draft.identity.var_edits.get_mut("enabled").unwrap() = " enabled ".to_string();
+
+        assert!(!draft.has_pending_identity(), "whitespace is not a rename");
+        assert!(draft.changed_var_renames().is_empty());
+        assert!(!draft.has_unsaved_work(), "and so is not unsaved work");
+        assert!(draft.compute_identity_error(false).is_none());
+
+        // A real edit still registers — the trim must not swallow genuine renames,
+        // and interior spaces are part of the name, not padding.
+        draft.identity.name = " Sample Two ".to_string();
+        assert!(draft.has_pending_identity());
+        assert_eq!(draft.identity.staged_name(), "Sample Two");
+    }
+
+    /// Regression (2026-07-19): a manifest that already carries untrimmed
+    /// identity — hand-edited, or written by a build before the trimming
+    /// (de)serializer — must load **clean**, not as a permanently pending rename.
+    ///
+    /// Verified to bite: dropping `deserialize_with = "de_trimmed"` from
+    /// `ExtensionMeta`/`UiField` fails this test.
+    #[test]
+    fn untrimmed_manifest_loads_trimmed_and_presents_as_clean() {
+        let draft = draft_from(
+            json!({
+                "Extension": {"Name": " Sample ", "Author": "Ritze\t", "Version": "1.0"},
+                "UI": {"Main": [{"Type": "toggle", "Variable": " enabled "}]}
+            }),
+            true,
+        );
+        // Load boundary: the padding never reached memory.
+        assert_eq!(draft.ext.meta.name, "Sample");
+        assert_eq!(draft.ext.meta.author, "Ritze");
+        assert_eq!(draft.sections[0].1[0].variable, "enabled");
+        // …so the draft matches itself and nothing is pending.
+        assert!(!draft.dirty());
+        assert!(!draft.has_pending_identity());
+        assert!(!draft.has_unsaved_work());
+    }
+
+    /// Regression (2026-07-19): the **save** boundary. Even if an untrimmed value
+    /// is planted directly into the in-memory struct (bypassing the load-side
+    /// trim), serializing the snapshot must write it trimmed — so a save can
+    /// never re-introduce the invisible character that broke identity matching.
+    ///
+    /// Verified to bite: dropping `serialize_with = "ser_trimmed"` fails this test.
+    #[test]
+    fn saving_writes_trimmed_identity_even_if_memory_is_untrimmed() {
+        let mut draft = draft_from(sample_manifest(), true);
+        draft.ext.meta.author = " Ritze ".to_string();
+        draft.ext.meta.name = "Sample\n".to_string();
+        draft.sections[0].1[0].variable = "  enabled  ".to_string();
+        draft.sections[0].0 = "  Main  ".to_string(); // section name too
+
+        let written = serde_json::to_value(draft.snapshot()).unwrap();
+        assert_eq!(written["Extension"]["Author"], json!("Ritze"));
+        assert_eq!(written["Extension"]["Name"], json!("Sample"));
+        assert_eq!(written["UI"]["Main"][0]["Variable"], json!("enabled"));
+        // Section name folded trimmed: the key is "Main", not "  Main  ".
+        assert!(written["UI"].get("Main").is_some());
     }
 
     #[test]

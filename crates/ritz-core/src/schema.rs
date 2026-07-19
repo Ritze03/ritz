@@ -5,8 +5,32 @@
 //! via `IndexMap` so the GUI renders deterministically.
 
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
+
+/// Deserialize a `String` with surrounding whitespace stripped.
+///
+/// *Why trim structurally, at the serde boundary* (2026-07-19): the values this
+/// guards — `ExtensionMeta::author`, `ExtensionMeta::name`, `UiField::variable` —
+/// are **identity**. They form `Extension::id()`, the stored-config namespace
+/// (`modules.authors[author][name][variable]`), and the editor's rename
+/// comparisons. Leading/trailing whitespace in any of them is invisible on
+/// screen but not to `==`, so a hand-edited (or older-build-written) manifest
+/// carrying `"Name": "Foo "` produced a module that silently failed to match
+/// itself: the GUI reported a permanently pending rename, config written under
+/// `"Foo "` never resolved for `"Foo"`, and nothing on screen explained why.
+/// Doing it here rather than at each of the ~15 call sites means call site 16,
+/// added later, is correct for free.
+fn de_trimmed<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Ok(String::deserialize(d)?.trim().to_string())
+}
+
+/// Serialize a `String` with surrounding whitespace stripped — the write half of
+/// [`de_trimmed`], so an untrimmed value that reached the struct in memory
+/// (built by hand rather than parsed) can still never be *written* untrimmed.
+fn ser_trimmed<S: Serializer>(s: &str, ser: S) -> Result<S::Ok, S::Error> {
+    ser.serialize_str(s.trim())
+}
 
 /// A complete extension definition (one JSON file).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,9 +245,11 @@ fn rewrite_template(s: &mut String, renames: &IndexMap<String, String>) {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionMeta {
-    #[serde(rename = "Name")]
+    /// Identity — always trimmed on read *and* write; see [`de_trimmed`].
+    #[serde(rename = "Name", deserialize_with = "de_trimmed", serialize_with = "ser_trimmed")]
     pub name: String,
-    #[serde(rename = "Author")]
+    /// Identity — always trimmed on read *and* write; see [`de_trimmed`].
+    #[serde(rename = "Author", deserialize_with = "de_trimmed", serialize_with = "ser_trimmed")]
     pub author: String,
     #[serde(rename = "Version")]
     pub version: String,
@@ -258,7 +284,8 @@ pub struct UiField {
     pub description: Option<String>,
     #[serde(rename = "Type")]
     pub field_type: FieldType,
-    #[serde(rename = "Variable")]
+    /// Identity — always trimmed on read *and* write; see [`de_trimmed`].
+    #[serde(rename = "Variable", deserialize_with = "de_trimmed", serialize_with = "ser_trimmed")]
     pub variable: String,
     #[serde(rename = "Default", default, skip_serializing_if = "Option::is_none")]
     pub default: Option<Value>,

@@ -1053,6 +1053,47 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   (on-disk identity, `GuiApp::refresh_draft_name_error`) feeds the Save gate and stays
   `None` for an existing module; the *pending* identity's validity is a separate
   `identity_error` (`GuiApp::refresh_identity_state` → `ModuleDraft::compute_identity_error`).
+- **Module identity is always trimmed — at every boundary** (2026-07-19) — Author, Name
+  and field `Variable` are stripped of surrounding whitespace when they are **loaded**,
+  when they are **saved**, and when they are **read out of a text box**. The three
+  boundaries:
+  - **Load & save (structural).** `ritz_core::schema` gives `ExtensionMeta::name`,
+    `ExtensionMeta::author` and `UiField::variable` a trimming `deserialize_with`
+    (`de_trimmed`) *and* `serialize_with` (`ser_trimmed`). Every manifest read is
+    therefore trimmed no matter who wrote it, and every manifest write is trimmed no
+    matter what is in memory. This is one place, not a `.trim()` per call site.
+  - **Read-from-textbox.** The live buffers are read through
+    `PendingIdentity::staged_author()` / `staged_name()` / `staged_var_changed()`.
+    Everything downstream goes through them: `has_pending_identity`,
+    `compute_identity_error`, `draft_identity_collides`, `refresh_identity_state`,
+    `perform_rename`, the `SaveWithPendingRename` dialog label, and the
+    `(rename pending)` notes under Author / Name / Variable. The Fork/Create dialog
+    already trimmed at its own boundary (`render_module_dialog`).
+
+  *Why:* trailing whitespace is **invisible**, but `==` sees it. `has_pending_identity`
+  used to compare the raw buffers, so one typed space made a module report a pending
+  rename it did not have — which lit the `(rename pending)` note, the diagnostics-band
+  warning and the Rename button, put the module into `unsaved_drafts`, and made the
+  close/nav discard prompt claim work that did not exist. In the other direction a
+  hand-edited manifest carrying `"Name": "Foo "` loaded as a module that could never
+  match itself: permanently pending, with config stored under a key nothing would ever
+  resolve. Neither failure showed the user anything to look at.
+
+  > **Do not "simplify" this into an in-place trim.** `identity.author` / `identity.name`
+  > and the `var_edits` buffers are live `TextEdit` buffers, and module names
+  > legitimately contain interior spaces ("LSFG VK"). Normalising the buffer each frame
+  > deletes the space the instant it is typed, so the second word can never be reached
+  > and the field becomes impossible to type into. **Trim on read; never mutate the
+  > buffer.** Regressions: `whitespace_only_identity_edit_is_not_a_pending_rename` (which
+  > also asserts an interior space survives),
+  > `untrimmed_manifest_loads_trimmed_and_presents_as_clean`,
+  > `saving_writes_trimmed_identity_even_if_memory_is_untrimmed`.
+
+  **Section names** are the same class and are handled the same way: `ModuleDraft::snapshot`
+  folds them into `ext.ui` trimmed, and `sections_unique` compares them trimmed. *Why:*
+  `ext.ui` is an `IndexMap`, so `"General"` and `"General "` are two visually identical
+  keys — untrimmed, one of them silently disappeared on Save instead of being reported as
+  the duplicate it is.
 - **Save with a staged rename pending — the prompt** (2026-07-19) — the Save button and
   Ctrl+S both route through **`GuiApp::request_save_module`**, never `save_module`
   directly. It checks the Save gate first (a disabled Save stays a no-op), then, if
