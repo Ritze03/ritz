@@ -953,6 +953,34 @@ fn close_needs_confirm(any_unsaved: bool, already_approved: bool) -> bool {
     any_unsaved && !already_approved
 }
 
+/// The central panel's "there is nothing to show you" text, chosen by mode
+/// (issue #4).
+///
+/// IDE mode reaches the empty state only with an **empty `all_specs`**: its
+/// invariant (top of [`GuiApp::ui`]) focuses `all_specs[ide_selected]` whenever
+/// anything is loaded, and a focused module renders the editor instead. Config
+/// mode reaches it whenever the *game filter* leaves `cur_specs` empty, which is
+/// a different fact about a different list — hence two strings, not one.
+///
+/// *Why a free function:* it makes the choice assertable without driving a render
+/// pass, the same seam `save_gate` / `nav_category_drops_draft` use. Copy that
+/// only exists inside a `ui.label` call is copy nothing can regression-test.
+fn empty_central_message(ide: bool) -> &'static str {
+    if ide {
+        // Points at `render_ide_nav_footer`'s "+ New Module", which renders
+        // whenever `mode == Mode::Ide` regardless of focus or `all_specs` — it is
+        // the *only* route to a first module from an empty extensions dir, and
+        // therefore why entering IDE mode is deliberately NOT blocked on a
+        // non-empty list (the direction issue #4 originally suggested). Refusing
+        // entry would close that route and turn a bare screen into a real dead
+        // end; naming the state and pointing at the button is what was missing.
+        "No modules loaded. Use \u{201c}+ New Module\u{201d} below the tree to create one."
+    } else {
+        // Config mode's long-standing wording, unchanged.
+        "No extensions apply to this game."
+    }
+}
+
 fn nav_category_drops_draft(cat: NavCategory, any_unsaved: bool) -> bool {
     match cat {
         // Both land on a config scope and drop every draft.
@@ -1464,12 +1492,41 @@ impl GuiApp {
         let Ok((exts, errors)) = context::load_extensions(&self.paths) else {
             return;
         };
+        // Issue #37. Same treatment `rebuild_cur_specs` gives `selected_ext`, for
+        // the same reason: `ide_selected` is a raw index into `all_specs`, and
+        // `load_extensions` re-sorts alphabetically by `meta.name` every time. Any
+        // reload that adds, removes or renames a module therefore renumbers the
+        // rows under the index, and the IDE tree would highlight — and the
+        // `Mode::Ide` reopen invariant would reopen — an arbitrary neighbour.
+        let prev_ide_id = self.all_specs.get(self.ide_selected).map(|s| s.id());
         self.all_specs = exts.iter().map(|e| e.spec.clone()).collect();
         self.all_dirs = exts.iter().map(|e| e.rel_dir.clone()).collect();
         self.all_manifests = exts.iter().map(|e| e.manifest.clone()).collect();
         self.all_is_folder_ext = exts.iter().map(|e| e.is_folder_ext).collect();
         self.extension_errors = errors;
+        self.anchor_ide_selection(prev_ide_id.as_deref());
         self.rebuild_cur_specs();
+    }
+
+    /// Re-point [`GuiApp::ide_selected`] at module `id`'s row in the current
+    /// `all_specs`, clamping into range when `id` is gone (or `None`).
+    ///
+    /// *Why "keep the index, clamped" is the right fallback for a vanished id*
+    /// rather than snapping to row 0: the id disappears on **delete**, and there
+    /// the row that shifted into the old index is precisely the deleted module's
+    /// next neighbour — which is where a list selection should land. Row 0 would
+    /// throw the user back to the top of the tree from wherever they were working.
+    ///
+    /// Callers that know the id they want (`perform_fork`, `perform_create`,
+    /// `perform_rename` — all three move focus to a module that did not exist under
+    /// that id a moment ago) pass it explicitly *after* `reload_extensions`, since
+    /// the id `reload_extensions` itself remembers is the pre-operation one.
+    fn anchor_ide_selection(&mut self, id: Option<&str>) {
+        if let Some(pos) = id.and_then(|id| self.all_specs.iter().position(|s| s.id() == id)) {
+            self.ide_selected = pos;
+            return;
+        }
+        self.ide_selected = self.ide_selected.min(self.all_specs.len().saturating_sub(1));
     }
 
     /// Reload the on-disk configuration into the running editor: global config,
@@ -1792,11 +1849,26 @@ impl GuiApp {
     /// own field ([`GuiApp::focused_module`]), `nav_sel` is simply never touched
     /// by focusing a module — it stays exactly whatever real config scope was
     /// selected before IDE Mode was entered, with nothing to remember or restore.
+    ///
+    /// *Why the draft is built here and not left to the next frame's
+    /// [`Self::sync_focused_draft`] (issue #5):* both routes that move focus
+    /// interactively — a click on an IDE tree row, and entering IDE mode via
+    /// `select_nav_category` — run inside `render_nav_panel`, which `GuiApp::ui`
+    /// declares *after* its top-of-frame sync but *before* the header band, the
+    /// editor column and the preview column. Setting focus alone therefore left
+    /// those three rendering against a `focused_module` with no draft behind it
+    /// for exactly one frame: `editor_header_info` returns `None`, the editor
+    /// column prints "Loading…" and the preview column blanks, all self-healing on
+    /// the next frame. Syncing at the point of the focus change removes the window
+    /// entirely instead of racing the panel declaration order — the frame-order
+    /// comments in `ui()` (which are load-bearing for the *panel rects*) then have
+    /// one less thing riding on them.
     fn focus_module(&mut self, id: String) {
         if self.focused_module.as_deref() == Some(id.as_str()) {
             return;
         }
         self.focused_module = Some(id);
+        self.sync_focused_draft();
     }
 
     /// Drop the draft for whichever module currently has focus (if any) and
@@ -1814,6 +1886,24 @@ impl GuiApp {
         }
         self.focused_module = None;
         self.refresh_unsaved_drafts();
+    }
+
+    /// Bring the focused module's draft and its two derived error states up to
+    /// date. No-op when nothing is focused.
+    ///
+    /// *Why a method rather than three inline calls:* two callers need the whole
+    /// trio — [`GuiApp::ui`] once at the top of every frame, and
+    /// [`Self::focus_module`] at each focus change (issue #5). The three have to
+    /// stay together: a draft whose `name_error`/`identity_error` were not
+    /// refreshed alongside it is a draft the Save gate reads stale, so they are one
+    /// unit rather than something a caller can half-apply.
+    fn sync_focused_draft(&mut self) {
+        let Some(id) = self.focused_module().map(str::to_string) else {
+            return;
+        };
+        self.ensure_draft(&id);
+        self.refresh_draft_name_error();
+        self.refresh_identity_state();
     }
 
     /// Load a draft for `id` unless one already exists for it (keeping any
@@ -2317,7 +2407,11 @@ impl GuiApp {
         let new_id = ext.id();
         self.reload_extensions();
         self.reload_configs();
-        self.focused_module = Some(new_id);
+        self.focused_module = Some(new_id.clone());
+        // Issue #37: the tree must highlight what the editor is editing. The fork
+        // is a brand-new row, inserted at its alphabetical position, so the index
+        // `reload_extensions` re-anchored (the *parent*'s) is not it.
+        self.anchor_ide_selection(Some(&new_id));
     }
 
     /// Commit the staged identity change (Author / Name / existing-field
@@ -2442,6 +2536,11 @@ impl GuiApp {
         self.reload_extensions();
         self.reload_configs();
         self.focused_module = Some(new_id.clone());
+        // Issue #37: a rename changes `meta.name`, which is the key
+        // `load_extensions` sorts on — so the module moves rows even though the
+        // file did not. `reload_extensions` re-anchored on the *old* id, which no
+        // longer exists; point the tree at the new one.
+        self.anchor_ide_selection(Some(&new_id));
         // Step 6: re-base the draft **in place**, keeping its body edits.
         //
         // Manifest-path keying means the entry does not need re-keying (the file
@@ -2550,7 +2649,10 @@ impl GuiApp {
         // already focused.
         let new_id = ext.id();
         self.reload_extensions();
-        self.focused_module = Some(new_id);
+        self.focused_module = Some(new_id.clone());
+        // Issue #37, same as `perform_fork`: a new alphabetical row, so the tree
+        // selection has to be moved onto it explicitly.
+        self.anchor_ide_selection(Some(&new_id));
     }
 
     /// Delete a user-authored module's manifest file. When `purge` is set, also
@@ -2695,11 +2797,7 @@ impl GuiApp {
         // Make sure the focused module has a draft (insert-if-absent; never
         // touches the other entries), then recompute this frame's dirty set —
         // ONCE, here, for every consumer downstream. See `unsaved_drafts`.
-        if let Some(id) = self.focused_module().map(str::to_string) {
-            self.ensure_draft(&id);
-            self.refresh_draft_name_error();
-            self.refresh_identity_state();
-        }
+        self.sync_focused_draft();
         self.refresh_unsaved_drafts();
         // Guard the OS window close (X / Alt+F4 / WM) against unsaved drafts.
         // Placed right after the dirty set is rebuilt and well before any panel
@@ -3129,8 +3227,21 @@ impl GuiApp {
                 return;
             }
 
-            let Some(spec) = self.cur_specs.get(self.selected_ext).cloned() else {
-                ui.label("No extensions apply to this game.");
+            // IDE mode with nothing focused is an empty `all_specs` (issue #4);
+            // see `empty_central_message` for why the two cases need different
+            // copy, and why entering IDE mode is not blocked instead.
+            // Reaching this point under `Mode::Ide` means no module is focused,
+            // which the invariant only permits with an empty `all_specs` — so
+            // `cur_specs` is not consulted at all there: whatever it holds would be
+            // a Config-mode answer to an IDE-mode question.
+            let ide_no_modules = self.mode == Mode::Ide;
+            let spec = if ide_no_modules {
+                None
+            } else {
+                self.cur_specs.get(self.selected_ext).cloned()
+            };
+            let Some(spec) = spec else {
+                ui.label(empty_central_message(ide_no_modules));
                 return;
             };
 
@@ -12070,6 +12181,300 @@ mod tests {
             app.draft().unwrap().identity_error.as_deref(),
             Some("Author + Name already in use"),
             "refocus must correct the stale marker before it can gate a rename"
+        );
+    }
+
+    // ══ IDE-mode focus / selection regressions (issues #4 #5 #6 #37) ═════════
+
+    /// A scratch config dir holding one manifest per `(author, name)` pair.
+    /// Returns the base; the caller removes it.
+    ///
+    /// *Why real files rather than assigning `all_specs` by hand:* every bug in
+    /// this block is about what `reload_extensions` does — its alphabetical
+    /// re-sort, and the index/id bookkeeping around it. A hand-built `all_specs`
+    /// would skip the exact code under test.
+    fn ide_scratch(tag: &str, mods: &[(&str, &str)]) -> PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "ritz-ide-test-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let ext_dir = base.join("extensions");
+        std::fs::create_dir_all(&ext_dir).unwrap();
+        for (author, name) in mods {
+            std::fs::write(
+                ext_dir.join(format!("{author}__{name}.json")),
+                serde_json::to_string_pretty(&named_manifest(author, name)).unwrap(),
+            )
+            .unwrap();
+        }
+        base
+    }
+
+    fn ide_app(tag: &str, mods: &[(&str, &str)]) -> (GuiApp, PathBuf) {
+        let base = ide_scratch(tag, mods);
+        let mut app = test_app();
+        app.paths = Paths { base: base.clone() };
+        app.mode = Mode::Ide;
+        app.reload_extensions();
+        (app, base)
+    }
+
+    /// The row `ide_selected` currently points at, by module name.
+    fn selected_name(app: &GuiApp) -> String {
+        app.all_specs[app.ide_selected].meta.name.clone()
+    }
+
+    /// Issue #5 — the one-frame fallback flash.
+    ///
+    /// `GuiApp::ui` declares the nav panel *after* its top-of-frame
+    /// `sync_focused_draft` but *before* the header band and both columns, and the
+    /// nav is where interactive focus changes happen (a tree row click, or the IDE
+    /// tab via `select_nav_category`). So focus moving without a draft behind it is
+    /// visible for a frame. `focus_module` now builds it on the spot.
+    ///
+    /// Asserted through `editor_header_info`, because that is the exact predicate
+    /// the three affected renderers branch on: `None` is what makes the editor
+    /// column print "Loading…" and the header band disappear.
+    ///
+    /// Verified to bite: deleting the `sync_focused_draft()` call from
+    /// `focus_module` makes both asserts fail (`None` / "no draft was built").
+    #[test]
+    fn focusing_a_module_builds_its_draft_before_any_column_can_render() {
+        let (mut app, base) = ide_app("focus-flash", &[("Ritze", "Alpha"), ("Ritze", "Beta")]);
+        assert!(app.drafts.is_empty(), "premise: nothing is open yet");
+
+        // Exactly what `render_nav_panel` does with the id an IDE tree click
+        // returns, and what `select_nav_category(Ide)` does on mode entry.
+        let beta = app.all_specs.iter().find(|s| s.meta.name == "Beta").unwrap().id();
+        app.focus_module(beta.clone());
+
+        assert!(!app.drafts.is_empty(), "no draft was built at the focus change");
+        assert!(
+            app.editor_header_info(&beta).is_some(),
+            "the columns render right after the nav panel and must not see None"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Issue #6 — a Ctrl+R hot reload that removes the open module.
+    ///
+    /// **Already fixed by the multi-draft rework (S4a), and deliberately so.** The
+    /// issue was filed against the single-slot `module_draft`, where `ensure_draft`
+    /// dropped the draft outright once the spec vanished, leaving both columns on
+    /// "module not found". With `drafts` keyed by manifest path, `draft_key` falls
+    /// back to scanning the map by id, so the draft survives as an **orphan**, the
+    /// editor keeps rendering it, and `orphan_draft_names` surfaces it in the
+    /// banner above the tree — which is what makes Save (recreating the manifest)
+    /// the recovery path rather than a dead end.
+    ///
+    /// Kept as a regression guard: this behaviour is easy to "tidy away" by making
+    /// `ensure_draft` or `reload_extensions` prune drafts with no spec, which would
+    /// silently destroy unsaved work.
+    #[test]
+    fn a_reload_that_deletes_the_open_module_keeps_its_draft_reachable() {
+        let (mut app, base) = ide_app("reload-orphan", &[("Ritze", "Alpha"), ("Ritze", "Beta")]);
+        let beta = app.all_specs.iter().find(|s| s.meta.name == "Beta").unwrap().id();
+        app.focus_module(beta.clone());
+        app.drafts
+            .values_mut()
+            .next()
+            .unwrap()
+            .ext
+            .meta
+            .description = Some("unsaved work".to_string());
+
+        // Someone deletes the manifest behind the app's back; the user hits Ctrl+R.
+        std::fs::remove_file(base.join("extensions/Ritze__Beta.json")).unwrap();
+        app.reload_extensions();
+
+        assert!(
+            !app.all_specs.iter().any(|s| s.id() == beta),
+            "premise: the reload really did drop the module"
+        );
+        assert_eq!(
+            app.editor_header_info(&beta).map(|i| i.name),
+            Some("Beta".to_string()),
+            "the editor must keep rendering the orphaned draft, not 'no longer available'"
+        );
+        assert_eq!(
+            app.orphan_draft_names(),
+            vec!["Ritze::Beta".to_string()],
+            "and the banner must offer the user a route back to the work"
+        );
+        assert_eq!(
+            app.draft().unwrap().ext.meta.description.as_deref(),
+            Some("unsaved work"),
+            "the unsaved edit itself must survive the reload"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Issue #37, drift source 1 of 4 — **Fork**.
+    ///
+    /// The fork is a new alphabetical row, so every index at or after it shifts.
+    /// Pre-fix `perform_fork` set `focused_module` and left `ide_selected` alone:
+    /// the tree highlighted a different module than the editor was editing.
+    ///
+    /// Verified to bite: removing `anchor_ide_selection` from `perform_fork` makes
+    /// the selection land on "Beta" (the shifted-into row) instead of "Aaa".
+    #[test]
+    fn forking_moves_the_tree_selection_onto_the_fork() {
+        let (mut app, base) = ide_app("ide37-fork", &[("Ritze", "Beta"), ("Ritze", "Zeta")]);
+        let beta = app.all_specs.iter().find(|s| s.meta.name == "Beta").unwrap().id();
+        app.ide_selected = app.all_specs.iter().position(|s| s.id() == beta).unwrap();
+        app.focus_module(beta.clone());
+
+        // "Aaa" sorts ahead of both, so it lands at index 0 and pushes everything
+        // down — the renumbering the raw index could not survive.
+        app.perform_fork(&beta, "Ritze".to_string(), "Aaa".to_string(), false);
+
+        assert_eq!(app.focused_module.as_deref(), Some("Ritze::Aaa::1.0"), "premise");
+        assert_eq!(
+            selected_name(&app),
+            "Aaa",
+            "the tree must highlight the module the editor is editing"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Issue #37, drift source 2 of 4 — **Create**.
+    ///
+    /// Verified to bite: removing `anchor_ide_selection` from `perform_create`
+    /// leaves the selection on "Beta".
+    #[test]
+    fn creating_a_module_moves_the_tree_selection_onto_it() {
+        let (mut app, base) = ide_app("ide37-create", &[("Ritze", "Beta"), ("Ritze", "Zeta")]);
+        let beta = app.all_specs.iter().find(|s| s.meta.name == "Beta").unwrap().id();
+        app.ide_selected = app.all_specs.iter().position(|s| s.id() == beta).unwrap();
+        app.focus_module(beta);
+
+        app.perform_create("Ritze".to_string(), "Aaa".to_string());
+
+        assert_eq!(app.focused_module.as_deref(), Some("Ritze::Aaa::1.0"), "premise");
+        assert_eq!(selected_name(&app), "Aaa", "the new module must be the selected row");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Issue #37, drift source 3 of 4 — **Delete**.
+    ///
+    /// Delete clears focus and lets the `Mode::Ide` reopen invariant re-focus
+    /// `all_specs[ide_selected]` next frame, so the index has to be **in range**
+    /// and on a sensible neighbour. Deleting the last row is the case that
+    /// previously left it dangling one past the end, where the invariant found
+    /// `None` and simply never reopened anything.
+    ///
+    /// Verified to bite: dropping the clamp fallback from `anchor_ide_selection`
+    /// (returning early instead) leaves `ide_selected == 2` against a 2-element
+    /// list and the reopen assert fails.
+    #[test]
+    fn deleting_the_last_module_leaves_a_selectable_neighbour() {
+        let (mut app, base) =
+            ide_app("ide37-delete", &[("Ritze", "Alpha"), ("Ritze", "Beta"), ("Ritze", "Zeta")]);
+        let zeta_idx = app.all_specs.iter().position(|s| s.meta.name == "Zeta").unwrap();
+        let zeta = app.all_specs[zeta_idx].id();
+        app.ide_selected = zeta_idx;
+        app.focus_module(zeta);
+        let manifest = app.all_manifests[zeta_idx].clone();
+
+        app.delete_module(&manifest, false);
+
+        assert_eq!(app.all_specs.len(), 2, "premise: the module is gone");
+        assert!(app.focused_module.is_none(), "premise: delete clears focus");
+        assert!(
+            app.ide_selected < app.all_specs.len(),
+            "ide_selected must stay in range or the reopen invariant finds nothing"
+        );
+        // Reproduce the `Mode::Ide` invariant at the top of `ui()`.
+        let reopen = app.all_specs[app.ide_selected].id();
+        app.focus_module(reopen);
+        assert_eq!(selected_name(&app), "Beta", "delete lands on the surviving neighbour");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Issue #37, drift source 4 of 4 — a plain **reload that re-sorts**.
+    ///
+    /// `load_extensions` sorts by `meta.name` on every call, so a module appearing
+    /// on disk (an external edit, a Ctrl+R after copying a file in) renumbers every
+    /// row after it. This is also the Save path: `save_module` reloads and then
+    /// clears focus, and the reopen invariant re-focuses `all_specs[ide_selected]`
+    /// — which pre-fix could be an arbitrary neighbour of the module just saved.
+    ///
+    /// Verified to bite: removing the `prev_ide_id` re-anchor from
+    /// `reload_extensions` selects "Aaa" (the row that shifted into index 0).
+    #[test]
+    fn a_reload_that_resorts_keeps_the_selection_on_the_same_module() {
+        let (mut app, base) = ide_app("ide37-resort", &[("Ritze", "Beta"), ("Ritze", "Zeta")]);
+        app.ide_selected = app.all_specs.iter().position(|s| s.meta.name == "Beta").unwrap();
+        assert_eq!(app.ide_selected, 0, "premise: Beta sorts first of the two");
+
+        std::fs::write(
+            base.join("extensions/Ritze__Aaa.json"),
+            serde_json::to_string_pretty(&named_manifest("Ritze", "Aaa")).unwrap(),
+        )
+        .unwrap();
+        app.reload_extensions();
+
+        assert_eq!(app.all_specs.len(), 3, "premise: the new module was picked up");
+        assert_eq!(
+            selected_name(&app),
+            "Beta",
+            "a re-sort must not slide the selection onto a different module"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Issue #37, the Rename twin of the re-sort case: renaming changes the very
+    /// key the sort runs on, so the module moves rows while its file does not — and
+    /// its id changes, so `reload_extensions`' own re-anchor (which remembers the
+    /// *old* id) cannot find it. `perform_rename` anchors on the new id explicitly.
+    ///
+    /// Verified to bite: removing `anchor_ide_selection` from `perform_rename`
+    /// leaves the selection on "Aaa".
+    #[test]
+    fn renaming_keeps_the_tree_selection_on_the_renamed_module() {
+        let (mut app, base) = ide_app("ide37-rename", &[("Ritze", "Beta"), ("Ritze", "Zeta")]);
+        let beta_idx = app.all_specs.iter().position(|s| s.meta.name == "Beta").unwrap();
+        let beta = app.all_specs[beta_idx].id();
+        assert_eq!(beta_idx, 0, "premise: Beta sorts first");
+        app.ide_selected = beta_idx;
+        app.focus_module(beta);
+        // "Zzz" sorts *after* Zeta, so the renamed module has to move from row 0 to
+        // row 1 — the case a stale index cannot survive.
+        app.draft_mut().unwrap().identity.name = "Zzz".to_string();
+        app.refresh_identity_state();
+
+        app.perform_rename();
+
+        assert_eq!(app.focused_module.as_deref(), Some("Ritze::Zzz::1.0"), "premise");
+        assert_eq!(selected_name(&app), "Zzz", "the selection follows the rename");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Issue #4 — IDE mode entered with an empty `all_specs`.
+    ///
+    /// The report's premise held (the window came up module-less), but its
+    /// suggested fix — refusing to switch mode — would have been a regression:
+    /// "+ New Module" lives in the IDE nav footer and renders regardless of
+    /// focus, so IDE mode is the only way to author a first module into an empty
+    /// extensions dir. What was actually wrong was the copy: the panel fell
+    /// through to Config mode's game-filter wording, which names a game IDE mode
+    /// does not have and a filter that is not why the list is empty.
+    ///
+    /// Verified to bite: returning the Config string unconditionally from
+    /// `empty_central_message` fails the first assert.
+    #[test]
+    fn the_empty_central_panel_explains_itself_per_mode() {
+        assert_eq!(
+            empty_central_message(true),
+            "No modules loaded. Use \u{201c}+ New Module\u{201d} below the tree to create one."
+        );
+        assert_eq!(empty_central_message(false), "No extensions apply to this game.");
+        assert_ne!(
+            empty_central_message(true),
+            empty_central_message(false),
+            "the two empty states have different causes and must not share one string"
         );
     }
 }

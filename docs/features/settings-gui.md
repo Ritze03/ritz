@@ -412,7 +412,30 @@ the band swap on `Mode`.
     category and the click look dead.
   - *IDE Mode* focuses `all_specs[ide_selected]` (`GuiApp::focus_module`), establishing the
     `GuiApp::focused_module().is_some()` invariant IDE mode's columns rely on. `nav_sel` is
-    deliberately left untouched.
+    deliberately left untouched. It also re-runs `GuiApp::refresh_games` so the preview
+    column's game selector offers the current set.
+
+    **The mode switch is deliberately *not* gated on a non-empty `all_specs`**
+    (2026-07-19, issue #4). With no modules on disk the invariant cannot fire and IDE mode
+    comes up with nothing focused — but that is the one state from which the nav footer's
+    **+ New Module** button (which renders for `Mode::Ide` regardless of focus) is the only
+    route to authoring a first module. Refusing entry would close that route and turn a
+    bare screen into a real dead end. What the screen was missing was *copy*: the central
+    panel fell through to Config mode's "No extensions apply to this game", which names a
+    game IDE mode does not have and blames a game filter that is not why the list is empty.
+    `crate::gui::empty_central_message` now picks per mode — a free function rather than a
+    string inline in a `ui.label`, so the choice is assertable without driving a render
+    pass (same seam as `save_gate` / `nav_category_drops_draft`).
+
+    *`refresh_games` on mode entry only is sufficient, not a staleness bug* (2026-07-19,
+    issue #7): the game set can be changed only from Config-mode controls (create / rename
+    / delete on the nav tree), and reaching them means leaving IDE mode — so re-entry, which
+    refreshes, is unavoidable between any edit and the next look at the selector. The one
+    remaining window is a game file changed **on disk by something else** while IDE mode is
+    open, and `Ctrl+R` covers that: it calls `reload_configs`, which calls `refresh_games`.
+    Nothing inside IDE mode itself touches the game set — `delete_module`'s `config_cleanup`
+    rewrites values inside existing game files, never their membership. Per-frame directory
+    scanning was rejected as cost with no window to close.
   - **Tab rendering** (`crate::gui::nav_category_tab`): a glyph + label built as a
     `LayoutJob` and hand-painted into a cell of exactly `tab_w` points. *Why not
     `full_selectable`,* which the stacked-row version used: it is `top_down_justified`,
@@ -497,6 +520,30 @@ the band swap on `Mode`.
   `selected_ext`, which indexes `cur_specs` — different lengths and orderings). `leaf`
   writes the index directly and never focuses the editor, so the click is turned into a
   `GuiApp::focus_module` call *after* the tree renders.
+
+  **`ide_selected` is re-anchored by module id across every reload** (2026-07-19, issue
+  #37), the same treatment `rebuild_cur_specs` has always given `selected_ext`.
+  *Why:* `context::load_extensions` re-sorts alphabetically by `meta.name` on every call,
+  so any reload that adds, removes or renames a module renumbers the rows under a raw
+  index. `GuiApp::reload_extensions` therefore remembers `all_specs[ide_selected].id()`
+  before the load and calls `GuiApp::anchor_ide_selection` after it; the three operations
+  that move focus to a module which did **not** exist under that id a moment ago —
+  `perform_fork`, `perform_create`, `perform_rename` — re-anchor a second time on the new
+  id, because the id `reload_extensions` remembered is the pre-operation one. (Rename is in
+  that list because it changes `meta.name`, the sort key itself: the module changes rows
+  without its file moving.)
+
+  *Why the fallback for a vanished id is "keep the index, clamped" rather than "snap to
+  row 0":* the id disappears on **delete**, and there the row that shifted into the old
+  index is exactly the deleted module's next neighbour — where a list selection should
+  land. Row 0 would throw the user back to the top of the tree from wherever they were
+  working. The clamp is what keeps the index in range so the `Mode::Ide` reopen invariant
+  can still find a module to reopen after the last row is deleted.
+
+  What this fixes, concretely: the tree highlighting a different row than the editor is
+  editing after Fork/Create/Rename, and — because `save_module` clears focus and lets the
+  reopen invariant re-focus `all_specs[ide_selected]` — **Save** landing the user on an
+  arbitrary neighbour instead of the module they just saved.
 - **Bottom band** — `Mode::Config`: `GuiApp::render_nav_settings`, context-specific
   controls for whatever's selected. `Mode::Ide`: `GuiApp::render_ide_nav_footer` —
   Group by Author, a full-width **+ New Module**, and Open Folder. It deliberately
@@ -812,7 +859,8 @@ an index that only exists because the Config-mode `ext_list` column exists (see
 `docs/brainstorm/ide-mode.md`, which staged it as "removed for now, not ported"). The
 keybinding may be revisited once IDE Mode has its own notion of a selected module.
 
-- **Entering / leaving** — `GuiApp::focus_module(id)` sets `focused_module = Some(id)` and
+- **Entering / leaving** — `GuiApp::focus_module(id)` sets `focused_module = Some(id)`,
+  immediately builds that module's draft via `GuiApp::sync_focused_draft`, and
   does not touch `nav_sel` at all (S4b) — there is no "prior view" to remember any more,
   because focusing a module never moves `nav_sel` away from whatever real config scope was
   already selected. Which module the editor is *focused* on is read through the single
@@ -829,7 +877,23 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   confirm, which in IDE mode re-seeds that draft from disk and stays on the same module.
   **Save** also clears focus on success (`GuiApp::close_focused_draft`), so the
   `Mode::Ide` reopen invariant lands the user back on the real (now-saved) module the very
-  next frame. *Why no separate Discard button:* Close already means
+  next frame.
+
+  *Why `focus_module` builds the draft on the spot instead of leaving it to the next
+  frame's top-of-frame sync* (2026-07-19, issue #5): both interactive routes that move
+  focus — a click on an IDE tree row, and entering IDE mode via `select_nav_category` —
+  run inside `render_nav_panel`, which `GuiApp::ui` declares **after** its top-of-frame
+  `sync_focused_draft` but **before** the header band, the editor column and the preview
+  column. Setting focus alone therefore left those three rendering against a
+  `focused_module` with no draft behind it for exactly one frame: `editor_header_info`
+  returns `None`, the editor column prints "Loading…" and the preview column blanks, all
+  self-healing on the next frame — a visible flash on the mode's most common gesture.
+  Syncing at the point of the focus change removes the window outright rather than racing
+  the panel declaration order, so the frame-order comments in `ui()` (load-bearing for the
+  *panel rects*) have one less thing riding on them. `sync_focused_draft` bundles
+  `ensure_draft` + `refresh_draft_name_error` + `refresh_identity_state` because those
+  three must stay together — a draft whose two error states were not refreshed is a draft
+  the Save gate reads stale. *Why no separate Discard button:* Close already means
   "leave without saving"; two buttons for one outcome, with the warning attached to only one
   of them, was the confusing part.
 - **Leaving the editor with unsaved edits always asks first** (2026-07-19) — the three
@@ -1465,6 +1529,16 @@ the single `Option<ModuleDraft>` slot that every module switch used to overwrite
   above the IDE module tree (`render_orphan_draft_banner`). *Why a banner:* the tree renders
   `all_specs`, which by definition can no longer give the orphan a row. Saving it recreates
   the manifest at its remembered path.
+
+  This is also the answer to **issue #6** ("a Ctrl+R hot reload removes the open module")
+  — which the multi-draft rework closed before the issue was reached (2026-07-19). Under
+  the pre-S4a single `module_draft` slot, `ensure_draft` dropped the draft the moment its
+  spec left `all_specs`, and both columns fell to "module not found" with nothing to click.
+  With `drafts` keyed by manifest path, `draft_key`'s scan-by-id fallback keeps the entry
+  reachable, so the editor goes on rendering the module, the banner names it, and **Save is
+  the recovery path** (it writes the manifest back). No reopen-on-reload logic is wanted
+  here: reopening would mean choosing some *other* module while the user's unsaved work sat
+  invisible.
 - **Per-frame unsaved set.** `ModuleDraft::dirty()` clones the draft, rebuilds an `IndexMap`
   and serializes it, so it is far too expensive to ask per query — it already ran ~4–6× per
   frame with one draft, and per-row dirty markers would make that N× per frame.
