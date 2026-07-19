@@ -24,6 +24,7 @@ All chrome colors are `pub const`s in `crates/ritz-app/src/theme.rs`:
 | `theme::BTN` / `theme::BTNBD` | Secondary button fill / border |
 | `theme::PRIMARY_TEXT` | Text color drawn on top of an accent-filled primary button |
 | `theme::SEL` / `theme::SELBD` / `theme::HOV` | Derived selection/hover tints (accent @ ~16%/~42%, white @ ~5%) |
+| `theme::selection_tint(base)` | Derives a `(fill, border)` pair at `SEL`/`SELBD`'s own alphas from an *arbitrary* base color, not just `ACCENT` — `selection_tint(ACCENT)` reproduces `SEL`/`SELBD` byte-for-byte. Use this instead of hand-picking new tint literals whenever something needs the "selected" treatment in a color other than the brand accent (e.g. the nav's per-tab colours, 2026-07-19) |
 | `theme::EDIT_L0`…`EDIT_L3` | Module-editor nesting shades (module → block → field → builder row), each one step lighter than the base panel so nested cards read as a hierarchy |
 
 ```rust

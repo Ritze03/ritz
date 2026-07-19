@@ -52,6 +52,33 @@ pub const SEL: Color32 = Color32::from_rgba_premultiplied(0x0F, 0x16, 0x27, 0x29
 pub const SELBD: Color32 = Color32::from_rgba_premultiplied(0x26, 0x3A, 0x65, 0x6B);
 pub const HOV: Color32 = Color32::from_rgba_premultiplied(0x0D, 0x0D, 0x0D, 0x0D);
 
+/// Derive a `(fill, border)` selection tint from an arbitrary base color, at
+/// the same two alphas [`SEL`]/[`SELBD`] use (~16% / ~42%). `SEL`/`SELBD` are
+/// exactly `ACCENT` run through this formula — they're hand-expanded consts
+/// only because `Color32::from_rgba_unmultiplied` isn't a `const fn`, so
+/// `selection_tint(ACCENT)` reproduces them byte-for-byte (see the test
+/// below). Anything that wants the same "selected" treatment for a *different*
+/// base color — e.g. one tab of a multi-color tab strip — calls this instead
+/// of hand-picking new hex literals, so a future alpha tweak to `SEL`/`SELBD`
+/// stays a one-line change here rather than N re-derived constants.
+///
+/// *Why manual premultiply and not `Color32::from_rgba_unmultiplied` itself:*
+/// egui's version blends in linear (gamma-corrected) space, which lands on a
+/// visibly different color than the naive integer premultiply `SEL`/`SELBD`
+/// were hand-computed with. Using it here would make a derived tab read
+/// differently from the accent tab's `SEL`/`SELBD` fill even at the same
+/// nominal alpha — defeating the point of sharing one formula.
+pub fn selection_tint(base: Color32) -> (Color32, Color32) {
+    // 0x29/255 ≈ 16% (fill), 0x6B/255 ≈ 42% (border) — SEL/SELBD's own alphas.
+    fn premul(base: Color32, alpha: u8) -> Color32 {
+        // Round-to-nearest integer premultiply, matching how SEL/SELBD's own
+        // byte values were derived from ACCENT.
+        let mix = |c: u8| -> u8 { ((c as u32 * alpha as u32 + 127) / 255) as u8 };
+        Color32::from_rgba_premultiplied(mix(base.r()), mix(base.g()), mix(base.b()), alpha)
+    }
+    (premul(base, 0x29), premul(base, 0x6B))
+}
+
 // ---- Scope / inheritance (kept identical to the original launcher) -------
 
 /// Global scope — also doubles as the destructive/danger color (Delete, Cancel).

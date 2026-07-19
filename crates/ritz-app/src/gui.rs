@@ -3457,9 +3457,57 @@ fn set_set_collisions(specs: &[Extension], res: &Resolution) -> Vec<String> {
 }
 
 impl GuiApp {
+    /// What the title-bar chip (`breadcrumb_chip`) should show right now, one
+    /// branch per mode:
+    ///
+    /// - **Config mode, `GeneralSettings` selected** → the literal `"Settings"`.
+    /// - **Config mode, anything else** (a game, a profile, `GlobalSettings`) →
+    ///   the ambient game's name — unchanged from before this method existed,
+    ///   `GlobalSettings` included: it lives under the "Profiles / Games"
+    ///   category box tab (see `render_nav_category_box`'s `is_games`), so it
+    ///   gets that tab's chip content, not `"Settings"`.
+    /// - **IDE mode** → the *module* currently open, by its declared `Name`
+    ///   (`EditorHeaderInfo::name`, what the header row and the module tree
+    ///   both show) — not `Extension::id()`, which nobody but the config files
+    ///   ever sees.
+    ///
+    /// *Why `"IDE Mode"` and not the previous game name or an empty chip* when
+    /// no module has resolved yet: `GuiApp::update` sets `nav_sel ==
+    /// ModuleEditor(id)` and then calls `ensure_draft(&id)` several lines
+    /// *before* `render_title_bar` runs later the same frame, so on every
+    /// ordinary frame the draft is already synced to `id` by the time this
+    /// method runs and `editor_header_info` returns `Some`. This fallback is
+    /// only live when `all_specs` is empty (no modules loaded at all — nothing
+    /// to be "the current module") or `nav_sel` briefly isn't `ModuleEditor(_)`
+    /// yet inside IDE mode. A fixed string never flickers between two values on
+    /// a module switch (there is no switch to observe — normal switches never
+    /// take this branch) and is never empty, so the chip never changes size
+    /// because it went blank.
+    fn title_chip_text(&self) -> String {
+        match self.mode {
+            Mode::Ide => match &self.nav_sel {
+                NavSel::ModuleEditor(id) => self
+                    .editor_header_info(id)
+                    .map(|info| info.name)
+                    .unwrap_or_else(|| "IDE Mode".to_string()),
+                _ => "IDE Mode".to_string(),
+            },
+            Mode::Config if matches!(self.nav_sel, NavSel::GeneralSettings) => {
+                "Settings".to_string()
+            }
+            Mode::Config => self.game_config.game.name.clone(),
+        }
+    }
+
     /// The Graphite title bar: logo + wordmark, breadcrumb chip, and (in launch
     /// mode) the Cancel/Launch action pair.
     fn render_title_bar(&mut self, ctx: &egui::Context) {
+        // Computed before the panel closure: `editor_header_info` only needs
+        // `&self`, but borrowing it from inside the closure below (which also
+        // touches `self.logo`/`self.outcome`/…) would fight the closure's own
+        // borrow of `self`. Same reasoning as `ide_header` further down in
+        // `update` — read first, use the plain `String` inside the closure.
+        let chip_text = self.title_chip_text();
         let frame = egui::Frame::none()
             .fill(theme::HEAD)
             .inner_margin(egui::Margin { left: 7.0, right: 18.0, top: 0.0, bottom: 0.0 });
@@ -3491,7 +3539,7 @@ impl GuiApp {
                         ui.allocate_exact_size(egui::vec2(1.0, 18.0), egui::Sense::hover());
                     ui.painter().rect_filled(div, 0.0, theme::BORDER);
                     ui.add_space(10.0);
-                    breadcrumb_chip(ui, &self.game_config.game.name);
+                    breadcrumb_chip(ui, &chip_text);
 
                     if self.launch_mode {
                         let sep = icon_sep(self.general_config.mono_ui);
@@ -5075,18 +5123,37 @@ impl GuiApp {
                     // `GuiApp::new`'s `nav_sel` init) — landing on the leftmost tab
                     // matches "first tab is the default" convention even though the
                     // default is actually chosen by name, not position.
-                    if nav_category_tab(ui, tab_w, is_games, "\u{f4ff}", "Profiles", mono).clicked() {
+                    // Per-tab color, applied only while that tab is selected (see
+                    // `nav_category_tab`'s doc comment): Profiles gets `COL_PROFILE`,
+                    // the same green the settings tree already uses for the Profile
+                    // scope, so the tab visually ties back to that meaning rather
+                    // than borrowing the unrelated brand accent. It reads acceptably
+                    // here — it's noticeably darker than `ACCENT` against `PANEL2`,
+                    // which if anything helps the three tabs stay distinguishable at
+                    // a glance.
+                    if nav_category_tab(ui, tab_w, is_games, "\u{f4ff}", "Profiles", mono, COL_PROFILE).clicked() {
                         action = Some(NavCategory::GamesProfiles);
                     }
                     // `\u{f044}` is `theme::ICON_EDIT`, the same pencil the module
                     // detail header uses for its Edit affordance. Reused on purpose:
                     // both mean "author this thing". It replaced `\u{eef4}`, whose
-                    // ink is too fine to read at 11px.
-                    if nav_category_tab(ui, tab_w, is_ide, theme::ICON_EDIT, "IDE Mode", mono).clicked() {
+                    // ink is too fine to read at 11px. IDE Mode keeps the brand
+                    // accent — it's the app's primary authoring surface, and this is
+                    // the same blue the rest of the chrome already treats as "live".
+                    if nav_category_tab(ui, tab_w, is_ide, theme::ICON_EDIT, "IDE Mode", mono, theme::ACCENT).clicked() {
                         action = Some(NavCategory::Ide);
                     }
                     // Cog reused verbatim from the old General Settings tree row.
-                    if nav_category_tab(ui, tab_w, is_general, "\u{f013}", "Settings", mono).clicked() {
+                    // `theme::DIM` (not `COL_DEFAULT`): `COL_DEFAULT` already carries
+                    // a specific, unrelated meaning in the scope palette ("no
+                    // override anywhere" — see `docs/ui/STYLING-GUIDE.md`), and
+                    // reusing it here for tab identity would be a confusing double
+                    // duty. `DIM` reads as deliberately neutral rather than
+                    // disabled, and — unlike `FAINT`, which the *unselected* icon
+                    // already renders in — it's visibly brighter, so selecting this
+                    // tab still reads as a state change instead of "no color at
+                    // all".
+                    if nav_category_tab(ui, tab_w, is_general, "\u{f013}", "Settings", mono, theme::DIM).clicked() {
                         action = Some(NavCategory::GeneralSettings);
                     }
                 });
@@ -6129,15 +6196,39 @@ fn paint_logo(p: &egui::Painter, rect: egui::Rect) {
 
 /// A rounded "pill" chip (used for the title-bar breadcrumb) with the current
 /// selection tint.
+/// Cap on the chip's *text* width, in points, before it elides with `…`.
+///
+/// The chip is now mode-aware (`GuiApp::title_chip_text`) and can show a
+/// module's authored `Name` rather than just a game title, so it needed a
+/// bound it never had before: unbounded, a long enough name would widen the
+/// chip enough to crowd the title bar's right-aligned Launch/Cancel cluster
+/// (`GuiApp::render_title_bar`, the `launch_mode` branch, which shares this
+/// same row). 260px comfortably fits every bundled game/module name today
+/// with room to spare; only pathological cases ever reach the ellipsis.
+const BREADCRUMB_MAX_TEXT_W: f32 = 260.0;
+
+/// The title bar's rounded name/status chip. Sizes to its text (up to
+/// [`BREADCRUMB_MAX_TEXT_W`], beyond which it elides with `…` and the full
+/// text becomes a hover tooltip) plus fixed padding — never a fixed width, so
+/// short text (e.g. `"Settings"`) doesn't leave a stub of empty chip.
 fn breadcrumb_chip(ui: &mut egui::Ui, text: &str) {
-    let galley = ui.painter().layout_no_wrap(
-        text.to_string(),
+    // Same eliding-`LayoutJob` idiom `render_editor_header_description` uses
+    // for the editor header's description line: a `Label`/`layout_no_wrap`
+    // would let the galley (and so the chip) grow without bound, which is
+    // exactly what capping it here prevents.
+    let mut job = egui::text::LayoutJob::simple_singleline(
+        text.to_owned(),
         egui::FontId::proportional(12.5),
         theme::TEXT,
     );
+    job.wrap.max_width = BREADCRUMB_MAX_TEXT_W;
+    job.wrap.max_rows = 1;
+    job.wrap.overflow_character = Some('\u{2026}');
+    let galley = ui.fonts(|f| f.layout_job(job));
+    let elided = galley.elided;
     let pad = egui::vec2(12.0, 4.0);
     let size = galley.size() + pad * 2.0;
-    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::hover());
     ui.painter().rect(
         rect,
         egui::Rounding::same(rect.height() / 2.0),
@@ -6146,6 +6237,11 @@ fn breadcrumb_chip(ui: &mut egui::Ui, text: &str) {
     );
     let pos = rect.center() - galley.size() / 2.0;
     ui.painter().galley(pos, galley, theme::TEXT);
+    // The chip has never been clickable (`Sense::hover` only, in every mode) —
+    // when eliding, a tooltip is the only way to still see the full text.
+    if elided {
+        resp.on_hover_text(text);
+    }
 }
 
 /// A selectable row that fills the full available width (left-aligned), so the
@@ -6201,19 +6297,28 @@ const TAB_TEXT_SIZE: f32 = 11.0;
 /// Its selection fill is also a plain rounded rect, which in a horizontal strip
 /// reads as "one cell is slightly lighter" rather than "this is the open tab".
 ///
-/// Selected state therefore layers two cues, both from existing theme tokens:
+/// Selected state therefore layers two cues, both derived from `accent` (the
+/// tab's own color — `ACCENT` for IDE Mode, a scope/neutral color for the
+/// other two, see `render_nav_category_box`):
 ///
-/// - **fill** `SEL` (the same accent tint `full_selectable` uses) with a `SELBD`
-///   hairline, rounded on **all four corners** at the same `8.0` radius every
-///   other rounded container in the app uses (`Rounding::same(8.0)`, per
-///   `docs/ui/STYLING-GUIDE.md`);
-/// - **ink**: glyph in `ACCENT`, label in full-brightness `TEXT`.
+/// - **fill/border**: `theme::selection_tint(accent)` — the same ~16%/~42%
+///   tint formula `SEL`/`SELBD` are hand-expanded from, applied to whichever
+///   color this tab owns — rounded on **all four corners** at the same `8.0`
+///   radius every other rounded container in the app uses
+///   (`Rounding::same(8.0)`, per `docs/ui/STYLING-GUIDE.md`);
+/// - **ink**: glyph in `accent`, label in full-brightness `TEXT`.
+///
+/// *Why per-tab color only on selected, not unselected too:* unselected tabs
+/// stay `FAINT`/`DIM` (identical across all three) so exactly one tab reads as
+/// "live" and the resting strip doesn't look like an undecided 3-color legend
+/// — the color only shows up once you're actually looking at that tab's
+/// content.
 ///
 /// *Why no underline anymore:* an earlier version rounded only the top two
 /// corners and sat the cell on a separate 2px `ACCENT` underline across its
 /// bottom edge, so the selected tab read as "sitting on a strip." In practice
 /// that read as a flat outline bar rather than a selected tab. The fill/border
-/// plus the accent icon + bright label already carry "this one is selected" on
+/// plus the tinted icon + bright label already carry "this one is selected" on
 /// their own — the underline was a second, redundant cue that also fought the
 /// uniform rounding every other control in the app uses.
 ///
@@ -6233,12 +6338,13 @@ fn nav_category_tab(
     glyph: &str,
     label: &str,
     mono: bool,
+    accent: Color32,
 ) -> egui::Response {
     // Same font-independent icon→text gap idiom the tree leaves use, scaled to
     // the smaller tab text.
     let gap = if mono { 7.0 } else { 6.0 };
     let (icon_col, text_col) = if selected {
-        (theme::ACCENT, theme::TEXT)
+        (accent, theme::TEXT)
     } else {
         (theme::FAINT, theme::DIM)
     };
@@ -6260,7 +6366,8 @@ fn nav_category_tab(
         // everywhere").
         let rounding = egui::Rounding::same(8.0);
         if selected {
-            painter.rect(rect, rounding, theme::SEL, egui::Stroke::new(1.0, theme::SELBD));
+            let (fill, border) = theme::selection_tint(accent);
+            painter.rect(rect, rounding, fill, egui::Stroke::new(1.0, border));
         } else if resp.hovered() {
             painter.rect_filled(rect, rounding, theme::HOV);
         }
@@ -6723,6 +6830,18 @@ mod tests {
         // Never collapses, however narrow the window (or deep the nesting) gets.
         assert_eq!(editor_control_width(90.0, ACTION_COL_W), MIN_CONTROL_W);
         assert_eq!(editor_control_width(-50.0, 0.0), MIN_CONTROL_W);
+    }
+
+    #[test]
+    fn selection_tint_reproduces_sel_selbd_for_accent() {
+        // theme::SEL/SELBD are ACCENT hand-run through the same formula
+        // selection_tint now exposes generically (see the doc comment on
+        // both) — this pins that equivalence so a future edit to either the
+        // consts or the helper can't silently drift the two apart, which
+        // would make the IDE tab (still painted via ACCENT) look different
+        // from before this change even though nothing about it was supposed
+        // to move.
+        assert_eq!(theme::selection_tint(theme::ACCENT), (theme::SEL, theme::SELBD));
     }
 
     #[test]

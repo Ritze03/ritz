@@ -55,6 +55,42 @@ IDE Mode *uses* as its "which module is open" carrier. IDE mode maintains the in
 `GuiApp::ui` if anything clears it, which is what makes the editor's Close button read
 as "discard and reload" there).
 
+### Title bar (`render_title_bar`) — the mode-aware chip
+
+The title bar's rounded chip (`breadcrumb_chip`, right of the "Ritz" wordmark) shows
+different text depending on which of the three category-box destinations is active,
+computed once per frame by `GuiApp::title_chip_text` (2026-07-19; the chip used to
+always show `self.game_config.game.name`, regardless of `mode`/`nav_sel` — reported as
+"the current game display doesn't update when I go into IDE or settings mode"):
+
+| Destination | Chip text |
+| --- | --- |
+| Profiles / Games (`Mode::Config`, `nav_sel != GeneralSettings`) | the ambient game's name — unchanged from before |
+| Settings (`Mode::Config`, `nav_sel == GeneralSettings`) | the literal `"Settings"` |
+| IDE Mode (`Mode::Ide`) | the open module's declared `Name` (`EditorHeaderInfo::name`, the same string the editor header row shows) |
+
+`GlobalSettings` and `Profile(_)` both fall under the first row (they live under the
+Profiles/Games category tab, see the tab table above) and keep showing the ambient game's
+name, not `"Settings"`.
+
+*Why IDE Mode can safely read `editor_header_info(id)` without a load-order race:*
+`GuiApp::update` sets `nav_sel == ModuleEditor(id)` and calls `ensure_draft(&id)` several
+lines before `render_title_bar` runs later the same frame, so the draft is already synced
+to `id` on every ordinary frame by the time the chip is computed. The `"IDE Mode"`
+fallback text only shows when `all_specs` is empty (no modules loaded — there is nothing
+to be "the current module"); it is a fixed string, not a re-derivation of the previous
+value, so it can't flicker between two names on a module switch.
+
+*Sizing* (2026-07-19): the chip has always sized itself to its text plus fixed padding,
+with no cap — fine while the only text it ever showed was a game name, but a
+user-authored module `Name` has no length guarantee. `breadcrumb_chip` now wraps its text
+in a `LayoutJob` capped at `BREADCRUMB_MAX_TEXT_W` (260px) with an ellipsis overflow
+character (the same idiom `render_editor_header_description` uses for the editor header's
+description line), so an unusually long name elides instead of growing the chip enough to
+crowd the title bar's right-aligned Launch/Cancel cluster. The full text is available as a
+hover tooltip when elided. The chip has never been clickable (`Sense::hover` only) in any
+mode, so this didn't need a click-behavior decision.
+
 ### Layout: `Mode::Config` — four panels per frame
 
 ```
@@ -279,14 +315,30 @@ the band swap on `Mode`.
     and its plain rounded selection fill reads in a horizontal strip as "one cell is
     slightly lighter" rather than "this is the open tab".
 
-    **Selected state layers two cues**, both from existing theme tokens: a `SEL` fill
-    with a `SELBD` hairline, rounded on **all four corners** at the same `8.0` radius
-    every other rounded container in the app uses (`Rounding::same(8.0)`, per
-    [STYLING-GUIDE.md](../ui/STYLING-GUIDE.md)); and ink — glyph `ACCENT`, label `TEXT`.
-    Unselected is transparent (a `HOV` wash on hover only), glyph `FAINT`, label `DIM`.
-    *Why colour and not a bold weight:* the bold family (`FontFamily::Name("bold")`) is
-    reserved for the logo wordmark, and a weight switch would reflow the label inside a
-    fixed-width cell.
+    **Each tab now owns its own colour** (2026-07-19; all three used to share `ACCENT`
+    when selected): `nav_category_tab` takes an `accent: Color32` parameter — **Profiles**
+    passes `COL_PROFILE` (the same green the settings tree already uses for the Profile
+    scope, so the tab ties back to a meaning the user already associates with that word;
+    it reads acceptably against `PANEL2`, if anything helping the three tabs stay
+    distinguishable at a glance), **IDE Mode** keeps `ACCENT` (the app's primary authoring
+    surface, unchanged), **Settings** passes `theme::DIM` (deliberately *not*
+    `COL_DEFAULT`, which already means "no override anywhere" in the scope palette and
+    would be a confusing second meaning for the same colour; `DIM` is also visibly
+    brighter than the `FAINT` the *unselected* icon already renders in, so selecting the
+    tab still reads as a state change).
+
+    **Selected state layers two cues, both derived from that per-tab `accent`:** a fill +
+    border from `theme::selection_tint(accent)` — the same ~16%/~42% alpha formula
+    `SEL`/`SELBD` are hand-expanded from (`selection_tint(ACCENT)` reproduces them
+    byte-for-byte, pinned by a unit test), rounded on **all four corners** at the same
+    `8.0` radius every other rounded container in the app uses (`Rounding::same(8.0)`,
+    per [STYLING-GUIDE.md](../ui/STYLING-GUIDE.md)); and ink — glyph in `accent`, label
+    `TEXT`. Unselected stays identical across all three tabs — transparent (a `HOV` wash
+    on hover only), glyph `FAINT`, label `DIM` — so exactly one tab reads as "live" and
+    resting state doesn't look like an undecided 3-colour legend; the colour only shows up
+    once a tab is actually selected. *Why colour and not a bold weight:* the bold family
+    (`FontFamily::Name("bold")`) is reserved for the logo wordmark, and a weight switch
+    would reflow the label inside a fixed-width cell.
 
     *Why no underline anymore* (2026-07-19): the selected cell used to round only its
     top two corners and sit on a separate 2px `ACCENT` underline across its bottom edge,
