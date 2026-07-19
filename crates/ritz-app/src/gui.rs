@@ -6105,23 +6105,24 @@ fn variable_reference_lints(specs: &[Extension]) -> Vec<DiagEntry> {
             None => declared.contains(name),
         };
 
-        for (name, how) in cond_refs
+        // `how` carries its own article: "a condition" but "an interpolation".
+        // Pairing it with its effect here also keeps the two from drifting apart.
+        for (name, how, effect) in cond_refs
             .iter()
-            .map(|n| (n, "condition"))
-            .chain(interp_refs.iter().map(|n| (n, "interpolation")))
+            .map(|n| (n, "a condition", "that condition is never true"))
+            .chain(
+                interp_refs
+                    .iter()
+                    .map(|n| (n, "an interpolation", "it expands to nothing")),
+            )
         {
             if resolves(name) {
                 continue;
             }
-            let effect = if how == "condition" {
-                "that condition is never true"
-            } else {
-                "it expands to nothing"
-            };
             out.push(DiagEntry {
                 severity: DiagSeverity::Warning,
                 text: format!(
-                    "{}: no field declares `{name}`, referenced in a {how} \u{2014} {effect}.",
+                    "{}: no field declares `{name}`, referenced in {how} \u{2014} {effect}.",
                     spec.meta.name
                 ),
             });
