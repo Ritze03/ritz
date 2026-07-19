@@ -169,7 +169,7 @@ the band swap on `Mode`.
   **The bar is the *only* control for these three destinations, and it is always
   truthful.** `is_ide` / `is_general` / `is_games` are recomputed from `mode` and
   `nav_sel` on every frame — there is no cached "current category" that could drift, so
-  any other code path that moves `nav_sel` (Close, Ctrl+E, the exit interlock) is
+  any other code path that moves `nav_sel` (Close, the IDE tree, the exit interlock) is
   followed by the box automatically. *Why the reorder above didn't need a matching
   change to the startup default:* which tab reads as selected is derived from state
   (`mode`/`nav_sel`), never from draw order — `GuiApp::new` starts in
@@ -504,21 +504,23 @@ mis-classified it too.
 
 ### Manifest editor — `render_module_editor` (`NavSel::ModuleEditor`)
 
-Opening a module in the **IDE Mode** tab (or pressing **Ctrl+E** on the selected module
-in Config mode) routes through `GuiApp::open_module_editor`, which records the current
-view in `GuiApp::editor_return` and switches `nav_sel` to `NavSel::ModuleEditor(id)`,
-whose central panel is a full editor for the module's *manifest* (not its config
-values). *Why these are the only two routes* (2026-07-19): the Config-mode module
-detail header used to carry its own **✎ Edit** icon button calling the same handler;
-it was removed as a redundant third entry point now that IDE Mode owns module
-authoring, leaving the IDE Mode tab and Ctrl+E as the only ways in.
+Opening a module in the **IDE Mode** tab routes through `GuiApp::open_module_editor`,
+which records the current view in `GuiApp::editor_return` and switches `nav_sel` to
+`NavSel::ModuleEditor(id)`, whose central panel is a full editor for the module's
+*manifest* (not its config values). *Why the IDE Mode tab is now the only route*
+(2026-07-19): the Config-mode module detail header used to carry an **✎ Edit** icon
+button calling the same handler, and **Ctrl+E** used to open the editor for
+`cur_specs[selected_ext]`. Both were removed as redundant entry points now that IDE
+Mode owns module authoring — the Edit button because a second door into the editor
+from a read-only view was confusing, Ctrl+E because it was keyed off `selected_ext`,
+an index that only exists because the Config-mode `ext_list` column exists (see
+`docs/brainstorm/ide-mode.md`, which staged it as "removed for now, not ported"). The
+keybinding may be revisited once IDE Mode has its own notion of a selected module.
 
 - **Entering / leaving** — `GuiApp::open_module_editor(id)` remembers the prior `nav_sel`
-  in `editor_return` (unless already in an editor) so Close can restore it;
-  `GuiApp::enter_editor_for_selection` (Ctrl+E) opens the editor for
-  `cur_specs[selected_ext]`, a no-op in the editor or on General Settings.
+  in `editor_return` (unless already in an editor) so Close can restore it.
   If the selection moves off the editor by *any* route while a draft is still open
-  (a left-nav click, Ctrl+E elsewhere, …), an early guard in `GuiApp::ui` (after keybind
+  (a left-nav click, the IDE tree, …), an early guard in `GuiApp::ui` (after keybind
   handling, before anything reads the draft) drops `module_draft` as an implicit
   Close/discard, so a dirty draft can never keep the config-autosave interlock engaged and
   strand later config writes — the frame-end `flush_config_writes_if_clean` then releases
@@ -539,11 +541,11 @@ authoring, leaving the IDE Mode tab and Ctrl+E as the only ways in.
   edits. *Why the left nav is only locked when dirty:* it retargets the editor's live
   launch preview, which is useful — the lock exists to protect unsaved edits, not to pin
   the preview. Exit stays Close / Save (or Ctrl+S).
-- **Keybinds** (handled at the top of `GuiApp::ui`, before panels render) — **Ctrl+E**
-  enters the editor for the selected module; **Ctrl+S** triggers Save when the editor is
-  open and `ModuleDraft::save_enabled` holds (same gate as the button), a no-op otherwise;
-  **Ctrl+R** still hot-reloads. The `command` modifier means text editing is never
-  swallowed.
+- **Keybinds** (handled at the top of `GuiApp::ui`, before panels render) — **Ctrl+S**
+  triggers Save when the editor is open and `ModuleDraft::save_enabled` holds (same gate
+  as the button), a no-op otherwise; **Ctrl+R** hot-reloads extensions and configs. The
+  `command` modifier means text editing is never swallowed. *There is deliberately no
+  Ctrl+E* — see the entry-point note at the top of this section.
 - **Focus stability (no reflow steal)** — the dirty/identity/validation status lines that
   appear on the first keystroke must not knock the focused `TextEdit` out of focus. Two
   mechanisms guarantee this: (1) the "unsaved changes / All changes saved" line is
@@ -552,6 +554,34 @@ authoring, leaving the IDE Mode tab and Ctrl+E as the only ways in.
   ("module_editor_body") and **every** editor `TextEdit` a stable `.id_salt` keyed on its
   structural path (section/field/block index + role), so a focused box keeps the same egui
   id — and thus focus — even if a banner above it appears and shifts its screen position.
+
+- **Header / status / body split** (2026-07-19) — `render_module_editor` is assembled from
+  three pieces rather than one straight-line function:
+  - `GuiApp::editor_header_info(id) -> Option<EditorHeaderInfo>` snapshots the name,
+    version, author and every gate flag (`editable`, `dirty`, `save_on`, `has_identity`,
+    `identity_err`, `sections_unique`, `validate_err`, `req_ok`) out of the draft. It takes
+    `&self` only, so it can run **before any panel is declared**.
+  - `render_editor_header_row(ui, cache, info) -> TopAction` draws the name/version/author
+    heading and the `[Fork] [Delete] [✕] [Save]` (+ `Rename`) cluster, and *returns* the
+    click rather than acting on it.
+  - `render_editor_status_lines(ui, info)` draws the dirty/validation/identity lines.
+
+  *Why the snapshot struct rather than passing `&ModuleDraft`:* IDE mode renders the header
+  row in a **different panel closure** from the body (see "IDE-mode header band"), while the
+  body holds `&mut self.module_draft` for its whole scope. Handing the header owned, plain
+  data means neither closure borrows the draft while the other runs — that decoupling is
+  what makes the full-width header band possible at all. The two free functions take the
+  `IconCenterCache` directly for the same reason.
+
+  `render_module_editor`'s `header_inline: bool` parameter selects between the two layouts:
+  Config mode passes `true` (header drawn in the editor column, action dispatched there);
+  IDE mode passes `false` and owns both itself. **The status lines are drawn by
+  `render_module_editor` in both modes** — see the reflow note under "IDE-mode header band"
+  for why they did *not* move with the header.
+
+  `GuiApp::dispatch_top_action(action, id, dirty, editable)` carries out the click and is
+  shared by both paths, so Save / Close-as-Discard / Fork / Rename / Delete can never drift
+  between modes.
 
 - **Draft state** — `GuiApp::module_draft: Option<ModuleDraft>`, (re)synced each frame by
   `GuiApp::ensure_draft`. A `ModuleDraft` holds the module `id`, its `manifest` path, an
@@ -791,9 +821,8 @@ just supplies its title/message and its own commit logic.
 6. Use **Ctrl+R** to hot-reload both extensions and configs from disk without
    restarting the window (`crate::gui::GuiApp::reload_extensions` +
    `crate::gui::GuiApp::reload_configs`).
-7. Press **Ctrl+E**, or switch to the **IDE Mode** tab, to open the selected module's
-   manifest editor; inside it, **Ctrl+S** saves (when the Save gate holds) and
-   **✕ Close** leaves.
+7. Switch to the **IDE Mode** tab to open a module's manifest editor; inside it,
+   **Ctrl+S** saves (when the Save gate holds) and **✕ Close** leaves.
 
 ## Related links
 

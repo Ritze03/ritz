@@ -908,18 +908,6 @@ impl GuiApp {
         self.nav_sel = NavSel::ModuleEditor(id);
     }
 
-    /// Enter the editor for the currently-selected module in the normal view
-    /// (Ctrl+E). No-op when already in the editor or when there is no selectable
-    /// module (e.g. the General Settings pane).
-    fn enter_editor_for_selection(&mut self) {
-        if matches!(self.nav_sel, NavSel::ModuleEditor(_) | NavSel::GeneralSettings) {
-            return;
-        }
-        if let Some(spec) = self.cur_specs.get(self.selected_ext) {
-            self.open_module_editor(spec.id());
-        }
-    }
-
     /// Leave the module editor for the remembered (or ambient) view, dropping the
     /// in-memory draft. Releasing the interlock flushes any held config writes.
     fn exit_module_editor(&mut self) {
@@ -1332,14 +1320,8 @@ impl GuiApp {
             self.reload_configs();
         }
 
-        // Ctrl+E: enter the editor for the currently-selected module (no-op if
-        // already in it or on a pane with no module selection).
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::E)) {
-            self.enter_editor_for_selection();
-        }
-
         // A draft may only exist while the editor view is active. If the selection
-        // moved off the editor by ANY route (left-nav click, Ctrl+E elsewhere, …)
+        // moved off the editor by ANY route (a left-nav click, the IDE tree, …)
         // while a draft is still open, treat it as an implicit Close/discard — drop
         // the draft so a dirty draft can't keep the config-autosave interlock
         // engaged and strand later config writes. The frame-end
@@ -1634,7 +1616,7 @@ impl GuiApp {
             }
 
             if let NavSel::ModuleEditor(id) = self.nav_sel.clone() {
-                self.render_module_editor(ui, &id);
+                self.render_module_editor(ui, &id, true);
                 return;
             }
 
@@ -1887,20 +1869,273 @@ impl GuiApp {
     }
 }
 
+/// Everything the editor's header row and status lines need, snapshotted **out
+/// of** [`ModuleDraft`] once per frame.
+///
+/// *Why a snapshot struct and not a `&ModuleDraft`:* in IDE mode the header row
+/// and the editor body render inside **different panel closures**, and the body
+/// holds `&mut self.module_draft` for its whole scope. Passing owned, plain data
+/// to the header means neither closure has to borrow the draft while the other
+/// runs, which is what lets the header move to its own full-width panel at all.
+/// Every field is cheap (a few `String`s + `bool`s); the two `Option<String>`
+/// diagnostics are the only allocations that aren't already being made.
+struct EditorHeaderInfo {
+    name: String,
+    version: String,
+    author: String,
+    editable: bool,
+    dirty: bool,
+    save_on: bool,
+    has_identity: bool,
+    identity_err: Option<String>,
+    sections_unique: bool,
+    validate_err: Option<String>,
+    req_ok: bool,
+}
+
+/// The editor's header row: name / version / author on the left, the action
+/// cluster on the right. Returns the [`TopAction`] the user clicked, if any —
+/// the caller dispatches it (never this function, see
+/// [`GuiApp::dispatch_top_action`]).
+///
+/// Free function taking `cache` directly rather than a `&mut self` method: the
+/// IDE-mode call site renders this inside a panel closure that already holds
+/// `&mut self`, and the only thing it needs from `self` is the icon cache.
+///
+/// **Invariant: this row must stay constant-height.** IDE mode renders it in a
+/// fixed-height panel spanning both columns, so anything that changed height
+/// here would reflow the editor *and* the preview column. The `editable`-gated
+/// Delete / Rename buttons are safe: `editable` is fixed per module, and they
+/// grow the row horizontally, never vertically.
+fn render_editor_header_row(
+    ui: &mut egui::Ui,
+    cache: &mut IconCenterCache,
+    info: &EditorHeaderInfo,
+) -> TopAction {
+    let mut action = TopAction::None;
+    ui.horizontal(|ui| {
+        ui.heading(&info.name);
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(format!("v{}", info.version)).color(theme::FAINT));
+        ui.label(egui::RichText::new(format!("by {}", info.author)).color(theme::FAINT));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // Right-to-left layout: added first == drawn rightmost, so this
+            // reads [Fork] [Delete] [Close] [Save] on screen.
+            let mut save = ui.add_enabled(info.save_on, theme::primary_button("Save"));
+            if !info.editable {
+                save = save.on_hover_text("Fork to edit");
+            }
+            if save.clicked() {
+                action = TopAction::Save;
+            }
+            // Always-present exit. Doubles as Discard: with unsaved edits it
+            // asks for confirmation first, otherwise it just leaves.
+            if icon_button(ui, cache, "\u{f00d}", "Close", IconBtn::Secondary, true)
+                .on_hover_text("Leave the editor (discards unsaved edits)")
+                .clicked()
+            {
+                action = TopAction::Close;
+            }
+            if info.editable
+                && ui
+                    .add(theme::danger_button("Delete"))
+                    .on_hover_text("Delete this user module")
+                    .clicked()
+            {
+                action = TopAction::Delete;
+            }
+            // Fork works on any module (bundled or user); Delete only on
+            // user-authored (editable) modules.
+            if ui
+                .add(theme::secondary_button("Fork"))
+                .on_hover_text("Create an editable copy of this module")
+                .clicked()
+            {
+                action = TopAction::Fork;
+            }
+            // Rename / Apply identity changes: commits the staged Author /
+            // Name / Variable edits via the scope sweep + manifest rewrite.
+            // Enabled only for an editable module with a *valid* pending
+            // identity change (never the normal Save/autosave path).
+            if info.editable {
+                let rename = ui
+                    .add_enabled(
+                        info.has_identity && info.identity_err.is_none(),
+                        theme::secondary_button("Rename"),
+                    )
+                    .on_hover_text(
+                        "Apply the staged Author / Name / Variable changes \u{2014} migrates saved settings across all scopes",
+                    );
+                if rename.clicked() {
+                    action = TopAction::Rename;
+                }
+            }
+        });
+    });
+    action
+}
+
+/// The status lines under the header: dirty state, then any schema / `Requires`
+/// / pending-identity diagnostics.
+///
+/// *Why these stay with the editor **body** and not with the header row* (which
+/// IDE mode hoists into a full-width panel): only the first line is
+/// unconditional — the validation, `Requires` and identity lines appear and
+/// disappear **as you type**. In a full-width header they would resize the band
+/// mid-keystroke and shove both the editor and the preview column down. Kept
+/// here, any height change stays confined to the editor column, exactly as it
+/// was before the header moved.
+fn render_editor_status_lines(ui: &mut egui::Ui, info: &EditorHeaderInfo) {
+    // Status line under the header. ALWAYS rendered (greyed when clean) so
+    // the clean→dirty transition on the first keystroke never inserts a new
+    // line above the fields — which would reflow the edit area. Combined
+    // with the explicit widget IDs below, typing is never interrupted.
+    if !info.editable {
+        ui.label(
+            egui::RichText::new("Bundled module \u{2014} read-only. Fork to edit (coming soon).")
+                .color(theme::COL_GLOBAL)
+                .small(),
+        );
+    } else if info.dirty {
+        ui.label(
+            egui::RichText::new(
+                "Unsaved changes \u{2014} config autosave paused until you Save or Discard.",
+            )
+            .color(theme::COL_PROFILE)
+            .small(),
+        );
+    } else {
+        ui.label(
+            egui::RichText::new("All changes saved.")
+                .color(theme::FAINT)
+                .small(),
+        );
+    }
+    // Explain *why* Save is greyed for a schema problem. Duplicate section
+    // names collapse when folded into the `IndexMap` before `validate` sees
+    // them, so that case is caught by `sections_unique` separately.
+    if info.editable && !info.sections_unique {
+        ui.label(
+            egui::RichText::new("Cannot save: two UI sections share a name \u{2014} rename one.")
+                .color(theme::COL_GLOBAL)
+                .small(),
+        );
+    } else if info.editable {
+        if let Some(reason) = &info.validate_err {
+            ui.label(
+                egui::RichText::new(format!("Cannot save: {reason}"))
+                    .color(theme::COL_GLOBAL)
+                    .small(),
+            );
+        }
+    }
+    if info.editable && !info.req_ok {
+        ui.label(
+            egui::RichText::new("A Requires expression does not parse.")
+                .color(theme::COL_GLOBAL)
+                .small(),
+        );
+    }
+    // Pending-identity feedback: why Rename is blocked, or a ready prompt.
+    if info.editable && info.has_identity {
+        match &info.identity_err {
+            Some(reason) => {
+                ui.label(
+                    egui::RichText::new(format!("Cannot rename: {reason}"))
+                        .color(theme::COL_GLOBAL)
+                        .small(),
+                );
+            }
+            None => {
+                ui.label(
+                    egui::RichText::new(
+                        "Pending identity change \u{2014} press Rename to migrate saved settings and apply it.",
+                    )
+                    .color(theme::COL_PROFILE)
+                    .small(),
+                );
+            }
+        }
+    }
+}
+
 impl GuiApp {
+    /// Snapshot the open draft's header state. `&self` only, so it is safe to
+    /// call **before any panel is declared** — which is what IDE mode does, to
+    /// have the data ready for a header panel that renders ahead of the editor.
+    ///
+    /// `None` means "nothing to head": either no draft, or a draft for a
+    /// different module (`ensure_draft` has not caught up yet this frame).
+    fn editor_header_info(&self, id: &str) -> Option<EditorHeaderInfo> {
+        let d = self.module_draft.as_ref().filter(|d| d.id == id)?;
+        let snap = d.snapshot();
+        Some(EditorHeaderInfo {
+            name: d.ext.meta.name.clone(),
+            version: d.ext.meta.version.clone(),
+            author: d.ext.meta.author.clone(),
+            editable: d.editable,
+            dirty: d.dirty(),
+            save_on: d.save_enabled(),
+            has_identity: d.has_pending_identity(),
+            identity_err: d.identity_error.clone(),
+            sections_unique: d.sections_unique(),
+            validate_err: core_extension::validate(&snap).err().map(|e| e.to_string()),
+            req_ok: all_requires_parse(&snap),
+        })
+    }
+
+    /// Carry out the action the header row produced.
+    ///
+    /// *Why this is its own method:* the header row renders in the editor's own
+    /// `Ui` in Config mode but in a separate full-width panel in IDE mode, so
+    /// the two paths reach the dispatch from different places. Both must run it
+    /// at the same point in the frame — **after** the editor body and the
+    /// preview column have rendered. Saving or closing mid-frame drops the
+    /// draft, and everything downstream would then render a "no longer
+    /// available" flash against state the header already invalidated.
+    fn dispatch_top_action(&mut self, action: TopAction, id: &str, dirty: bool, editable: bool) {
+        match action {
+            TopAction::Save => self.save_module(),
+            // Close doubles as Discard: warn before dropping unsaved edits.
+            TopAction::Close => {
+                if dirty && editable {
+                    self.confirm = Some(ConfirmAction::DiscardEdits);
+                } else {
+                    self.exit_module_editor();
+                }
+            }
+            TopAction::Fork => self.open_fork_dialog(id),
+            TopAction::Rename => self.perform_rename(),
+            TopAction::Delete => {
+                if let Some(d) = &self.module_draft {
+                    let label = format!("{}::{}", d.ext.meta.author, d.ext.meta.name);
+                    let manifest = d.manifest.clone();
+                    self.delete_module_purge = false;
+                    self.confirm = Some(ConfirmAction::DeleteModule { manifest, label });
+                }
+            }
+            TopAction::None => {}
+        }
+    }
+
     /// Phase 2: editable manifest editor. Edits an in-memory [`ModuleDraft`] with a
     /// live preview and an explicit Save. Bundled modules render the same widgets
     /// but disabled (Save shows a "Fork to edit" tooltip). `id` is the module's
     /// `Extension::id()`; the draft is (re)loaded by [`ensure_draft`] each frame.
-    fn render_module_editor(&mut self, ui: &mut egui::Ui, id: &str) {
+    ///
+    /// `header_inline` controls whether the name/version/author + action row is
+    /// drawn here. Config mode passes `true` (the header belongs to this column).
+    /// IDE mode passes `false`: it renders the same row via
+    /// [`render_editor_header_row`] in a full-width `TopBottomPanel` spanning the
+    /// editor *and* preview columns, and dispatches the action itself. The status
+    /// lines stay here in both modes — see [`render_editor_status_lines`].
+    fn render_module_editor(&mut self, ui: &mut egui::Ui, id: &str, header_inline: bool) {
         let touch = self.general_config.touch_mode;
         // IDE mode always runs full-width: its editor column is already sized by the
         // nav/preview split, so the 743px clamp (built for Config mode's wider,
         // unsplit central panel) would only add a dead gutter.
         let full_width = self.general_config.full_width || self.mode == Mode::Ide;
         let mut action = TopAction::None;
-        // Hoisted out of the draft borrow below so the action dispatch can see them.
-        let (dirty, editable);
 
         // The editor body holds a `&mut` borrow of `self.module_draft` for its
         // whole scope, so a second `&mut self.icon_cache` can't be taken
@@ -1929,167 +2164,41 @@ impl GuiApp {
                 self.carryover_report = None;
             }
         }
+        // Header state is snapshotted out of the draft BEFORE the mutable borrow
+        // below, so the header row (which in IDE mode renders in a different panel
+        // entirely) never has to hold the draft.
+        let Some(info) = self.editor_header_info(id) else {
+            // Two distinct "nothing to draw" cases, kept apart because they read
+            // very differently to the user: the draft is gone for good, or
+            // `ensure_draft` simply hasn't caught up with a fresh selection yet.
+            let msg = if self.module_draft.is_none() {
+                "This module is no longer available."
+            } else {
+                "Loading\u{2026}"
+            };
+            ui.label(egui::RichText::new(msg).color(theme::DIM));
+            self.icon_cache = cache;
+            return;
+        };
+        let (dirty, editable) = (info.dirty, info.editable);
+
+        ui.add_space(6.0);
+        if header_inline {
+            action = render_editor_header_row(ui, &mut cache, &info);
+        }
+        render_editor_status_lines(ui, &info);
+        ui.add_space(10.0);
+        ui.separator();
+
         {
+            // Re-borrow for the body only. `editor_header_info` above already
+            // established that a draft for `id` exists, so this cannot fail — but
+            // handle it rather than unwrap, since a panic here would take the app
+            // down mid-frame.
             let Some(draft) = self.module_draft.as_mut() else {
-                ui.label(egui::RichText::new("This module is no longer available.").color(theme::DIM));
                 self.icon_cache = cache;
                 return;
             };
-            if draft.id != id {
-                ui.label(egui::RichText::new("Loading\u{2026}").color(theme::DIM));
-                self.icon_cache = cache;
-                return;
-            }
-            editable = draft.editable;
-            dirty = draft.dirty();
-            let snap = draft.snapshot();
-            let validate_err = core_extension::validate(&snap).err().map(|e| e.to_string());
-            let sections_unique = draft.sections_unique();
-            let req_ok = all_requires_parse(&snap);
-            let save_on = draft.save_enabled();
-            let has_identity = draft.has_pending_identity();
-            let identity_err = draft.identity_error.clone();
-
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.heading(&draft.ext.meta.name);
-                ui.add_space(6.0);
-                ui.label(
-                    egui::RichText::new(format!("v{}", draft.ext.meta.version)).color(theme::FAINT),
-                );
-                ui.label(
-                    egui::RichText::new(format!("by {}", draft.ext.meta.author)).color(theme::FAINT),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Right-to-left layout: added first == drawn rightmost, so this
-                    // reads [Fork] [Delete] [Close] [Save] on screen.
-                    let mut save = ui.add_enabled(save_on, theme::primary_button("Save"));
-                    if !editable {
-                        save = save.on_hover_text("Fork to edit");
-                    }
-                    if save.clicked() {
-                        action = TopAction::Save;
-                    }
-                    // Always-present exit. Doubles as Discard: with unsaved edits it
-                    // asks for confirmation first, otherwise it just leaves.
-                    if icon_button(ui, &mut cache, "\u{f00d}", "Close", IconBtn::Secondary, true)
-                        .on_hover_text("Leave the editor (discards unsaved edits)")
-                        .clicked()
-                    {
-                        action = TopAction::Close;
-                    }
-                    if editable
-                        && ui
-                            .add(theme::danger_button("Delete"))
-                            .on_hover_text("Delete this user module")
-                            .clicked()
-                    {
-                        action = TopAction::Delete;
-                    }
-                    // Fork works on any module (bundled or user); Delete only on
-                    // user-authored (editable) modules.
-                    if ui
-                        .add(theme::secondary_button("Fork"))
-                        .on_hover_text("Create an editable copy of this module")
-                        .clicked()
-                    {
-                        action = TopAction::Fork;
-                    }
-                    // Rename / Apply identity changes: commits the staged Author /
-                    // Name / Variable edits via the scope sweep + manifest rewrite.
-                    // Enabled only for an editable module with a *valid* pending
-                    // identity change (never the normal Save/autosave path).
-                    if editable {
-                        let rename = ui
-                            .add_enabled(
-                                has_identity && identity_err.is_none(),
-                                theme::secondary_button("Rename"),
-                            )
-                            .on_hover_text(
-                                "Apply the staged Author / Name / Variable changes \u{2014} migrates saved settings across all scopes",
-                            );
-                        if rename.clicked() {
-                            action = TopAction::Rename;
-                        }
-                    }
-                });
-            });
-
-            // Status line under the header. ALWAYS rendered (greyed when clean) so
-            // the clean→dirty transition on the first keystroke never inserts a new
-            // line above the fields — which would reflow the edit area. Combined
-            // with the explicit widget IDs below, typing is never interrupted.
-            if !editable {
-                ui.label(
-                    egui::RichText::new("Bundled module \u{2014} read-only. Fork to edit (coming soon).")
-                        .color(theme::COL_GLOBAL)
-                        .small(),
-                );
-            } else if dirty {
-                ui.label(
-                    egui::RichText::new(
-                        "Unsaved changes \u{2014} config autosave paused until you Save or Discard.",
-                    )
-                    .color(theme::COL_PROFILE)
-                    .small(),
-                );
-            } else {
-                ui.label(
-                    egui::RichText::new("All changes saved.")
-                        .color(theme::FAINT)
-                        .small(),
-                );
-            }
-            // Explain *why* Save is greyed for a schema problem. Duplicate section
-            // names collapse when folded into the `IndexMap` before `validate` sees
-            // them, so that case is caught by `sections_unique` separately.
-            if editable && !sections_unique {
-                ui.label(
-                    egui::RichText::new(
-                        "Cannot save: two UI sections share a name \u{2014} rename one.",
-                    )
-                    .color(theme::COL_GLOBAL)
-                    .small(),
-                );
-            } else if editable {
-                if let Some(reason) = &validate_err {
-                    ui.label(
-                        egui::RichText::new(format!("Cannot save: {reason}"))
-                            .color(theme::COL_GLOBAL)
-                            .small(),
-                    );
-                }
-            }
-            if editable && !req_ok {
-                ui.label(
-                    egui::RichText::new("A Requires expression does not parse.")
-                        .color(theme::COL_GLOBAL)
-                        .small(),
-                );
-            }
-            // Pending-identity feedback: why Rename is blocked, or a ready prompt.
-            if editable && has_identity {
-                match &identity_err {
-                    Some(reason) => {
-                        ui.label(
-                            egui::RichText::new(format!("Cannot rename: {reason}"))
-                                .color(theme::COL_GLOBAL)
-                                .small(),
-                        );
-                    }
-                    None => {
-                        ui.label(
-                            egui::RichText::new(
-                                "Pending identity change \u{2014} press Rename to migrate saved settings and apply it.",
-                            )
-                            .color(theme::COL_PROFILE)
-                            .small(),
-                        );
-                    }
-                }
-            }
-            ui.add_space(10.0);
-            ui.separator();
 
             let mut deferred: Vec<Deferred> = Vec::new();
             // Explicit, stable scroll id: keeps the body's content Ui id constant
@@ -2114,27 +2223,10 @@ impl GuiApp {
             }
         }
         self.icon_cache = cache;
-        match action {
-            TopAction::Save => self.save_module(),
-            // Close doubles as Discard: warn before dropping unsaved edits.
-            TopAction::Close => {
-                if dirty && editable {
-                    self.confirm = Some(ConfirmAction::DiscardEdits);
-                } else {
-                    self.exit_module_editor();
-                }
-            }
-            TopAction::Fork => self.open_fork_dialog(id),
-            TopAction::Rename => self.perform_rename(),
-            TopAction::Delete => {
-                if let Some(d) = &self.module_draft {
-                    let label = format!("{}::{}", d.ext.meta.author, d.ext.meta.name);
-                    let manifest = d.manifest.clone();
-                    self.delete_module_purge = false;
-                    self.confirm = Some(ConfirmAction::DeleteModule { manifest, label });
-                }
-            }
-            TopAction::None => {}
+        // Only the inline (Config-mode) header produces an action here; IDE mode's
+        // header panel dispatches its own, after the preview column has rendered.
+        if header_inline {
+            self.dispatch_top_action(action, id, dirty, editable);
         }
     }
 }
@@ -3453,7 +3545,7 @@ impl GuiApp {
     /// body.
     ///
     /// *Why no "Edit" button here:* this header used to carry an "Edit" icon button
-    /// opening the manifest editor. IDE Mode's tab (and Ctrl+E) now own that job, so
+    /// opening the manifest editor. IDE Mode's tab now owns that job, so
     /// a second entry point in the read-only Config-mode detail view was redundant
     /// — removed along with the `open_inspector` deferred flag it existed to serve.
     fn render_module_detail_header(&mut self, ui: &mut egui::Ui, spec: &Extension) {
@@ -4780,7 +4872,7 @@ impl GuiApp {
         // Selection is a function of BOTH axes: `mode` picks IDE vs. the two config
         // destinations, `nav_sel` disambiguates those two.
         // Both flags are derived from live state every frame, never cached — so
-        // ANY code path that moves `mode`/`nav_sel` (Close, Ctrl+E, the exit
+        // ANY code path that moves `mode`/`nav_sel` (Close, the IDE tree, the exit
         // interlock in `ui()`) is followed by the box automatically. There is no
         // second copy of "which category is selected" that could drift.
         let is_ide = self.mode == Mode::Ide;
