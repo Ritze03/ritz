@@ -51,6 +51,8 @@ enum ConfirmAction {
     /// Delete a user-authored module manifest. `label` is `Author::Name` for the
     /// prompt; `manifest` is the file to remove.
     DeleteModule { manifest: PathBuf, label: String },
+    /// Leave the module editor with unsaved edits (Close acting as Discard).
+    DiscardEdits,
 }
 
 /// The Fork / Create-new module dialog. Both share the same Author/Name form;
@@ -524,7 +526,6 @@ enum Deferred {
 enum TopAction {
     None,
     Save,
-    Discard,
     Fork,
     Delete,
     Rename,
@@ -1329,7 +1330,7 @@ impl GuiApp {
                         ui.label(theme::header_label("Modules"));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui
-                                .add_enabled(tree_live, theme::secondary_button("\u{f067} New"))
+                                .add_enabled(tree_live, theme::header_icon_button("\u{f067}"))
                                 .on_hover_text("Create a new custom module")
                                 .clicked()
                             {
@@ -1361,7 +1362,7 @@ impl GuiApp {
                             // The MODULES tree is inert (and greyed) while the
                             // module editor is open, so a stray click can't swap
                             // the module out from under an in-progress edit. Exit
-                            // is via Close / Save / Discard (or Ctrl+S) only.
+                            // is via Close / Save (or Ctrl+S) only.
                             let tree_live = self.module_draft.is_none();
                             ui.add_enabled_ui(tree_live, |ui| {
                                 self.render_ext_tree(ui);
@@ -1503,7 +1504,6 @@ impl GuiApp {
             // Detail header: title + version/author + description, bottom border.
             ui.add_space(6.0);
             let mut open_inspector = false;
-            let mut open_fork = false;
             ui.horizontal(|ui| {
                 ui.heading(&spec.meta.name);
                 ui.add_space(6.0);
@@ -1523,20 +1523,10 @@ impl GuiApp {
                     {
                         open_inspector = true;
                     }
-                    if ui
-                        .add(theme::secondary_button("Fork"))
-                        .on_hover_text("Create an editable copy of this module")
-                        .clicked()
-                    {
-                        open_fork = true;
-                    }
                 });
             });
             if open_inspector {
                 self.open_module_editor(spec.id());
-            }
-            if open_fork {
-                self.open_fork_dialog(&spec.id());
             }
             if let Some(label) = edit_ctx_label {
                 ui.add_space(2.0);
@@ -1700,6 +1690,11 @@ impl GuiApp {
                 "Delete Module",
                 format!("Delete the module \"{label}\"? This removes its manifest file."),
             ),
+            ConfirmAction::DiscardEdits => (
+                "Discard Changes",
+                "This module has unsaved changes. Close the editor and discard them?"
+                    .to_string(),
+            ),
         };
 
         // Modal backdrop: dim everything and swallow clicks meant for the panels
@@ -1758,6 +1753,7 @@ impl GuiApp {
                     self.delete_module(&manifest, self.delete_module_purge);
                     self.delete_module_purge = false;
                 }
+                ConfirmAction::DiscardEdits => self.discard_module(),
             }
             self.confirm = None;
             return true;
@@ -1870,6 +1866,8 @@ impl GuiApp {
         let touch = self.general_config.touch_mode;
         let full_width = self.general_config.full_width;
         let mut action = TopAction::None;
+        // Hoisted out of the draft borrow below so the action dispatch can see them.
+        let (dirty, editable);
 
         // The editor body holds a `&mut` borrow of `self.module_draft` for its
         // whole scope, so a second `&mut self.icon_cache` can't be taken
@@ -1909,8 +1907,8 @@ impl GuiApp {
                 self.icon_cache = cache;
                 return;
             }
-            let editable = draft.editable;
-            let dirty = draft.dirty();
+            editable = draft.editable;
+            dirty = draft.dirty();
             let snap = draft.snapshot();
             let validate_err = core_extension::validate(&snap).err().map(|e| e.to_string());
             let sections_unique = draft.sections_unique();
@@ -1930,15 +1928,8 @@ impl GuiApp {
                     egui::RichText::new(format!("by {}", draft.ext.meta.author)).color(theme::FAINT),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Always-present exit. Save/Discard sit alongside for saving or
-                    // dropping edits explicitly; Close just leaves (dropping any
-                    // in-memory edits) and works even with nothing to save.
-                    if icon_button(ui, &mut cache, "\u{f00d}", "Close", IconBtn::Secondary, true)
-                        .on_hover_text("Leave the editor (discards unsaved edits)")
-                        .clicked()
-                    {
-                        action = TopAction::Close;
-                    }
+                    // Right-to-left layout: added first == drawn rightmost, so this
+                    // reads [Fork] [Delete] [Close] [Save] on screen.
                     let mut save = ui.add_enabled(save_on, theme::primary_button("Save"));
                     if !editable {
                         save = save.on_hover_text("Fork to edit");
@@ -1946,11 +1937,21 @@ impl GuiApp {
                     if save.clicked() {
                         action = TopAction::Save;
                     }
-                    if ui
-                        .add_enabled(dirty && editable, theme::secondary_button("Discard"))
+                    // Always-present exit. Doubles as Discard: with unsaved edits it
+                    // asks for confirmation first, otherwise it just leaves.
+                    if icon_button(ui, &mut cache, "\u{f00d}", "Close", IconBtn::Secondary, true)
+                        .on_hover_text("Leave the editor (discards unsaved edits)")
                         .clicked()
                     {
-                        action = TopAction::Discard;
+                        action = TopAction::Close;
+                    }
+                    if editable
+                        && ui
+                            .add(theme::danger_button("Delete"))
+                            .on_hover_text("Delete this user module")
+                            .clicked()
+                    {
+                        action = TopAction::Delete;
                     }
                     // Fork works on any module (bundled or user); Delete only on
                     // user-authored (editable) modules.
@@ -1977,14 +1978,6 @@ impl GuiApp {
                         if rename.clicked() {
                             action = TopAction::Rename;
                         }
-                    }
-                    if editable
-                        && ui
-                            .add(theme::danger_button("Delete"))
-                            .on_hover_text("Delete this user module")
-                            .clicked()
-                    {
-                        action = TopAction::Delete;
                     }
                 });
             });
@@ -2091,8 +2084,14 @@ impl GuiApp {
         self.icon_cache = cache;
         match action {
             TopAction::Save => self.save_module(),
-            TopAction::Discard => self.discard_module(),
-            TopAction::Close => self.exit_module_editor(),
+            // Close doubles as Discard: warn before dropping unsaved edits.
+            TopAction::Close => {
+                if dirty && editable {
+                    self.confirm = Some(ConfirmAction::DiscardEdits);
+                } else {
+                    self.exit_module_editor();
+                }
+            }
             TopAction::Fork => self.open_fork_dialog(id),
             TopAction::Rename => self.perform_rename(),
             TopAction::Delete => {
@@ -3701,23 +3700,31 @@ impl GuiApp {
         changed
     }
 
+    /// Write `value` for `author::name::var` into whichever scope is currently being
+    /// edited. The single place that maps `nav_sel` onto a config store for writes —
+    /// every writer must route through here, or it silently lands in the wrong scope
+    /// (see `poll_detect`, which used to write `game_config` unconditionally).
+    fn set_scoped(&mut self, a: &str, n: &str, var: &str, value: Value) {
+        match &self.nav_sel.clone() {
+            NavSel::GlobalSettings => {
+                self.global_config.set_value(a, n, var, value);
+            }
+            NavSel::Profile(_) => {
+                if let Some(p) = &mut self.editing_preset_buf {
+                    p.set_value(a, n, var, value);
+                }
+            }
+            NavSel::Game(_) | NavSel::GeneralSettings | NavSel::ModuleEditor(_) => {
+                self.game_config.set_value(a, n, var, value);
+            }
+        }
+    }
+
     /// Set a value for a field on the *currently active edit target*.
     fn set_current(&mut self, field: &UiField, value: Value) {
         let Some(spec) = self.cur_specs.get(self.selected_ext) else { return };
         let (a, n) = (spec.meta.author.clone(), spec.meta.name.clone());
-        match &self.nav_sel.clone() {
-            NavSel::GlobalSettings => {
-                self.global_config.set_value(&a, &n, &field.variable, value);
-            }
-            NavSel::Profile(_) => {
-                if let Some(p) = &mut self.editing_preset_buf {
-                    p.set_value(&a, &n, &field.variable, value);
-                }
-            }
-            NavSel::Game(_) | NavSel::GeneralSettings | NavSel::ModuleEditor(_) => {
-                self.game_config.set_value(&a, &n, &field.variable, value);
-            }
-        }
+        self.set_scoped(&a, &n, &field.variable, value);
     }
 
     /// Begin a 3-second window-class detection for the given field.
@@ -3763,7 +3770,11 @@ impl GuiApp {
         // Redraw so the text box reflects the new value immediately.
         ctx.request_repaint();
         if let Some(c) = class {
-            self.game_config.set_value(&author, &name, &var, json!(c.clone()));
+            // Scope-aware: detecting while editing a Profile must write the profile,
+            // not the ambient game. Writing `game_config` here meant the value never
+            // reached the edited scope (persist() saves by scope) while the text
+            // buffer below still showed it — a silent wrong-scope write.
+            self.set_scoped(&author, &name, &var, json!(c.clone()));
             self.text_buffers.insert(format!("{ext_id}::{var}"), c);
             return true;
         }

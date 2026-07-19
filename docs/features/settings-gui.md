@@ -210,7 +210,13 @@ it every frame via `crate::gui::GuiApp::poll_detect`, requesting a repaint every
 while waiting so the "Detecting… Ns" countdown updates without user input. *Why a
 thread instead of blocking the UI:* the sleep gives the user time to alt-tab to the
 game window before its class is queried; blocking `update()` for 3s would freeze the
-whole app.
+whole app. The detected value is written through `crate::gui::GuiApp::set_scoped`, the
+single `nav_sel`→config-store map shared with `set_current`. *Why routed rather than
+written directly:* `poll_detect` previously wrote `game_config` unconditionally, so
+detecting while editing a Profile or Global put the value in the wrong store — and
+since `persist` saves *by scope*, the edited scope never received it while the text
+buffer still displayed it (a silent wrong-scope write). Every new writer must go
+through `set_scoped` for the same reason.
 
 ### Manifest editor — `render_module_editor` (`NavSel::ModuleEditor`)
 
@@ -231,9 +237,12 @@ for the module's *manifest* (not its config values).
   the interlock. `GuiApp::exit_module_editor` drops `module_draft` and restores
   `editor_return` via the pure `editor_exit_target` (falls back to the ambient `Game(appid)` when the stored view
   is missing or itself an editor, so no dangling editor selection remains). The header's
-  always-present **✕ Close** button (`TopAction::Close`) exits even with nothing to save
-  (dropping in-memory edits); **Save** and **Discard** also exit on success so the user
-  lands back on the real module.
+  always-present **✕ Close** button (`TopAction::Close`) exits even with nothing to save; it
+  doubles as Discard — with a *dirty* editable draft it opens the `ConfirmAction::DiscardEdits`
+  modal first and only `discard_module()`s on confirm. **Save** also exits on success so the
+  user lands back on the real module. *Why no separate Discard button:* Close already means
+  "leave without saving"; two buttons for one outcome, with the warning attached to only one
+  of them, was the confusing part.
 - **Locked trees while editing** — the nav-away guard above is now a *backstop*, not the
   normal path: while a draft exists the **MODULES tree** (and its "New" button) is wrapped
   in `ui.add_enabled_ui(module_draft.is_none(), …)`, so it greys out and can't swap the
@@ -241,7 +250,7 @@ for the module's *manifest* (not its config values).
   General / Global) is likewise disabled, so a stray click can't silently discard unsaved
   edits. *Why the left nav is only locked when dirty:* it retargets the editor's live
   launch preview, which is useful — the lock exists to protect unsaved edits, not to pin
-  the preview. Exit stays Close / Save / Discard (or Ctrl+S).
+  the preview. Exit stays Close / Save (or Ctrl+S).
 - **Keybinds** (handled at the top of `GuiApp::ui`, before panels render) — **Ctrl+E**
   enters the editor for the selected module; **Ctrl+S** triggers Save when the editor is
   open and `ModuleDraft::save_enabled` holds (same gate as the button), a no-op otherwise;
@@ -300,8 +309,12 @@ for the module's *manifest* (not its config values).
   Dropped vars reuse the `carryover_report` banner; the editor reopens on the new `id`.
 - **Fork / Create / Delete** (Phase 3 stage 2a) — the editor header carries a **Fork**
   button (on *any* module, bundled or user) and a **Delete** button (only when
-  `editable`); the module-list header carries **+ New**, and the module detail view offers
-  **Fork** next to **✎ Edit**. Fork/Create open `GuiApp::module_dialog`
+  `editable`), laid out **[Fork] [Delete] [Close] [Save]** left→right (plus **Rename** when an
+  identity edit is staged); the module-list header carries a glyph-only **+** (`theme::header_icon_button` —
+  small, 11px, so it fits inside the MODULES header row instead of pushing it below the
+  PROFILES / GAMES header beside it). The read-only module
+  detail view offers only **✎ Edit** — forking is reached from inside the editor, so there is
+  one place to do it. Fork/Create open `GuiApp::module_dialog`
   (`ModuleDialog` — Author + Name, Fork adds a "Copy saved settings" checkbox), rendered by
   `GuiApp::render_module_dialog` with live red/green uniqueness feedback
   (`name_collides`, whole loaded set) and the confirm button disabled while colliding or

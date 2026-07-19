@@ -28,6 +28,7 @@ sections below to find the doc you need.
 ## brainstorm/ — design plans & decision logs
 
 - [Custom Module Editor](brainstorm/custom-module-editor.md) — design plan and decision log for the GUI custom-module editor feature (branch `feat/custom-module-editor`).
+- [IDE Mode](brainstorm/ide-mode.md) — design plan for the three-column module authoring mode (module tree + editor + live WYSIWYG preview), with staged rollout S1–S6.
 
 ## claude-instructions/ — mandatory rules for agents
 
