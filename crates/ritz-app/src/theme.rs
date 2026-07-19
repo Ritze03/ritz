@@ -104,18 +104,6 @@ pub fn secondary_button(text: impl Into<String>) -> egui::Button<'static> {
         .stroke(Stroke::new(1.0, BTNBD))
 }
 
-/// A glyph-only button sized to sit inside a [`header_label`] row without
-/// growing it: `small()` drops the vertical padding and the glyph matches the
-/// header's 11px, so the button's height equals the label's galley height.
-/// *Why:* a normal button floors at `interact_size.y` (23px), which pushed the
-/// MODULES header ~8px below the PROFILES / GAMES one next to it.
-pub fn header_icon_button(glyph: &str) -> egui::Button<'static> {
-    egui::Button::new(egui::RichText::new(glyph.to_string()).color(TEXT).size(11.0))
-        .fill(BTN)
-        .stroke(Stroke::new(1.0, BTNBD))
-        .small()
-}
-
 /// An UPPERCASE column/section header label in `faint`.
 pub fn header_label(text: &str) -> egui::RichText {
     egui::RichText::new(text.to_uppercase()).color(FAINT).size(11.0).strong()

@@ -148,7 +148,9 @@ the band swap on `Mode`.
 - **Header — the category tab bar** (`GuiApp::render_nav_category_box`): a bordered
   frame (the `editor_card` border idiom, rebuilt locally — `editor_card` itself is
   specialised for the manifest editor) holding three tabs **side by side in one
-  horizontal row**: **Settings**, **IDE Mode**, **Profiles**. It replaced the old single
+  horizontal row**: **Profiles**, **IDE Mode**, **Settings**, in that left-to-right
+  order (2026-07-19 — was **Settings**, **IDE Mode**, **Profiles**; reordered so
+  **Profiles**, the app's startup destination, sits first). It replaced the old single
   `header_label("Profiles / Games")`. *Why a box and not two top-level categories:* it
   is the cheapest change that splits the old "Profiles / Games" destination in two — the
   nav's existing "fixed header box above a scrolling tree" shape is reused verbatim and
@@ -168,7 +170,12 @@ the band swap on `Mode`.
   truthful.** `is_ide` / `is_general` / `is_games` are recomputed from `mode` and
   `nav_sel` on every frame — there is no cached "current category" that could drift, so
   any other code path that moves `nav_sel` (Close, Ctrl+E, the exit interlock) is
-  followed by the box automatically.
+  followed by the box automatically. *Why the reorder above didn't need a matching
+  change to the startup default:* which tab reads as selected is derived from state
+  (`mode`/`nav_sel`), never from draw order — `GuiApp::new` starts in
+  `Mode::Config` / `NavSel::Game(appid)`, which makes `is_games` true regardless of
+  where the Profiles tab sits in the row, so the app still lands on **Profiles** at
+  startup.
 
   Each category owns what the list below it shows:
 
@@ -195,14 +202,22 @@ the band swap on `Mode`.
     and its plain rounded selection fill reads in a horizontal strip as "one cell is
     slightly lighter" rather than "this is the open tab".
 
-    **Selected state layers three cues**, all from existing theme tokens: a `SEL` fill
-    with a `SELBD` hairline, rounded on the **top two corners only** so the cell sits on
-    its underline the way a tab sits on its strip; a **2px `ACCENT` underline** along the
-    bottom edge (the cue that survives at a glance); and ink — glyph `ACCENT`, label
-    `TEXT`. Unselected is transparent (a `HOV` wash on hover only), glyph `FAINT`, label
-    `DIM`. *Why colour and not a bold weight:* the bold family
-    (`FontFamily::Name("bold")`) is reserved for the logo wordmark, and a weight switch
-    would reflow the label inside a fixed-width cell.
+    **Selected state layers two cues**, both from existing theme tokens: a `SEL` fill
+    with a `SELBD` hairline, rounded on **all four corners** at the same `8.0` radius
+    every other rounded container in the app uses (`Rounding::same(8.0)`, per
+    [STYLING-GUIDE.md](../ui/STYLING-GUIDE.md)); and ink — glyph `ACCENT`, label `TEXT`.
+    Unselected is transparent (a `HOV` wash on hover only), glyph `FAINT`, label `DIM`.
+    *Why colour and not a bold weight:* the bold family (`FontFamily::Name("bold")`) is
+    reserved for the logo wordmark, and a weight switch would reflow the label inside a
+    fixed-width cell.
+
+    *Why no underline anymore* (2026-07-19): the selected cell used to round only its
+    top two corners and sit on a separate 2px `ACCENT` underline across its bottom edge,
+    so it would read as "sitting on a strip." In practice this read as a flat outline
+    bar rather than a rounded, selected tab. Rounding all four corners and dropping the
+    underline lets the fill/border plus the accent icon + bright label carry "this one
+    is selected" on their own, matching the uniform rounding every other control in the
+    app uses.
 
     **Width and text size are measured, not chosen.** The nav column is a fixed `NAV_W`
     280px; the header frame's 16px side margins and the category frame's 8px inner
@@ -250,10 +265,15 @@ the band swap on `Mode`.
   `open_module_editor` call *after* the tree renders.
 - **Bottom band** — `Mode::Config`: `GuiApp::render_nav_settings`, context-specific
   controls for whatever's selected. `Mode::Ide`: `GuiApp::render_ide_nav_footer` —
-  Group by Author, a full-width **+ New Module** (same dialog as the `ext_list` header's
-  `+` glyph), and Open Folder. It deliberately omits **Show Inheritance** (no scope in
-  IDE mode) and **Clear Settings** (it clears stored *config*; IDE Mode edits manifests
-  and must never touch config).
+  Group by Author, a full-width **+ New Module**, and Open Folder. It deliberately
+  omits **Show Inheritance** (no scope in IDE mode) and **Clear Settings** (it clears
+  stored *config*; IDE Mode edits manifests and must never touch config).
+
+  *Why "+ New Module" now has only one place it lives* (2026-07-19): the Config-mode
+  `ext_list` header used to carry its own glyph-only **+** button calling the same
+  `GuiApp::open_create_dialog` handler. IDE Mode has taken over module creation and
+  editing, so that second entry point was removed as dead weight — `open_create_dialog`
+  itself is unchanged and still backs this IDE-mode button.
 
   **Open Folder here opens `Paths::user_extensions()`** (`~/.config/ritz/extensions/`),
   not `games_dir()` — IDE Mode edits module *manifests*, and that is where they live
@@ -484,10 +504,14 @@ mis-classified it too.
 
 ### Manifest editor — `render_module_editor` (`NavSel::ModuleEditor`)
 
-Clicking **✎ Edit** on a module (or **Ctrl+E** on the selected module) routes through
-`GuiApp::open_module_editor`, which records the current view in `GuiApp::editor_return`
-and switches `nav_sel` to `NavSel::ModuleEditor(id)`, whose central panel is a full editor
-for the module's *manifest* (not its config values).
+Opening a module in the **IDE Mode** tab (or pressing **Ctrl+E** on the selected module
+in Config mode) routes through `GuiApp::open_module_editor`, which records the current
+view in `GuiApp::editor_return` and switches `nav_sel` to `NavSel::ModuleEditor(id)`,
+whose central panel is a full editor for the module's *manifest* (not its config
+values). *Why these are the only two routes* (2026-07-19): the Config-mode module
+detail header used to carry its own **✎ Edit** icon button calling the same handler;
+it was removed as a redundant third entry point now that IDE Mode owns module
+authoring, leaving the IDE Mode tab and Ctrl+E as the only ways in.
 
 - **Entering / leaving** — `GuiApp::open_module_editor(id)` remembers the prior `nav_sel`
   in `editor_return` (unless already in an editor) so Close can restore it;
@@ -508,7 +532,7 @@ for the module's *manifest* (not its config values).
   "leave without saving"; two buttons for one outcome, with the warning attached to only one
   of them, was the confusing part.
 - **Locked trees while editing** — the nav-away guard above is now a *backstop*, not the
-  normal path: while a draft exists the **MODULES tree** (and its "New" button) is wrapped
+  normal path: while a draft exists the **MODULES tree** is wrapped
   in `ui.add_enabled_ui(module_draft.is_none(), …)`, so it greys out and can't swap the
   module out mid-edit; while the draft is **dirty** the **left nav** (Profiles / Games /
   General / Global) is likewise disabled, so a stray click can't silently discard unsaved
@@ -574,11 +598,12 @@ for the module's *manifest* (not its config values).
 - **Fork / Create / Delete** (Phase 3 stage 2a) — the editor header carries a **Fork**
   button (on *any* module, bundled or user) and a **Delete** button (only when
   `editable`), laid out **[Fork] [Delete] [Close] [Save]** left→right (plus **Rename** when an
-  identity edit is staged); the module-list header carries a glyph-only **+** (`theme::header_icon_button` —
-  small, 11px, so it fits inside the MODULES header row instead of pushing it below the
-  PROFILES / GAMES header beside it). The read-only module
-  detail view offers only **✎ Edit** — forking is reached from inside the editor, so there is
-  one place to do it. Fork/Create open `GuiApp::module_dialog`
+  identity edit is staged). Creating a new module is reached only via IDE Mode's
+  **+ New Module** button (see the nav-panel bottom band above) — the Config-mode
+  `ext_list` header's own glyph-only **+** button and the read-only module detail
+  view's **✎ Edit** button were both removed on 2026-07-19 as redundant now that IDE
+  Mode owns module creation and editing; forking is reached from inside the editor, so
+  there is one place to do it. Fork/Create open `GuiApp::module_dialog`
   (`ModuleDialog` — Author + Name, Fork adds a "Copy saved settings" checkbox), rendered by
   `GuiApp::render_module_dialog` with live red/green uniqueness feedback
   (`name_collides`, whole loaded set) and the confirm button disabled while colliding or
@@ -766,8 +791,9 @@ just supplies its title/message and its own commit logic.
 6. Use **Ctrl+R** to hot-reload both extensions and configs from disk without
    restarting the window (`crate::gui::GuiApp::reload_extensions` +
    `crate::gui::GuiApp::reload_configs`).
-7. Press **Ctrl+E** (or **✎ Edit**) to open the selected module's manifest editor;
-   inside it, **Ctrl+S** saves (when the Save gate holds) and **✕ Close** leaves.
+7. Press **Ctrl+E**, or switch to the **IDE Mode** tab, to open the selected module's
+   manifest editor; inside it, **Ctrl+S** saves (when the Save gate holds) and
+   **✕ Close** leaves.
 
 ## Related links
 

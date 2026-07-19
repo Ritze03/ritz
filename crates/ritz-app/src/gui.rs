@@ -1400,7 +1400,6 @@ impl GuiApp {
         // module tree into the nav column, so a second copy here would be redundant
         // (and would eat the width the editor/preview split needs).
         if self.mode == Mode::Config && !matches!(self.nav_sel, NavSel::GeneralSettings) {
-        let mut open_create = false;
         egui::SidePanel::left("ext_list")
             .exact_width(280.0)
             .resizable(false)
@@ -1412,21 +1411,13 @@ impl GuiApp {
                     .fill(theme::PANEL)
                     .inner_margin(egui::Margin { left: 16.0, right: 16.0, top: 14.0, bottom: 8.0 }))
                 .show_inside(ui, |ui| {
-                    // Locked while the editor is open: creating a module navigates
-                    // away from the draft, same as clicking another module.
-                    let tree_live = self.module_draft.is_none();
-                    ui.horizontal(|ui| {
-                        ui.label(theme::header_label("Modules"));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui
-                                .add_enabled(tree_live, theme::header_icon_button("\u{f067}"))
-                                .on_hover_text("Create a new custom module")
-                                .clicked()
-                            {
-                                open_create = true;
-                            }
-                        });
-                    });
+                    // Create-module now lives only in IDE Mode's nav footer
+                    // (`render_ide_nav_footer`'s "+ New Module" button, which shares
+                    // `open_create_dialog` with what used to be here) — this header
+                    // used to carry its own "+" affordance too, but IDE Mode has
+                    // taken over module creation/editing, so a second entry point
+                    // here was redundant. Plain label now, no trailing button.
+                    ui.label(theme::header_label("Modules"));
                 });
             // Toggles + Open Folder pinned to the bottom footer band.
             egui::TopBottomPanel::bottom("group_toggle")
@@ -1479,9 +1470,6 @@ impl GuiApp {
                         });
                 });
         });
-        if open_create {
-            self.open_create_dialog();
-        }
         } // end if !GeneralSettings
 
         // The spec list both IDE columns (preview body + launch band) resolve and
@@ -3457,18 +3445,18 @@ impl GuiApp {
     }
 
     /// Detail header for the selected module in the central panel: the
-    /// name/version/author heading row (with the "Edit" icon button that opens the
-    /// manifest editor), the "Editing Game/Profile/Global: X" context label, the
-    /// description, and a trailing separator. Split out of the old inline `ui()`
-    /// block (S3a) so `render_module_settings_body` below can eventually be called
-    /// twice — this header only ever needs to render once per selected module,
-    /// which is why it stays a separate method rather than folding into the body.
+    /// name/version/author heading row, the "Editing Game/Profile/Global: X" context
+    /// label, the description, and a trailing separator. Split out of the old inline
+    /// `ui()` block (S3a) so `render_module_settings_body` below can eventually be
+    /// called twice — this header only ever needs to render once per selected
+    /// module, which is why it stays a separate method rather than folding into the
+    /// body.
+    ///
+    /// *Why no "Edit" button here:* this header used to carry an "Edit" icon button
+    /// opening the manifest editor. IDE Mode's tab (and Ctrl+E) now own that job, so
+    /// a second entry point in the read-only Config-mode detail view was redundant
+    /// — removed along with the `open_inspector` deferred flag it existed to serve.
     fn render_module_detail_header(&mut self, ui: &mut egui::Ui, spec: &Extension) {
-        // Computed *before* the heading row, as it was pre-extraction: the Edit
-        // button below calls `open_module_editor`, which sets
-        // `nav_sel = NavSel::ModuleEditor(..)`. Reading `nav_sel` after that click
-        // would hit the `ModuleEditor(_) => None` arm and drop the label (and its
-        // 2px space) for the click frame, shifting the description and body up.
         let edit_ctx_label: Option<String> = match &self.nav_sel {
             NavSel::GlobalSettings => {
                 Some("Editing Global Profile — applies to all games".to_string())
@@ -3481,31 +3469,12 @@ impl GuiApp {
             NavSel::GeneralSettings => None,
         };
         ui.add_space(6.0);
-        let mut open_inspector = false;
         ui.horizontal(|ui| {
             ui.heading(&spec.meta.name);
             ui.add_space(6.0);
             ui.label(egui::RichText::new(format!("v{}", spec.meta.version)).color(theme::FAINT));
             ui.label(egui::RichText::new(format!("by {}", spec.meta.author)).color(theme::FAINT));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if icon_button(
-                    ui,
-                    &mut self.icon_cache,
-                    "\u{f044}",
-                    "Edit",
-                    IconBtn::Secondary,
-                    true,
-                )
-                .on_hover_text("Open this module in the editor")
-                .clicked()
-                {
-                    open_inspector = true;
-                }
-            });
         });
-        if open_inspector {
-            self.open_module_editor(spec.id());
-        }
         if let Some(label) = edit_ctx_label {
             ui.add_space(2.0);
             ui.label(egui::RichText::new(label).color(theme::ACCENT).small());
@@ -4832,9 +4801,13 @@ impl GuiApp {
                 let tab_w = ((avail - 2.0 * TAB_GAP) / 3.0).max(0.0);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = TAB_GAP;
-                    // Cog reused verbatim from the old General Settings tree row.
-                    if nav_category_tab(ui, tab_w, is_general, "\u{f013}", "Settings", mono).clicked() {
-                        action = Some(NavCategory::GeneralSettings);
+                    // Order: Profiles · IDE Mode · Settings. Profiles first because
+                    // it's the app's default/startup destination (see
+                    // `GuiApp::new`'s `nav_sel` init) — landing on the leftmost tab
+                    // matches "first tab is the default" convention even though the
+                    // default is actually chosen by name, not position.
+                    if nav_category_tab(ui, tab_w, is_games, "\u{f4ff}", "Profiles", mono).clicked() {
+                        action = Some(NavCategory::GamesProfiles);
                     }
                     // `\u{f044}` is `theme::ICON_EDIT`, the same pencil the module
                     // detail header uses for its Edit affordance. Reused on purpose:
@@ -4843,8 +4816,9 @@ impl GuiApp {
                     if nav_category_tab(ui, tab_w, is_ide, theme::ICON_EDIT, "IDE Mode", mono).clicked() {
                         action = Some(NavCategory::Ide);
                     }
-                    if nav_category_tab(ui, tab_w, is_games, "\u{f4ff}", "Profiles", mono).clicked() {
-                        action = Some(NavCategory::GamesProfiles);
+                    // Cog reused verbatim from the old General Settings tree row.
+                    if nav_category_tab(ui, tab_w, is_general, "\u{f013}", "Settings", mono).clicked() {
+                        action = Some(NavCategory::GeneralSettings);
                     }
                 });
             });
@@ -5958,14 +5932,21 @@ const TAB_TEXT_SIZE: f32 = 11.0;
 /// Its selection fill is also a plain rounded rect, which in a horizontal strip
 /// reads as "one cell is slightly lighter" rather than "this is the open tab".
 ///
-/// Selected state therefore layers three cues, all from existing theme tokens:
+/// Selected state therefore layers two cues, both from existing theme tokens:
 ///
 /// - **fill** `SEL` (the same accent tint `full_selectable` uses) with a `SELBD`
-///   hairline, rounded on the **top two corners only** so the cell sits on its
-///   underline the way a tab sits on its strip;
-/// - **a 2px `ACCENT` underline** across the cell's bottom edge — the actual
-///   "this one is active" signal, and the cue that survives at a glance;
+///   hairline, rounded on **all four corners** at the same `8.0` radius every
+///   other rounded container in the app uses (`Rounding::same(8.0)`, per
+///   `docs/ui/STYLING-GUIDE.md`);
 /// - **ink**: glyph in `ACCENT`, label in full-brightness `TEXT`.
+///
+/// *Why no underline anymore:* an earlier version rounded only the top two
+/// corners and sat the cell on a separate 2px `ACCENT` underline across its
+/// bottom edge, so the selected tab read as "sitting on a strip." In practice
+/// that read as a flat outline bar rather than a selected tab. The fill/border
+/// plus the accent icon + bright label already carry "this one is selected" on
+/// their own — the underline was a second, redundant cue that also fought the
+/// uniform rounding every other control in the app uses.
 ///
 /// Unselected is transparent (a `HOV` wash on hover only), glyph in `FAINT`,
 /// label in `DIM` — legible but clearly receded, so exactly one tab reads as
@@ -5998,32 +5979,25 @@ fn nav_category_tab(
     job.append(label, gap, TextFormat { font_id, color: text_col, ..Default::default() });
     let galley = ui.fonts(|f| f.layout_job(job));
 
-    // Cell height: the standard control height plus the underline's own band, so
-    // the text keeps its usual breathing room and the underline is added space
-    // rather than stolen space.
-    const UNDERLINE_H: f32 = 2.0;
-    let h = ui.spacing().interact_size.y + UNDERLINE_H;
+    // Cell height: the standard control height. No underline band anymore, so
+    // there's no extra space to reserve beyond the normal control height.
+    let h = ui.spacing().interact_size.y;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(tab_w, h), egui::Sense::click());
 
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
-        // Top corners only — `sw`/`se` stay square so the cell meets its
-        // underline (and the box's inner edge) flush.
-        let rounding = egui::Rounding { nw: 6.0, ne: 6.0, sw: 0.0, se: 0.0 };
+        // All four corners, matching the app-wide 8px rounding convention (see
+        // `docs/ui/STYLING-GUIDE.md`, "Corner rounding is Rounding::same(8.0)
+        // everywhere").
+        let rounding = egui::Rounding::same(8.0);
         if selected {
             painter.rect(rect, rounding, theme::SEL, egui::Stroke::new(1.0, theme::SELBD));
-            let underline = egui::Rect::from_min_max(
-                egui::pos2(rect.left(), rect.bottom() - UNDERLINE_H),
-                rect.right_bottom(),
-            );
-            painter.rect_filled(underline, egui::Rounding::ZERO, theme::ACCENT);
         } else if resp.hovered() {
             painter.rect_filled(rect, rounding, theme::HOV);
         }
-        // Centered on the text band (the cell minus the underline strip), not on
-        // the whole cell — otherwise the label rides 1px low on every tab.
-        let text_band = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), rect.bottom() - UNDERLINE_H));
-        let pos = text_band.center() - galley.size() * 0.5;
+        // Centered on the whole cell now that there's no underline strip to
+        // subtract.
+        let pos = rect.center() - galley.size() * 0.5;
         ui.painter().galley(pos, galley, theme::TEXT);
     }
     resp
