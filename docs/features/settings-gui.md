@@ -127,8 +127,8 @@ preferences, not extension variables, so a module tree would have nothing to sel
 │  all_specs]    │←──── exactly half ───→│←──── exactly half ──────→│
 ├────────────────┼──────────────────────┼─────────────────────────┤
 │ Group by Author│  ide_editor_band      │  ide_launch_band         │
-│ Preview against│  (198px, declared     │  (launch command, nested │
-│ [ None      ▾ ]│   but empty)          │   inside the preview)    │
+│ Preview against│  (198px, DIAGNOSTICS) │  (launch command, nested │
+│ [ None      ▾ ]│                       │   inside the preview)    │
 │ [+ New Module ]│                       │                          │
 │ [Open Folder →]│                       │                          │
 │  extensions/   │                       │                          │
@@ -287,9 +287,12 @@ the problem somewhere else.
 - The full-width `preview` footer is **skipped entirely**, not emptied. *Why:* a
   zero-content bottom panel still reserves height across the full window width, which
   would stack a dead strip under the editor column on top of `ide_editor_band`.
-- `ide_editor_band` is deliberately **declared but empty**, reserved for a future
-  diagnostics pane. Its `exact_height(198.0)` matches the nav footer band so the two
-  bottom edges align.
+- `ide_editor_band` is the **diagnostics band** (`crate::gui::render_ide_diagnostics_band`)
+  — declared but empty until 2026-07-19, when the env-overwrite lint moved into it from
+  the launch band. Its `exact_height(198.0)` matches the nav footer band so the two bottom
+  edges align, and it stays `exact_height` however much it ends up showing: a
+  variable-height band here would reflow the editor column above it every time the warning
+  count changed. See "Diagnostics band" below.
 - `ide_preview_split` is **`resizable(false)` with an `exact_width` of exactly half** of
   everything right of the fixed `NAV_W` (280px) nav column:
   `((ctx.screen_rect().width() - NAV_W) * 0.5).max(0.0)`, recomputed every frame so the
@@ -950,8 +953,10 @@ editing a **Profile**, the edit-scope resolution (so the preview reflects the pr
 being edited even if it's not the active one for any game); when in the **manifest
 editor** (`NavSel::ModuleEditor`), the draft-spliced spec set (the edited module's entry
 replaced by `ModuleDraft::snapshot`, resolved via `GuiApp::resolve_specs_for_game` — one
-clone/frame, no disk, assembler signature unchanged) plus a red `set_set_collisions`
-lint listing env vars two modules both `Set`; otherwise the game resolution. The
+clone/frame, no disk, assembler signature unchanged) plus the red `lossy_env_overwrites`
+lint (see "Diagnostics band"); otherwise the game resolution. *Why Config mode keeps the
+lint in its launch band* while IDE mode moved it out (2026-07-19): there is no editor band
+in Config mode to move it to — `ide_editor_band` is declared only under `Mode::Ide`. The
 assembled command is rendered with `crates/ritz-app/src/gui.rs:command_job`,
 which highlights every `%command%` token in the accent color. See
 [launch-command-assembly.md](launch-command-assembly.md) for what `assemble_launch`
@@ -965,7 +970,78 @@ show_legend = preview_game.is_some())` — over a nested
 `TopBottomPanel::bottom("ide_launch_band")`. The band is declared **before**
 the inner `CentralPanel`; nested panels obey declaration order exactly like top-level
 ones. *Why nest it here instead of a full-width footer:* the launch string belongs to the
-preview, and the space under the editor column is the reserved diagnostics band.
+preview, and the space under the editor column is the diagnostics band.
+
+The launch band shows the assembled command and **nothing else**. The env-overwrite lint
+used to render here too; it moved to `ide_editor_band` on 2026-07-19 so the same warning
+isn't on screen twice, and so this panel stays about what the launch *is* rather than
+what's wrong with it.
+
+## Diagnostics band (`crate::gui::render_ide_diagnostics_band`)
+
+The contents of `ide_editor_band`: a `DIAGNOSTICS` heading row over a framed, scrolling
+list, styled to match `ide_launch_band` beside it exactly (same `FIELD` fill, `BORDER`
+stroke, 8px rounding, 13/11 inner margins, same fill-the-band `available_height - 22`
+arithmetic). The two 198px bands are peers and have to read as peers.
+
+Today the list holds one lint, `crate::gui::lossy_env_overwrites`. It is laid out as a
+**down payment** on the full ok/warning/error diagnostics panel the IDE plan calls for,
+not as something to tear out: the heading is a row with a right-aligned tally opposite the
+title (adding ok/error counts appends to that row and moves nothing below it), and the
+list scrolls inside the fixed band rather than growing it.
+
+**Empty state:** a quiet `✔ No issues.` in `FAINT`. *Why an explicit line and not a blank
+box:* the band is fixed-height and always visible, so "nothing is wrong" and "the lint
+never ran" would look identical if it rendered empty — precisely the distinction a
+diagnostics surface exists to make. `FAINT` rather than a success green because the
+absence of a problem shouldn't be the loudest thing on screen.
+
+### What `lossy_env_overwrites` detects
+
+Env vars where one module's `Set` or `Unset` discards a value an **earlier, different**
+module already contributed. Derived by reading `ritz_core::builder::build_env_block`,
+which folds one accumulator per var name across modules in declaration order:
+
+| earlier | later | accumulator effect | warns? |
+|---|---|---|---|
+| `Set` | `Set` | value replaced | **yes** |
+| `Set` | `Append` | concatenated | no |
+| `Append` | `Append` | concatenated | no |
+| `Append` | `Set` | value replaced, the append is gone | **yes** |
+| `Set`/`Append` | `Unset` | value cleared | **yes** |
+| `Unset` | `Set`/`Append` | writes into an already-empty accumulator | no |
+
+Two judgement calls, both deliberate:
+
+- **`Append` then `Set` warns; `Set` then `Append` does not.** The pair is lossy in only
+  one order. `build_env_block` folds in module declaration order, so the order the lint
+  sees is the order that will run — the asymmetry is real, not an artefact. Silently
+  swallowing another module's append would be worse than the false positive this replaced.
+- **`Unset` then `Set` does not warn.** An `Unset` carries no value, so a later write
+  destroys nothing; only an intent is overridden. The lint is about data loss, and firing
+  on overridden intent would put it back to crying wolf.
+
+Loss is reported **across modules only** — a single module's own step sequence is authored
+deliberately. `ENV_VARS` and `GAME_ENV_VARS` are analysed independently, because
+`build_env_block` is called once per block and the same name in the two is two variables.
+
+*Why this replaced `set_set_collisions`* (2026-07-19, user-reported against
+`RADV_PERFTEST`): the old lint recovered per-module attribution by re-running
+`assemble_launch` on each module **in isolation** and looking for `EnvAction::Set`. That
+cannot work — `EnvAction` has only `Set(String)` and `Unset`, so the fold reports anything
+holding a value as `Set(final)`. A module whose only op is `Append` has nothing to append
+to when assembled alone and came back as `Set`, so **every `Append` looked like a `Set`**
+and two modules appending to one var — the correct, lossless way to share it — raised a
+data-loss warning. It also missed real losses: `Set` then `Unset` assembles to one `Set`
+and one `Unset`, only one "setter", so it stayed silent. The replacement models the
+accumulator directly instead of asking the assembler, which is the only way to see the op
+kind and the order that `LaunchCommand` has already erased.
+
+*Why it lives in `ritz-app` and not `ritz-core`:* it needs nothing that isn't already
+public (`Resolution::var_store`, `VarStore::interpolate`/`lookup_fn`,
+`condition::eval_opt`), and it is an opinion about what to warn a module author about —
+not a rule the launcher enforces. Core owns what the fold *does*; the GUI owns what the
+editor *says about it*.
 
 ### Interactive, into a scratch layer that never reaches disk (S5a)
 

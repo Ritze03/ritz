@@ -350,6 +350,37 @@ renames in the scratch preview."
 
 ## Applied
 
+### 2026-07-19 — diagnostics band opened (partial, ahead of the full panel)
+
+`ide_editor_band` is no longer empty. The env-overwrite lint moved into it from
+`ide_launch_band`, rendered by `render_ide_diagnostics_band` — a `DIAGNOSTICS` heading row
+(title left, right-aligned tally opposite) over a framed scrolling list, with a quiet
+`✔ No issues.` empty state. Behaviour and full rationale live in
+[`../features/settings-gui.md`](../features/settings-gui.md), section "Diagnostics band";
+only what this changes about *the plan* is recorded here.
+
+**Changes to the plan:**
+
+- The plan's diagnostics panel (ok / warning / error counts plus a list) is **still the
+  target** — this is a down payment on it, not a substitute. The shape was chosen so the
+  panel grows into it: counts append to the existing heading row, additional lints append
+  to the existing list, and neither moves anything else. Nothing here has to be torn out.
+- **The band stays `exact_height(198.0)` permanently**, not just while it was empty. A
+  variable-height band would reflow the editor column above it whenever the warning count
+  changed — an editor that jumps while you type in it. Growth goes into the scroll area,
+  never into the band's height.
+- **Config mode does not get this.** `ide_editor_band` exists only under `Mode::Ide`, so
+  Config mode keeps the lint in its own launch band. The detection fix applies to both;
+  only the IDE surface relocated.
+- The lint itself was **wrong, not just misplaced** — it counted every `Append` as a `Set`
+  and warned on lossless module pairs (user-reported against `RADV_PERFTEST`), while
+  missing real `Set`-then-`Unset` losses. `set_set_collisions` → `lossy_env_overwrites`,
+  with an order-aware accumulator model and a loss table; see the feature doc. Worth
+  noting for the eventual panel: **the assembled `LaunchCommand` cannot support most
+  diagnostics.** `EnvAction` has only `Set`/`Unset`, so op kind, ordering and per-module
+  attribution are all erased by the time the assembler returns. Any further lint of this
+  family has to walk the specs itself, the way this one now does.
+
 ### 2026-07-19 — S5 shipped (interactive preview + preview game selector)
 
 `WriteTarget { Scope, Preview }`, `preview_config` / `preview_preset` / `preview_game`,

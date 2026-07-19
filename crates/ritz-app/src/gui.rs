@@ -12,7 +12,6 @@ use anyhow::Result;
 use egui::text::{LayoutJob, TextFormat};
 use egui::Color32;
 use ritz_core::condition;
-use ritz_core::builder::EnvAction;
 use ritz_core::config::{self as core_config, AuthorsMap, GameConfig, GeneralConfig, InheritanceDisplayMode, Paths, Preset};
 use ritz_core::extension::{self as core_extension, ExtensionLoadError};
 use ritz_core::resolve::{self, Provenance, Resolution};
@@ -1845,8 +1844,8 @@ impl GuiApp {
 
         // Assemble the launch preview. In the module editor, splice the in-memory
         // draft over its on-disk entry so the preview reflects unsaved edits, and
-        // lint for set/set env collisions across modules.
-        let (preview, collisions): (String, Vec<String>) = if self.mode == Mode::Ide {
+        // lint for env values one module discards out from under another.
+        let (preview, diagnostics): (String, Vec<EnvOverwrite>) = if self.mode == Mode::Ide {
             // S5b: resolve the band through the scratch layer, the same way
             // `render_ide_preview_panel` resolves its form. `resolve_specs_for_game`
             // would assemble against the ambient game's stored config, so the band
@@ -1857,7 +1856,7 @@ impl GuiApp {
             let text = context::assemble_launch(&ide_specs, &res, &self.game_command)
                 .map(|lc| lc.to_string())
                 .unwrap_or_else(|e| format!("<error: {e}>"));
-            let coll = set_set_collisions(&ide_specs, &res);
+            let coll = lossy_env_overwrites(&ide_specs, &res);
             (text, coll)
         } else if matches!(self.nav_sel, NavSel::ModuleEditor(_)) {
                 match &self.module_draft {
@@ -1873,7 +1872,7 @@ impl GuiApp {
                             context::assemble_launch(&preview_specs, &res, &self.game_command)
                                 .map(|lc| lc.to_string())
                                 .unwrap_or_else(|e| format!("<error: {e}>"));
-                        let coll = set_set_collisions(&preview_specs, &res);
+                        let coll = lossy_env_overwrites(&preview_specs, &res);
                         (text, coll)
                     }
                     None => (String::new(), Vec::new()),
@@ -1974,17 +1973,23 @@ impl GuiApp {
                         }
                     });
             }
-            self.render_ide_preview_panel(ctx, &ide_specs, &preview, &collisions, dynamic_preview);
-            // Reserved, declared-but-empty: the future diagnostics pane under the
-            // editor column. `exact_height(198.0)` is the same band height as the
-            // nav footer, so the two bottom edges align across the window.
+            self.render_ide_preview_panel(ctx, &ide_specs, &preview, dynamic_preview);
+            // The diagnostics band under the editor column — no longer empty as of
+            // 2026-07-19, but still `exact_height(198.0)`: the same band height as
+            // the nav footer and the launch band beside it, so all three bottom
+            // edges align across the window. It must stay fixed even as content
+            // grows, because a variable height here would reflow the editor column
+            // above it on every keystroke that changed the warning count.
+            let mono = self.general_config.mono_ui;
             egui::TopBottomPanel::bottom("ide_editor_band")
                 .exact_height(198.0)
                 .show_separator_line(true)
                 .frame(egui::Frame::none()
                     .fill(theme::PANEL2)
                     .inner_margin(egui::Margin::same(16.0)))
-                .show(ctx, |_ui| {});
+                .show(ctx, |ui| {
+                    render_ide_diagnostics_band(ui, &diagnostics, mono);
+                });
         }
 
         // Config mode only. *Why skipped entirely rather than emptied:* a
@@ -2018,13 +2023,17 @@ impl GuiApp {
                         .small(),
                     );
                 }
-                for var in &collisions {
+                // Config mode keeps its lint here, in the launch band. *Why not
+                // moved like IDE mode's* (2026-07-19): there is no editor band in
+                // Config mode to move it *to* — `ide_editor_band` is declared only
+                // under `self.mode == Mode::Ide`. Same corrected detection, same
+                // `icon_sep` spacing; only the IDE surface relocates.
+                let sep = icon_sep(self.general_config.mono_ui);
+                for d in &diagnostics {
                     ui.label(
-                        egui::RichText::new(format!(
-                            "\u{f071} Two modules both Set {var} — one value will be lost.",
-                        ))
-                        .color(theme::COL_GLOBAL)
-                        .small(),
+                        egui::RichText::new(format!("\u{f071}{sep}{}", d.message()))
+                            .color(theme::COL_GLOBAL)
+                            .small(),
                     );
                 }
                 ui.add_space(8.0);
@@ -3852,24 +3861,245 @@ fn apply_deferred(draft: &mut ModuleDraft, d: Deferred) {
     }
 }
 
-/// UI-side lint over the preview: env var names that more than one module `Set`s,
-/// where the later fold silently discards a value. Returns names sorted.
-fn set_set_collisions(specs: &[Extension], res: &Resolution) -> Vec<String> {
-    let mut setters: BTreeMap<String, std::collections::HashSet<String>> = BTreeMap::new();
-    for spec in specs {
-        if let Ok(lc) = context::assemble_launch(std::slice::from_ref(spec), res, &[]) {
-            for (name, action) in lc.env_vars.iter().chain(lc.game_env_vars.iter()) {
-                if matches!(action, EnvAction::Set(_)) {
-                    setters.entry(name.clone()).or_default().insert(spec.id());
+/// One env var where a module's `Set` or `Unset` throws away a value an
+/// **earlier, different** module already contributed to the same var.
+///
+/// *Which combinations actually lose data* (2026-07-19) — derived by reading
+/// `ritz_core::builder::build_env_block`, which folds one `EnvAccum` per var name
+/// across every module in declaration order, then every `Builder` step in
+/// declaration order:
+///
+/// | earlier steps | later step | accumulator effect | lossy? |
+/// |---|---|---|---|
+/// | `Set`    | `Set`    | `accum.value = value` — the old value is gone | **yes** |
+/// | `Set`    | `Append` | `accum.value = old + sep + new` | no |
+/// | `Append` | `Append` | `accum.value = old + sep + new` | no |
+/// | `Append` | `Set`    | `accum.value = value` — the appended text is gone | **yes** |
+/// | `Set`/`Append` | `Unset` | `accum.value.clear()`, `unset = true` | **yes** |
+/// | `Unset`  | `Set`/`Append` | writes into an accumulator already cleared | no |
+///
+/// Two deliberate judgement calls behind that table:
+///
+/// - **`Append` then `Set` warns, `Set` then `Append` does not.** The pair is
+///   lossy *only in one order*, and `build_env_block` folds in module declaration
+///   order, so the order the lint sees is the order that will actually run — the
+///   asymmetry is real, not an artefact. Warning on the harmless order is the bug
+///   this replaced; staying silent while a `Set` swallows another module's append
+///   would be the worse failure, so the lossy order still warns.
+/// - **`Unset` then `Set` does not warn.** An `Unset` carries no value, so nothing
+///   is *lost* when a later write lands on top of it — only an intent is
+///   overridden. The user's report is specifically about data loss, and a lint
+///   that also fired on overridden intent would be back to crying wolf.
+///
+/// Loss is only reported **across modules**. A single module's own steps are an
+/// authored sequence (`Set` a base, `Append` extras, `Unset` under some
+/// condition); its author chose that order and does not need warning about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EnvOverwrite {
+    /// Env var name, after interpolation — what the fold actually keys on.
+    var: String,
+    /// Display names of the modules whose contribution is discarded, in fold order.
+    victims: Vec<String>,
+    /// Display name of the module whose step discards it.
+    culprit: String,
+    /// `true` when the discarding op was `Unset` (the var ends up gone entirely,
+    /// not merely rewritten) — the two cases read differently to a user.
+    by_unset: bool,
+}
+
+impl EnvOverwrite {
+    /// The one-line diagnostic text. Kept off the layout code so the future
+    /// diagnostics panel can reuse it verbatim.
+    fn message(&self) -> String {
+        let victims = self.victims.join(", ");
+        if self.by_unset {
+            format!("{} unsets {} after {} set it — that value is lost.",
+                self.culprit, self.var, victims)
+        } else {
+            format!("{} overwrites {} — the value from {} is lost.",
+                self.culprit, self.var, victims)
+        }
+    }
+}
+
+/// UI-side lint over the launch preview: env vars where one module's `Set` or
+/// `Unset` discards a value an earlier module already contributed. Sorted by var
+/// name, then by the module doing the discarding.
+///
+/// *Why this is no longer "two modules both `Set`"* (2026-07-19): the previous
+/// `set_set_collisions` recovered the per-module attribution that the shared fold
+/// throws away by re-running `context::assemble_launch` on each module **in
+/// isolation** and looking for `EnvAction::Set`. That cannot work, because
+/// `ritz_core::builder::EnvAction` has only `Set(String)` and `Unset` variants — `build_env_block`
+/// collapses every op into one accumulator and emits `EnvAction::Set(final)` for
+/// anything that ended up holding a value at all. A module whose only op is
+/// `Append` has nothing to append *to* when assembled alone, so it came back as
+/// `Set(its_own_value)` and was counted as a setter. **Every `Append` looked like
+/// a `Set`**, so two modules appending to one var — the correct, lossless way to
+/// share it — raised a data-loss warning. Reported by the user against
+/// `RADV_PERFTEST`.
+///
+/// So this no longer asks the assembler what happened. It walks the specs in the
+/// same order `build_env_block` folds them and models the accumulator directly,
+/// which is the only way to see the op *kind* and the *order* — both of which the
+/// assembled `LaunchCommand` has already erased.
+///
+/// *Why it stays in `ritz-app` and not `ritz-core`:* it needs nothing that isn't
+/// already public (`Resolution::var_store`, `VarStore::interpolate`/`lookup_fn`,
+/// `condition::eval_opt`), and it is a UI lint over a preview — an opinion about
+/// what to warn a module author about, not a rule the launcher enforces. Core
+/// stays the source of truth for what the fold *does*; this file owns what the
+/// editor *says about it*.
+fn lossy_env_overwrites(specs: &[Extension], res: &Resolution) -> Vec<EnvOverwrite> {
+    let mut out: Vec<EnvOverwrite> = Vec::new();
+    // ENV_VARS and GAME_ENV_VARS get one `build_env_block` call each, so they get
+    // one accumulator map each: the same name in both blocks is two independent
+    // variables and never collides. (The old lint chained the two blocks together
+    // and would have cross-reported them — a second, quieter false positive.)
+    let blocks: [fn(&Extension) -> &[EnvVarSpec]; 2] =
+        [|e| &e.env_vars, |e| &e.game_env_vars];
+    for select in blocks {
+        // var name → modules (id, display name) whose text is in the accumulator
+        // right now, in fold order. Empty = nothing there to lose.
+        let mut live: IndexMap<String, Vec<(String, String)>> = IndexMap::new();
+        for spec in specs {
+            let id = spec.id();
+            let name = spec.meta.name.clone();
+            let vars = res.var_store(&id);
+            let lookup = vars.lookup_fn();
+            // An unparseable `Requires` is treated as "does not apply", matching
+            // what the user sees: `build_env_block` propagates the parse error and
+            // `assemble_launch` fails outright, so nothing from this spec lands.
+            for ev in select(spec) {
+                if !condition::eval_opt(ev.requires.as_deref(), &lookup).unwrap_or(false) {
+                    continue;
+                }
+                let var = vars.interpolate(&ev.name);
+                if var.is_empty() {
+                    // `build_env_block` skips empty names before touching the map.
+                    continue;
+                }
+                for step in &ev.builder {
+                    if !condition::eval_opt(step.requires.as_deref(), &lookup).unwrap_or(false) {
+                        continue;
+                    }
+                    let holders = live.entry(var.clone()).or_default();
+                    match step.op {
+                        // Concatenates onto whatever is there; loses nothing, and
+                        // adds this module to the set of contributors a later
+                        // `Set`/`Unset` would destroy.
+                        EnvOp::Append => {
+                            if !holders.iter().any(|(hid, _)| *hid == id) {
+                                holders.push((id.clone(), name.clone()));
+                            }
+                        }
+                        // Both replace the accumulated value outright. Anything a
+                        // *different* module put there is gone.
+                        EnvOp::Set | EnvOp::Unset => {
+                            let victims: Vec<String> = holders
+                                .iter()
+                                .filter(|(hid, _)| *hid != id)
+                                .map(|(_, hname)| hname.clone())
+                                .collect();
+                            if !victims.is_empty() {
+                                out.push(EnvOverwrite {
+                                    var: var.clone(),
+                                    victims,
+                                    culprit: name.clone(),
+                                    by_unset: step.op == EnvOp::Unset,
+                                });
+                            }
+                            // After a `Set` this module owns the value alone; after
+                            // an `Unset` there is no value at all, so a later write
+                            // destroys nothing and must not warn.
+                            holders.clear();
+                            if step.op == EnvOp::Set {
+                                holders.push((id.clone(), name.clone()));
+                            }
+                        }
+                    }
                 }
             }
         }
     }
-    setters
-        .into_iter()
-        .filter(|(_, m)| m.len() > 1)
-        .map(|(k, _)| k)
-        .collect()
+    out.sort_by(|a, b| a.var.cmp(&b.var).then_with(|| a.culprit.cmp(&b.culprit)));
+    out.dedup();
+    out
+}
+
+/// Contents of `ide_editor_band` — the diagnostics band under the editor column.
+///
+/// Deliberately shaped as a *down payment* on the full diagnostics panel the IDE
+/// plan calls for (ok / warning / error counts plus a list), not as something that
+/// has to be torn out to build it:
+///
+/// - The header is a **row**, not a bare label: the title sits left, a right-aligned
+///   tally sits opposite it. Today the tally has one severity in it; adding ok and
+///   error counts is appending to that row, and nothing below moves.
+/// - The list is a **scroll area inside the framed box**, matching the launch band
+///   beside it pixel for pixel (same `FIELD` fill, `BORDER` stroke, 8px rounding,
+///   13/11 margins). The two 198px bands are peers and have to read as peers; more
+///   diagnostics simply scroll rather than growing the band.
+///
+/// *Why an explicit "No issues" line rather than an empty box:* the band is a fixed
+/// 198px and always visible, so "nothing wrong" and "lint didn't run" would look
+/// identical if it rendered blank — the one state a diagnostics surface most needs
+/// to distinguish. It is drawn in `FAINT`, not a success green: the quiet absence of
+/// a problem is not an achievement to celebrate, and a coloured line would pull the
+/// eye to the emptiest thing on screen.
+fn render_ide_diagnostics_band(ui: &mut egui::Ui, diagnostics: &[EnvOverwrite], mono: bool) {
+    let sep = icon_sep(mono);
+    ui.horizontal(|ui| {
+        ui.label(theme::header_label("Diagnostics"));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if !diagnostics.is_empty() {
+                let n = diagnostics.len();
+                let word = if n == 1 { "warning" } else { "warnings" };
+                ui.label(
+                    egui::RichText::new(format!("{n} {word}"))
+                        .color(theme::COL_GLOBAL)
+                        .size(11.0)
+                        .strong(),
+                );
+            }
+        });
+    });
+    ui.add_space(8.0);
+    egui::Frame::none()
+        .fill(theme::FIELD)
+        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        .rounding(egui::Rounding::same(8.0))
+        .inner_margin(egui::Margin::symmetric(13.0, 11.0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            // Fill the rest of the fixed band, less this frame's own 11+11 vertical
+            // inner margin — the same arithmetic the launch band uses so the two
+            // boxes end on the same baseline. Unconditional here: unlike the launch
+            // band there is no `dynamic_preview` variant, because the band's height
+            // is not allowed to move.
+            let box_h = ui.available_height();
+            ui.set_min_height((box_h - 22.0).max(0.0));
+            egui::ScrollArea::vertical()
+                .id_salt("ide_diag_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if diagnostics.is_empty() {
+                        ui.label(
+                            egui::RichText::new(format!("\u{f00c}{sep}No issues."))
+                                .color(theme::FAINT)
+                                .small(),
+                        );
+                        return;
+                    }
+                    for d in diagnostics {
+                        ui.label(
+                            egui::RichText::new(format!("\u{f071}{sep}{}", d.message()))
+                                .color(theme::COL_GLOBAL)
+                                .small(),
+                        );
+                    }
+                });
+        });
 }
 
 impl GuiApp {
@@ -4017,7 +4247,6 @@ impl GuiApp {
         ctx: &egui::Context,
         ide_specs: &[Extension],
         preview: &str,
-        collisions: &[String],
         dynamic_preview: bool,
     ) {
         let NavSel::ModuleEditor(id) = self.nav_sel.clone() else {
@@ -4085,15 +4314,11 @@ impl GuiApp {
                     // "Preview against" selector (S5b). A second, non-interactive
                     // statement of the same fact three columns away would just be a
                     // thing that can go stale.
-                    for var in collisions {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "\u{f071} Two modules both Set {var} — one value will be lost.",
-                            ))
-                            .color(theme::COL_GLOBAL)
-                            .small(),
-                        );
-                    }
+                    // No env-collision lint here any more (2026-07-19). It moved to
+                    // `ide_editor_band` — the band under the *editor* column, which
+                    // is the diagnostics surface. Keeping a copy here would put the
+                    // same warning on screen twice, in the panel that is supposed to
+                    // show what the launch *is*, not what is wrong with it.
                     ui.add_space(8.0);
                     egui::Frame::none()
                         .fill(theme::FIELD)
@@ -7908,5 +8133,114 @@ mod tests {
 
         app.unset_scoped("Ritze", "Core", "kbd_layout");
         assert_eq!(app.game_config.get_value("Ritze", "Core", "kbd_layout"), None);
+    }
+
+    /// Build a one-var module with the given ops, in order.
+    /// `("Append", "x")` → one `Builder` step appending `x`.
+    fn env_module(name: &str, var: &str, ops: &[(&str, &str)]) -> Extension {
+        let builder: Vec<Value> = ops
+            .iter()
+            .map(|(op, val)| json!({ "Type": op, "Value": val }))
+            .collect();
+        serde_json::from_value(json!({
+            "Extension": { "Author": "T", "Name": name, "Version": "1" },
+            "ENV_VARS": [ { "Name": var, "Builder": builder } ]
+        }))
+        .unwrap()
+    }
+
+    /// The regression this replaced `set_set_collisions` for: two modules both
+    /// **appending** to one var lose nothing, and must not warn.
+    ///
+    /// This is the case the user hit on `RADV_PERFTEST`. It fails against the old
+    /// implementation by construction: that one re-assembled each module alone and
+    /// called anything that came back as `EnvAction::Set(_)` a setter — and a lone
+    /// `Append` assembles to exactly that, because the fold has no `Append` variant
+    /// to report. Verified by reverting the detection and watching this assert fire.
+    #[test]
+    fn append_append_is_not_a_loss() {
+        let specs = [
+            env_module("A", "RADV_PERFTEST", &[("append", "gpl")]),
+            env_module("B", "RADV_PERFTEST", &[("append", "nggc")]),
+        ];
+        assert_eq!(lossy_env_overwrites(&specs, &Resolution::default()), Vec::new());
+    }
+
+    /// `Set` then `Append` also concatenates — the append lands on top of the set,
+    /// nothing is discarded. The old lint counted both modules as setters here too.
+    #[test]
+    fn set_then_append_is_not_a_loss() {
+        let specs = [
+            env_module("A", "V", &[("set", "base")]),
+            env_module("B", "V", &[("append", "extra")]),
+        ];
+        assert_eq!(lossy_env_overwrites(&specs, &Resolution::default()), Vec::new());
+    }
+
+    /// The genuine losses, and who gets named for each.
+    #[test]
+    fn set_and_unset_over_another_module_are_losses() {
+        let res = Resolution::default();
+
+        // Set over Set — the original, correct case.
+        let ss = lossy_env_overwrites(
+            &[env_module("A", "V", &[("set", "a")]), env_module("B", "V", &[("set", "b")])],
+            &res,
+        );
+        assert_eq!(ss.len(), 1);
+        assert_eq!(ss[0].var, "V");
+        assert_eq!(ss[0].culprit, "B");
+        assert_eq!(ss[0].victims, vec!["A".to_string()]);
+        assert!(!ss[0].by_unset);
+
+        // Append THEN Set: order-dependent, and lossy in this order — B's `Set`
+        // discards the text A appended. The reverse order is `set_then_append_is_
+        // not_a_loss` above, and stays silent. Losing an append silently is worse
+        // than the false positive we removed, so this one warns.
+        let as_ = lossy_env_overwrites(
+            &[env_module("A", "V", &[("append", "a")]), env_module("B", "V", &[("set", "b")])],
+            &res,
+        );
+        assert_eq!(as_.len(), 1);
+        assert_eq!(as_[0].culprit, "B");
+        assert!(!as_[0].by_unset);
+
+        // Unset over a value is a loss, and reads as its own kind.
+        let su = lossy_env_overwrites(
+            &[env_module("A", "V", &[("set", "a")]), env_module("B", "V", &[("unset", "")])],
+            &res,
+        );
+        assert_eq!(su.len(), 1);
+        assert!(su[0].by_unset);
+        assert!(su[0].message().contains("unsets V"));
+
+        // Unset THEN Set: the unset carried no value, so the later write destroys
+        // nothing. Intent is overridden; data is not lost. Deliberately silent.
+        let us = lossy_env_overwrites(
+            &[env_module("A", "V", &[("unset", "")]), env_module("B", "V", &[("set", "b")])],
+            &res,
+        );
+        assert_eq!(us, Vec::new());
+    }
+
+    /// A single module's own `Set` after its own `Append` is an authored sequence,
+    /// not a collision — the lint is strictly cross-module.
+    #[test]
+    fn one_modules_own_steps_never_collide_with_themselves() {
+        let specs = [env_module("A", "V", &[("append", "x"), ("set", "y"), ("unset", "")])];
+        assert_eq!(lossy_env_overwrites(&specs, &Resolution::default()), Vec::new());
+    }
+
+    /// ENV_VARS and GAME_ENV_VARS get separate accumulators in `build_env_block`,
+    /// so the same name in the two blocks is two variables and never collides.
+    #[test]
+    fn env_and_game_env_blocks_do_not_cross_report() {
+        let a = env_module("A", "V", &[("set", "a")]);
+        let b: Extension = serde_json::from_value(json!({
+            "Extension": { "Author": "T", "Name": "B", "Version": "1" },
+            "GAME_ENV_VARS": [ { "Name": "V", "Builder": [ { "Type": "set", "Value": "b" } ] } ]
+        }))
+        .unwrap();
+        assert_eq!(lossy_env_overwrites(&[a, b], &Resolution::default()), Vec::new());
     }
 }
