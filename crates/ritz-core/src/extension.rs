@@ -405,7 +405,7 @@ mod tests {
         )
         .unwrap();
 
-        let (exts, errors) = load_all(&[tmp.clone()]).expect("load_all");
+        let (exts, errors) = load_all(std::slice::from_ref(&tmp)).expect("load_all");
         assert_eq!(exts.len(), 2, "both distinct-id modules load");
         assert!(
             errors.iter().any(|e| matches!(

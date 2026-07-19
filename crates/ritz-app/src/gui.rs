@@ -10963,7 +10963,7 @@ mod tests {
         let mut draft = draft_from(sample_manifest(), true);
         draft.sections[0].1.push(new_field(String::new()));
         assert!(draft.dirty());
-        assert!(!core_extension::validate(&draft.snapshot()).is_ok());
+        assert!(core_extension::validate(&draft.snapshot()).is_err());
         assert!(!draft.save_enabled(), "invalid manifest must block Save");
     }
 
@@ -11749,19 +11749,6 @@ mod tests {
         );
     }
 
-    /// **Issue #8.** The IDE preview shades inheritance depth against its **own**
-    /// preset chain.
-    ///
-    /// Three properties in one, because the bug and its original fix are two sides
-    /// of the same branch:
-    /// 1. a preview pointed at a game whose profile has a parent gets a real
-    ///    chain, deepest-first — this is what was inert;
-    /// 2. a preview pointed at nothing gets an empty chain, which is *correct* and
-    ///    must stay that way (there is no chain to shade against);
-    /// 3. the preview's chain is its own, not the one belonging to whatever
-    ///    `nav_sel` still holds behind IDE mode — the property the `Preview` arm
-    ///    was originally added for, and the one a naive "just delete the arm" fix
-    ///    would regress.
     // ── Deleting a profile sweeps every reference to it (issue #36) ─────────
     //
     // `delete_profile` used to fix only `self.game_config` (the ambient game).
@@ -11936,6 +11923,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// **Issue #8.** The IDE preview shades inheritance depth against its **own**
+    /// preset chain.
+    ///
+    /// Three properties in one, because the bug and its original fix are two sides
+    /// of the same branch:
+    /// 1. a preview pointed at a game whose profile has a parent gets a real
+    ///    chain, deepest-first — this is what was inert;
+    /// 2. a preview pointed at nothing gets an empty chain, which is *correct* and
+    ///    must stay that way (there is no chain to shade against);
+    /// 3. the preview's chain is its own, not the one belonging to whatever
+    ///    `nav_sel` still holds behind IDE mode — the property the `Preview` arm
+    ///    was originally added for, and the one a naive "just delete the arm" fix
+    ///    would regress.
     #[test]
     fn ide_preview_shades_against_its_own_preset_chain_not_nav_sels() {
         let base = std::env::temp_dir().join(format!(
