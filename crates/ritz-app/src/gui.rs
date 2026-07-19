@@ -710,6 +710,24 @@ struct Detect {
     /// that bypasses all three of the preview's guards, because it happens outside
     /// the render call they wrap.
     target: WriteTarget,
+    /// The `Mode` in force when the detection was *started*.
+    ///
+    /// *Why this has to be captured too, and can't be derived from `target`*
+    /// (2026-07-19): `cancel_stale_detect` needs to notice "started in the IDE
+    /// preview, but the user has since left IDE mode" even though `nav_sel` alone
+    /// doesn't change on every such transition. `target` looks like it should
+    /// carry this — `Detect::target` is `Preview` exactly when the detection
+    /// started in the preview — but `target` is a snapshot of `write_target`,
+    /// which is back to `Scope` for the rest of the frame the instant
+    /// `with_preview_writes` returns; comparing the *snapshot* against the
+    /// *live* `self.write_target` at `cancel_stale_detect` time would compare
+    /// `Preview` against `Scope` on the very next check regardless of whether the
+    /// user is still on the preview, cancelling every preview detection almost
+    /// immediately. `mode` doesn't have that problem: `self.mode` stays `Ide` for
+    /// the whole time the user is looking at IDE mode, not just for the one
+    /// render call, so comparing the captured mode against the live one actually
+    /// answers "is the user still where this detection was started".
+    mode: Mode,
 }
 
 impl GuiApp {
@@ -1056,7 +1074,7 @@ impl GuiApp {
     }
 
     /// Run `f` with every module-field write redirected to the scratch
-    /// `preview_config`, restoring [`WriteTarget::Scope`] afterwards.
+    /// `preview_config`, restoring the *previous* [`WriteTarget`] afterwards.
     ///
     /// **Guard #1 of three.** *Why a closure and not a bare
     /// `self.write_target = …` around the call:* the restore lives after `f(self)`
@@ -1068,10 +1086,25 @@ impl GuiApp {
     /// `write_target` stuck on `Preview` would be the worst possible failure: the
     /// *next* Config-mode edit would silently land in the scratch layer and be
     /// discarded.
+    ///
+    /// *Why save-and-restore rather than a hardcoded reset to `Scope`:* today
+    /// there is exactly one call site and it always starts from `Scope`, so
+    /// either form produces the same behaviour. But a hardcoded `Scope` restore
+    /// is a landmine for a future nested call — `poll_detect` already does its
+    /// own save/restore of `write_target` around a `set_scoped` call, and if that
+    /// (or any other future caller) ever ran while already inside
+    /// `with_preview_writes`, a hardcoded restore would disarm the *outer* call's
+    /// `Preview` target the moment the inner one returns, silently sending the
+    /// rest of the outer closure's writes to the real config. Saving and
+    /// restoring the value that was actually in force on entry — the same
+    /// two-line shape `poll_detect` uses — makes this re-entrant-safe by
+    /// construction: nesting can only ever narrow the redirected span, never
+    /// widen or shorten the enclosing one.
     fn with_preview_writes<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let prev = self.write_target;
         self.write_target = WriteTarget::Preview;
         let out = f(self);
-        self.write_target = WriteTarget::Scope;
+        self.write_target = prev;
         out
     }
 
@@ -4069,18 +4102,31 @@ impl GuiApp {
                             // because only then do the scope colours describe layers
                             // that are actually participating.
                             //
-                            // Guard #3: snapshot the REAL game config's module map
-                            // across the call and assert it is untouched. This
-                            // repurposes the old `debug_assert!(!changed)` — which
-                            // could not survive an interactive preview — into an
-                            // assertion of the property that actually matters. It
-                            // checks the destination, not the messenger, so it stays
-                            // meaningful no matter how the write path is refactored.
-                            let before = serde_json::to_value(&self.game_config.config.modules)
-                                .unwrap_or(Value::Null);
+                            // Guard #3: snapshot the REAL game config — the whole
+                            // `GameConfig`, not just its module map — across the
+                            // call and assert it is untouched. This repurposes the
+                            // old `debug_assert!(!changed)` — which could not
+                            // survive an interactive preview — into an assertion of
+                            // the property that actually matters. It checks the
+                            // destination, not the messenger, so it stays
+                            // meaningful no matter how the write path is
+                            // refactored.
+                            //
+                            // *Why the whole struct and not just `.config.modules`*
+                            // (2026-07-19): the assertion message claims "nothing
+                            // reached the real game config", which is broader than
+                            // module writes alone — `game_config.game.name`,
+                            // `game_config.game.appid` and `config.general` all
+                            // live outside `.config.modules` and would sail through
+                            // a modules-only snapshot untouched by this check.
+                            // `GameConfig` is already `Serialize` (derived in
+                            // `ritz-core`), so this costs nothing but a wider
+                            // `to_value` call.
+                            let before =
+                                serde_json::to_value(&self.game_config).unwrap_or(Value::Null);
                             let show_legend = self.preview_game.is_some();
-                            // Guard #1: `with_preview_writes` restores
-                            // `WriteTarget::Scope` on every path out — see its doc.
+                            // Guard #1: `with_preview_writes` restores the caller's
+                            // prior `WriteTarget` on every path out — see its doc.
                             let changed = self.with_preview_writes(|s| {
                                 s.render_module_settings_body(
                                     ui,
@@ -4091,8 +4137,8 @@ impl GuiApp {
                                     show_legend,
                                 )
                             });
-                            let after = serde_json::to_value(&self.game_config.config.modules)
-                                .unwrap_or(Value::Null);
+                            let after =
+                                serde_json::to_value(&self.game_config).unwrap_or(Value::Null);
                             debug_assert_eq!(
                                 before, after,
                                 "IDE preview edit reached the real game config"
@@ -4926,6 +4972,7 @@ impl GuiApp {
             var: field.variable.clone(),
             nav: self.nav_sel.clone(),
             target: self.write_target,
+            mode: self.mode,
         });
     }
 
@@ -4943,8 +4990,34 @@ impl GuiApp {
     /// Comparing against a snapshot here (rather than clearing `detect` at each nav
     /// site) is deliberate: it cannot be defeated by a future `nav_sel` assignment
     /// that forgets to clear, of which there are a dozen-odd across this file.
+    ///
+    /// *Why an extra `mode` check alongside `nav`* (2026-07-19, QC on `fd726f7`):
+    /// `nav_sel == NavSel::ModuleEditor(_)` is reachable both from IDE mode (via
+    /// the interactive preview, `write_target == Preview` at start) and from
+    /// Config mode's own module-detail view (via `open_module_editor`,
+    /// `write_target == Scope` throughout) — the two are orthogonal axes (see
+    /// [`Mode`]'s doc comment). A detection started in the IDE preview keeps the
+    /// *same* `NavSel::ModuleEditor(id)` value if the user leaves IDE mode without
+    /// `nav_sel` itself changing, so the `nav` comparison alone can miss that
+    /// transition. Tried comparing `d.target` against the *live* `self.write_target`
+    /// instead of adding a second field — rejected: `write_target` is `Scope` for
+    /// almost the entire frame and only flips to `Preview` for the single
+    /// `with_preview_writes` render call, so by the time this method runs again
+    /// (next frame, or even later in the same frame via `poll_detect`) the live
+    /// value is back to `Scope` regardless of whether the user is still on the
+    /// preview — that comparison would cancel a freshly-started preview detection
+    /// almost immediately, not just a stale one. `mode`, captured once at
+    /// `start_detect` and compared against the live `self.mode`, doesn't have that
+    /// problem: `self.mode` holds `Ide` for the user's whole time in IDE mode, not
+    /// just for one render call. The condition is narrow on purpose — cancel only
+    /// when the detection started in IDE mode and the user is no longer there —
+    /// so a Config-mode detection (which was never routed through the preview) is
+    /// never affected by a `mode` value it didn't capture as `Ide`.
     fn cancel_stale_detect(&mut self) {
-        if self.detect.as_ref().is_some_and(|d| d.nav != self.nav_sel) {
+        let stale = self.detect.as_ref().is_some_and(|d| {
+            d.nav != self.nav_sel || (d.mode == Mode::Ide && self.mode != Mode::Ide)
+        });
+        if stale {
             self.detect = None;
         }
     }
@@ -7623,5 +7696,141 @@ mod tests {
         assert_eq!(draft.sections[1].0, "Main");
         apply_deferred(&mut draft, Deferred::FieldAdd(1));
         assert_eq!(draft.sections[1].1.len(), 2);
+    }
+
+    /// A minimal but fully real `GuiApp` — every field is an inert placeholder,
+    /// built by hand (not through `GuiApp::new`) because that constructor needs a
+    /// live `AppContext`: extensions actually present on disk, a real `Paths`
+    /// root it reads `general.json`/`global.json` through, a game list from a
+    /// directory scan. None of that exists in a unit test, and `Paths` itself
+    /// needs nothing but a `PathBuf` to construct (`pub base: PathBuf`, no I/O in
+    /// the constructor), so a direct struct literal is the smallest honest way to
+    /// get a `GuiApp` whose `set_scoped` / `unset_scoped` are the *real* methods
+    /// under test, not a reimplementation of their routing.
+    ///
+    /// *Why this is the seam, not a bare pure-function extraction:* the write
+    /// routing this fix touches (`with_preview_writes`, `set_scoped`,
+    /// `unset_scoped`) already lives on `&mut GuiApp` and reads/writes several of
+    /// its fields (`write_target`, `nav_sel`, `game_config`, `preview_config`,
+    /// `editing_preset_buf`, `global_config`) — extracting a "pure" stand-in
+    /// function would just be a second implementation of the routing that could
+    /// drift from the real one and pass even if the real one regressed. Building
+    /// the real struct, tedious as the literal is, is what makes the test
+    /// actually exercise the code path the fix changed.
+    fn test_app() -> GuiApp {
+        GuiApp {
+            paths: Paths { base: PathBuf::from("/nonexistent/ritz-gui-test") },
+            default_preset: None,
+            all_specs: Vec::new(),
+            all_dirs: Vec::new(),
+            all_manifests: Vec::new(),
+            all_is_folder_ext: Vec::new(),
+            extension_errors: Vec::new(),
+            cur_specs: Vec::new(),
+            cur_dirs: Vec::new(),
+            cur_is_folder_ext: Vec::new(),
+            group_by_author: true,
+            show_inheritance: true,
+            games: Vec::new(),
+            appid: "42".to_string(),
+            game_command: Vec::new(),
+            selected_ext: 0,
+            game_config: GameConfig::new("42", "Test Game"),
+            preset: None,
+            text_buffers: HashMap::new(),
+            multi_edit: HashMap::new(),
+            launch_mode: false,
+            outcome: Arc::new(Mutex::new(EditOutcome::Continue)),
+            detect: None,
+            nav_sel: NavSel::Game("42".to_string()),
+            mode: Mode::Config,
+            write_target: WriteTarget::Scope,
+            preview_config: GameConfig::new("__preview__", "None"),
+            preview_preset: None,
+            preview_game: None,
+            ide_selected: 0,
+            all_presets: Vec::new(),
+            preset_pins: HashMap::new(),
+            general_config: GeneralConfig::default(),
+            global_config: Preset::default(),
+            editing_preset_buf: None,
+            nav_name_buf: String::new(),
+            nav_appid_buf: String::new(),
+            creating_profile: false,
+            duplicating_preset: None,
+            creating_game: false,
+            focus_nav_name: false,
+            confirm: None,
+            logo: None,
+            module_draft: None,
+            pending_config_write: false,
+            module_dialog: None,
+            delete_module_purge: false,
+            carryover_report: None,
+            editor_return: None,
+            icon_cache: IconCenterCache::new(),
+        }
+    }
+
+    /// The regression `set_scoped`/`unset_scoped` need most: with
+    /// `write_target == Preview`, a write must land in `preview_config` and
+    /// leave `game_config` byte-for-byte alone — the property guard #3's
+    /// `debug_assert_eq!` at the preview render site checks by snapshot-diffing
+    /// around a whole render call. This test checks the same property directly
+    /// against the two routing functions, so it fails in `--release` builds too
+    /// (where `debug_assert_eq!` compiles out) and fails immediately at the
+    /// write, not only when a future refactor happens to touch the render site.
+    ///
+    /// Does NOT cover: `with_preview_writes` restoring `write_target` (that's
+    /// `Fix 1`, exercised implicitly by every real call but not asserted here in
+    /// isolation), `poll_detect`'s save/restore dance, or `buffer_scope_tag`'s
+    /// namespacing of `text_buffers`/`multi_edit` keys. Those are separate call
+    /// paths from the ones this test drives directly.
+    #[test]
+    fn preview_write_target_routes_to_preview_config_not_game_config() {
+        let mut app = test_app();
+        assert_eq!(app.game_config.get_value("Ritze", "Core", "kbd_layout"), None);
+        assert_eq!(app.preview_config.get_value("Ritze", "Core", "kbd_layout"), None);
+
+        app.write_target = WriteTarget::Preview;
+        app.set_scoped("Ritze", "Core", "kbd_layout", json!("de"));
+
+        // Landed in the scratch layer...
+        assert_eq!(
+            app.preview_config.get_value("Ritze", "Core", "kbd_layout"),
+            Some(&json!("de"))
+        );
+        // ...and the real game config — the one `persist()` would eventually
+        // write to `games/42.json` — is untouched.
+        assert_eq!(app.game_config.get_value("Ritze", "Core", "kbd_layout"), None);
+
+        // unset_scoped is the same story in reverse.
+        app.unset_scoped("Ritze", "Core", "kbd_layout");
+        assert_eq!(app.preview_config.get_value("Ritze", "Core", "kbd_layout"), None);
+        assert_eq!(app.game_config.get_value("Ritze", "Core", "kbd_layout"), None);
+    }
+
+    /// The converse of the test above: with `write_target == Scope` (the default,
+    /// and what every Config-mode edit still uses), a write must reach
+    /// `game_config` exactly as it did before the preview feature existed, and
+    /// must never leak into `preview_config`. Pinning this alongside the Preview
+    /// case is what makes the pair a genuine regression test for the *routing
+    /// decision*, not just for one branch of it — a change that made both
+    /// branches write the same place would fail one of these two tests.
+    #[test]
+    fn scope_write_target_routes_to_game_config_as_before() {
+        let mut app = test_app();
+        assert_eq!(app.write_target, WriteTarget::Scope);
+        assert_eq!(app.nav_sel, NavSel::Game("42".to_string()));
+
+        app.set_scoped("Ritze", "Core", "kbd_layout", json!("de"));
+        assert_eq!(
+            app.game_config.get_value("Ritze", "Core", "kbd_layout"),
+            Some(&json!("de"))
+        );
+        assert_eq!(app.preview_config.get_value("Ritze", "Core", "kbd_layout"), None);
+
+        app.unset_scoped("Ritze", "Core", "kbd_layout");
+        assert_eq!(app.game_config.get_value("Ritze", "Core", "kbd_layout"), None);
     }
 }
