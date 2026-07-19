@@ -914,6 +914,21 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   different for `Separator`: `builder.rs` reads an absent separator as `","`. Regression:
   `rendering_a_draft_without_touching_it_leaves_it_clean` renders every bundled manifest
   headless with no input and asserts the draft stays clean.
+- **Rendering a Selection field must not create its `Options` list** (2026-07-19, the
+  structural sibling of the rule above). The Selection arm of the field editor reads its
+  option rows through `selection_options(&mut field.options)`, which yields an **empty
+  slice** when `Options` is absent or holds an `OptionsSpec::Range`. The mutating
+  `ensure_list` — which installs `Some(Options: [])` — is now reachable **only** from
+  `Deferred::FieldOptAdd`, i.e. a click on "Add option".
+  *Why a shape change and not a `changed()` gate:* the text write-backs mutate *after*
+  their widget, so there is a `Response` to gate on; `ensure_list` had to run *before* the
+  option rows could be drawn, because it was what produced the `&mut Vec<String>` to draw
+  from. There was nothing to gate. So the renderer stopped needing the list to exist.
+  No bundled manifest reaches either trigger state (every shipped Selection field has an
+  array `Options`), which is why this one stayed latent: only a user-authored module — a
+  Selection driven by `DisplayOptions` alone, or one just switched over from Integer and
+  still carrying a `Range` — would have opened dirty. Regression:
+  `rendering_a_selection_field_never_materialises_its_options`.
 - **Staged identity edits vs Save** (Phase 3 stage 2b) — for an editable module, Author,
   Name and every *existing* field's `Variable` are editable, but their edits go into a
   separate `PendingIdentity` (`identity.author` / `identity.name` /
@@ -1049,6 +1064,15 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   `EDITOR_LABEL_W` (96px — `render_field`'s 260px reserve at editor scale) and returns the
   control width from the pure `editor_control_width(remaining, reserve)`, so every textbox
   in a card starts and ends at the same x instead of each sizing to its leftover space.
+  A label wider than the reserve does **not** clip — `(EDITOR_LABEL_W - used).max(0.0)`
+  simply stops padding — it silently pushes that one row's control right and breaks the
+  alignment. `every_editor_row_label_fits_the_label_column` measures every label in both
+  UI fonts against the 96px reserve so that can't land unnoticed; widest today is
+  "Description" at 73px (mono, the wider font). Add a row, add its label to the test's
+  `EDITOR_ROW_LABELS`. *Naming (2026-07-19):* the env-var row says **"Var Name"**, not
+  "Name" — three other editor rows already say "Name" for a module / section / field
+  label — and the builder step says **"Operation"**, not "Op", which next to "Value" and
+  "Separator" read as a third noun rather than the verb it is.
 - **Row alignment** — `row_actions` pushes itself to the row's right edge and then
   allocates exactly `ACTION_COL_W`, so section, field and builder rows share one right edge
   and one vertical center. Cards nest, so a deeper card's edge is inset by its parents'

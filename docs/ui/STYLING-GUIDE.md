@@ -146,6 +146,35 @@ Corner rounding is `Rounding::same(8.0)` everywhere (`round` / `round_small` in
 radius. *Why 8px and not 14px:* 8px keeps a flat edge at the app's compact control
 heights; a larger radius would round the short buttons/fields into pill ends.
 
+### Icon → text gap: always `icon_sep`
+
+Whenever a Nerd Font glyph and its label live in **one string**, separate them with
+`crates/ritz-app/src/gui.rs:icon_sep(mono)` — never a hardcoded space run:
+
+```rust
+// Correct:
+let sep = icon_sep(self.general_config.mono_ui);
+ui.label(format!("\u{f071}{sep}{msg}"));
+
+// Wrong — a literal gap that is right in at most one of the two UI fonts:
+ui.label(format!("\u{f071} {msg}"));      // too tight in proportional
+ui.label("\u{f09b}  ritz-game-launcher"); // mono's gap, worn by the sans font
+```
+
+*Why a helper and not a literal:* `mono_ui` is a user setting, and the space glyph's
+width differs sharply between Geist Mono and Geist. One mono space reads as a gap;
+one proportional space reads as no gap at all. `icon_sep` returns `" "` for mono and
+`"   "` for proportional so the *visual* gap stays constant across the toggle. Swept
+file-wide 2026-07-19 (issue #24) — the module create/fork name check, the carry-over
+report, the IDE preview's unresolved-module notice, and both GitHub footer links were
+still on literals.
+
+This applies only to glyph+text in one string. A glyph passed as its **own** argument
+gets a measured pixel gap instead and must not use `icon_sep`: `icon_button` (6.0px)
+and `nav_category_tab` (6–7px by font) lay the two out separately, and a standalone
+glyph with no adjacent text (the checkbox tick, the settings gear) needs no separator
+at all.
+
 Field rows in the settings tree follow one fixed layout, in
 `crates/ritz-app/src/gui.rs:render_field`:
 

@@ -2906,6 +2906,8 @@ impl GuiApp {
             DialogKind::Fork { .. } => ("Fork Module", "Fork"),
             DialogKind::Create => ("Create Module", "Create"),
         };
+        // Hoisted out of the closures below, which can't reach `self`.
+        let sep = icon_sep(self.general_config.mono_ui);
 
         // Modal backdrop (mirrors the confirm dialog).
         let screen = ctx.screen_rect();
@@ -2944,9 +2946,9 @@ impl GuiApp {
                 } else if author_empty {
                     ("Author is required".to_string(), theme::COL_GLOBAL)
                 } else if collides {
-                    (format!("\u{f00d} {author} :: {name} already exists"), theme::COL_GLOBAL)
+                    (format!("\u{f00d}{sep}{author} :: {name} already exists"), theme::COL_GLOBAL)
                 } else {
-                    (format!("\u{f00c} {author} :: {name} is available"), theme::COL_PROFILE)
+                    (format!("\u{f00c}{sep}{author} :: {name} is available"), theme::COL_PROFILE)
                 };
                 ui.label(egui::RichText::new(fb).color(col).small());
 
@@ -3381,6 +3383,8 @@ impl GuiApp {
         // alongside it. Move the (map-only, cheap) cache out for the duration and
         // put it back afterwards; the measurements survive across frames.
         let mut cache = std::mem::take(&mut self.icon_cache);
+        // Hoisted: `self` is borrowed out from under the closures below.
+        let sep = icon_sep(self.general_config.mono_ui);
 
         // Transient dropped-var report from the last fork snapshot, dismissible.
         if let Some(msg) = self.carryover_report.clone() {
@@ -3388,7 +3392,7 @@ impl GuiApp {
             editor_card(ui, &mut cache, theme::EDIT_L1, "Carry-over report", None, |ui, _cache| {
                 ui.horizontal(|ui| {
                     ui.label(
-                        egui::RichText::new(format!("\u{f071} {msg}"))
+                        egui::RichText::new(format!("\u{f071}{sep}{msg}"))
                             .color(theme::COL_GLOBAL)
                             .small(),
                     );
@@ -3895,8 +3899,20 @@ fn env_op_label(op: EnvOp) -> &'static str {
     }
 }
 
-/// Ensure a field's `Options` is a `List`, returning it for editing. Called only
-/// for Selection fields (a fresh Selection with no list starts empty).
+/// Ensure a field's `Options` is a `List`, returning it for editing.
+///
+/// **Mutating — call this only from a user-initiated action, never from a
+/// renderer.** It is a write-back in the sense of WRITE-BACK GATING above: for a
+/// Selection field whose `Options` is absent, or is a leftover
+/// [`OptionsSpec::Range`] from a `Type` switch, it *replaces* the value with an
+/// empty `List`. Doing that while drawing the field would dirty a draft nobody
+/// touched — the 2026-07-19 bug class, one instance of which lived at exactly
+/// this function's old render call site.
+///
+/// The only caller is therefore [`Deferred::FieldOptAdd`], which is queued by a
+/// click on "Add option": at that point materialising the list *is* the user's
+/// edit. The Selection renderer instead reads the list through
+/// [`selection_options`] and draws nothing when there is none.
 fn ensure_list(options: &mut Option<OptionsSpec>) -> &mut Vec<String> {
     if !matches!(options, Some(OptionsSpec::List(_))) {
         *options = Some(OptionsSpec::List(Vec::new()));
@@ -3904,6 +3920,25 @@ fn ensure_list(options: &mut Option<OptionsSpec>) -> &mut Vec<String> {
     match options {
         Some(OptionsSpec::List(v)) => v,
         _ => unreachable!(),
+    }
+}
+
+/// The option rows a Selection field should draw, as an editable slice.
+///
+/// The non-mutating counterpart to [`ensure_list`], and the only one a renderer
+/// may use. When `Options` is absent — or holds a [`OptionsSpec::Range`] a
+/// `Type` switch left behind — this yields an **empty slice** instead of
+/// installing `Some(List(vec![]))`, so drawing the field cannot change the
+/// draft's shape. The list only comes into existence when the user clicks
+/// "Add option" ([`Deferred::FieldOptAdd`]).
+///
+/// The strings themselves are still `&mut`: editing one in place is exactly what
+/// the option textboxes do, and that write is user-driven. What this refuses is
+/// the *structural* write that used to happen before the first pixel was drawn.
+fn selection_options(options: &mut Option<OptionsSpec>) -> &mut [String] {
+    match options {
+        Some(OptionsSpec::List(v)) => v,
+        _ => Default::default(),
     }
 }
 
@@ -4129,7 +4164,14 @@ fn render_field_editor(
         // Type-specific detail.
         match field.field_type {
             FieldType::Selection => {
-                let opts = ensure_list(&mut field.options);
+                // `selection_options`, NOT `ensure_list` — see WRITE-BACK
+                // GATING above. Rendering a Selection field must not give it an
+                // empty `Options` list it did not have; a field driven by
+                // `DisplayOptions` alone (or one just switched over from
+                // Integer, still carrying a `Range`) would otherwise be edited
+                // by the act of being looked at. No list yet simply means no
+                // option rows — "Add option" below is what creates one.
+                let opts = selection_options(&mut field.options);
                 let ol = opts.len();
                 for (oi, opt) in opts.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
@@ -4207,7 +4249,10 @@ fn render_env_block_editor(
                 Some((ei, len)),
                 |ui, cache| {
                     ui.horizontal(|ui| {
-                        let w = editor_row_label(ui, "Name", 0.0);
+                        // "Var Name", not "Name": this row names the *environment
+                        // variable*, and three other editor rows already say
+                        // "Name" for a module / section / field label.
+                        let w = editor_row_label(ui, "Var Name", 0.0);
                         ui.add(
                             egui::TextEdit::singleline(&mut spec.name)
                                 .id_salt(("env_name", game, ei))
@@ -4226,7 +4271,13 @@ fn render_env_block_editor(
                             Some((bi, sl)),
                             |ui, _cache| {
                                 ui.horizontal(|ui| {
-                                    let w = editor_row_label(ui, "Op", 0.0);
+                                    // "Operation", not "Op": next to "Value" and
+                                    // "Separator" the abbreviation reads as a
+                                    // third noun rather than the verb it is. Same
+                                    // width class as "Separator", so the fixed
+                                    // label column absorbs it — see
+                                    // `every_editor_row_label_fits_the_label_column`.
+                                    let w = editor_row_label(ui, "Operation", 0.0);
                                     egui::ComboBox::from_id_salt((game, ei, bi, "op"))
                                         .selected_text(env_op_label(step.op))
                                         .width(w)
@@ -4971,6 +5022,8 @@ impl GuiApp {
         let resolution = self.resolve_specs_for_preview(ide_specs);
         let spec = ide_specs.iter().find(|s| s.id() == id).cloned();
         let touch = self.general_config.touch_mode;
+        // Hoisted: `self` is re-borrowed inside the panel closures below.
+        let sep = icon_sep(self.general_config.mono_ui);
         // ── Column split ────────────────────────────────────────────────────
         // A STATIC 50/50: editor and preview each get exactly half of everything
         // right of the fixed `NAV_W` nav column. Recomputed from the live
@@ -5091,9 +5144,10 @@ impl GuiApp {
                                 // is a very different (and wrong) message.
                                 ui.add_space(8.0);
                                 ui.label(
-                                    egui::RichText::new(
-                                        "\u{f071} Couldn't resolve this module — preview unavailable.",
-                                    )
+                                    egui::RichText::new(format!(
+                                        "\u{f071}{sep}Couldn't resolve this module — \
+                                         preview unavailable.",
+                                    ))
                                     .color(theme::COL_GLOBAL),
                                 );
                                 return;
@@ -6360,8 +6414,12 @@ impl GuiApp {
 
     /// Repo link + project credits, shown in the bottom box on General Settings.
     fn render_about(&self, ui: &mut egui::Ui) {
+        // These two used to hardcode a double space, which is the mono gap in
+        // proportional clothing — too tight in the sans font and too loose in
+        // mono. `icon_sep` is the one place that decision lives.
+        let sep = icon_sep(self.general_config.mono_ui);
         ui.hyperlink_to(
-            egui::RichText::new("\u{f09b}  ritz-game-launcher on GitHub")
+            egui::RichText::new(format!("\u{f09b}{sep}ritz-game-launcher on GitHub"))
                 .color(theme::ACCENT)
                 .size(15.0),
             "https://github.com/Ritze03/ritz-game-launcher",
@@ -6375,7 +6433,7 @@ impl GuiApp {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 5.0;
                 ui.hyperlink_to(
-                    egui::RichText::new(format!("\u{f09b}  {name} on GitHub"))
+                    egui::RichText::new(format!("\u{f09b}{sep}{name} on GitHub"))
                         .color(theme::ACCENT)
                         .size(12.5),
                     url,
@@ -8517,6 +8575,67 @@ mod tests {
         assert_eq!(editor_control_width(-50.0, 0.0), MIN_CONTROL_W);
     }
 
+    /// Every label the editor puts in front of a control, in both UI fonts.
+    ///
+    /// Kept as a flat list rather than derived from the call sites (there is no
+    /// way to reflect over string literals): if you add an editor row, add its
+    /// label here too.
+    const EDITOR_ROW_LABELS: &[&str] = &[
+        "Author", "Name", "Var Name", "Variable", "Type", "Description",
+        "Requires", "Option", "Range", "Default", "Operation", "Value",
+        "Separator", "Command", "Priority",
+    ];
+
+    /// No editor row label may outgrow the fixed [`EDITOR_LABEL_W`] column.
+    ///
+    /// *Why this is a test and not a comment:* `editor_row_label` pads the cursor
+    /// out to a constant x so every row's control shares one left edge. A label
+    /// wider than the reserve doesn't clip — `(EDITOR_LABEL_W - used).max(0.0)`
+    /// just stops padding — it silently pushes *that one row's* control right,
+    /// breaking the alignment the whole column exists to provide. That is a
+    /// pixel-level regression nobody notices in review, and it is exactly the
+    /// risk taken on by renaming "Op" → "Operation" and "Name" → "Var Name"
+    /// (2026-07-19, issue #25). Measuring beats assuming: the widest label must
+    /// leave the reserve intact in *both* the mono and proportional UI fonts,
+    /// since `mono_ui` is a user setting and mono is the wider of the two.
+    #[test]
+    fn every_editor_row_label_fits_the_label_column() {
+        for mono in [true, false] {
+            let ctx = egui::Context::default();
+            crate::fonts::install(&ctx, mono);
+            crate::theme::apply(&ctx);
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(1200.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let mut widths: Vec<(&str, f32)> = Vec::new();
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    for label in EDITOR_ROW_LABELS {
+                        // Measured the way `editor_row_label` measures it: the
+                        // cursor advance the label costs, which includes the
+                        // `item_spacing.x` gap that follows it.
+                        ui.horizontal(|ui| {
+                            let left = ui.cursor().min.x;
+                            field_label(ui, label);
+                            widths.push((label, ui.cursor().min.x - left));
+                        });
+                    }
+                });
+            });
+            let over: Vec<_> = widths.iter().filter(|(_, w)| *w > EDITOR_LABEL_W).collect();
+            assert!(
+                over.is_empty(),
+                "mono={mono}: label(s) exceed the {EDITOR_LABEL_W}px reserve, \
+                 which would push their row's control out of alignment: {over:?}\n\
+                 all: {widths:?}",
+            );
+        }
+    }
+
     #[test]
     fn selection_tint_reproduces_sel_selbd_for_accent() {
         // theme::SEL/SELBD are ACCENT hand-run through the same formula
@@ -9591,6 +9710,74 @@ mod tests {
                 serde_json::to_string(&draft.snapshot()).unwrap(),
             );
         }
+    }
+
+    /// The same "rendering is not editing" rule, for the one **structural**
+    /// write-back that survived the 2026-07-19 sweep: `ensure_list` (issue #27).
+    ///
+    /// The Selection arm of the field editor used to call `ensure_list` to get a
+    /// `&mut Vec<String>` to draw option rows from, which *installs*
+    /// `Some(Options: [])` whenever the field's `Options` is not already a list.
+    /// Unlike the text write-backs there was nothing to gate on — the mutation
+    /// happens before the widget, not after — so the fix was to change the shape:
+    /// `selection_options` returns an empty slice instead of materialising one.
+    ///
+    /// Two reachable trigger states, both covered here:
+    ///
+    /// - **absent** `Options` — a Selection driven by `DisplayOptions` alone, and
+    ///   also what `new_field` produces the moment its `Type` combo is switched
+    ///   to Selection.
+    /// - **`Range`** `Options` — left behind by switching an Integer/Float field
+    ///   over to Selection (and expressible directly in a hand-written manifest,
+    ///   since `OptionsSpec` is `#[serde(untagged)]`).
+    ///
+    /// *Why not covered by the bundled-manifest test above:* no shipped manifest
+    /// reaches either state — every bundled Selection field has an array
+    /// `Options` — so the bug was latent and only a user-authored module could
+    /// hit it. That is exactly why it needs a fixture rather than a shipped file.
+    ///
+    /// Verified to bite: restoring `ensure_list(&mut field.options)` at the
+    /// render site fails both the `dirty()` assert and the shape asserts.
+    #[test]
+    fn rendering_a_selection_field_never_materialises_its_options() {
+        let mut draft = draft_from(
+            json!({
+                "Extension": { "Name": "Sample", "Author": "Ritze", "Version": "1.0" },
+                "UI": {"Main": [
+                    // No `Options` at all — the display labels are the whole story.
+                    {
+                        "Type": "selection", "Variable": "mode", "Name": "Mode",
+                        "DisplayOptions": ["Alpha", "Beta"]
+                    },
+                    // A `Range` a `Type` switch could have left behind.
+                    {
+                        "Type": "selection", "Variable": "level", "Name": "Level",
+                        "Options": {"min": 0.0, "max": 10.0, "step": 1.0}
+                    }
+                ]}
+            }),
+            // Read-only, like the reported case: greying the widgets out never
+            // stopped a plain assignment from running.
+            false,
+        );
+        render_editor_body_once(&mut draft);
+
+        assert!(
+            !draft.dirty(),
+            "rendering Selection fields with no list marked the draft dirty\n\
+             baseline: {}\n\
+             snapshot: {}",
+            serde_json::to_string(&draft.baseline).unwrap(),
+            serde_json::to_string(&draft.snapshot()).unwrap(),
+        );
+        // The shape-level statement, so a regression is diagnosable without
+        // diffing two JSON blobs: absent stays absent, a range stays a range.
+        let fields = &draft.sections[0].1;
+        assert!(fields[0].options.is_none(), "absent Options must stay absent");
+        assert!(
+            matches!(fields[1].options, Some(OptionsSpec::Range { .. })),
+            "a Range must not be overwritten with an empty list",
+        );
     }
 
     /// The narrow, shape-level statement of the same bug, so a regression is
