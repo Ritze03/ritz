@@ -1094,6 +1094,35 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   `ext.ui` is an `IndexMap`, so `"General"` and `"General "` are two visually identical
   keys — untrimmed, one of them silently disappeared on Save instead of being reported as
   the duplicate it is.
+
+  **`Requires` expressions** are the third member of the class (2026-07-19, issue #29).
+  `requires_edit` decided `None`-vs-`Some` on `s.trim()` but stored the raw `s`, so `"  "`
+  correctly became `None` while `" enabled "` kept its padding. `gui::normalize_requires`
+  now trims every `Requires` in the manifest — `UiField`, `ENV_VARS`/`GAME_ENV_VARS` and
+  their builder steps, `WRAPPERS` and their builder steps, `GAME_LAUNCH_ARGS` — in the same
+  `snapshot()` fold as section names.
+
+  *Why it is data hygiene and not a behaviour fix:* `condition::tokenize` skips whitespace,
+  so `" enabled "` and `"enabled"` always parsed to the same AST. What the padding broke was
+  `dirty()`, which is a **serialized-value** comparison — two logically identical drafts
+  compared unequal, re-triggering the spurious-dirty class `6f47e5a` fixed — and the padding
+  also landed verbatim in the written manifest.
+
+  *Why at the snapshot fold rather than in `requires_edit`'s write-back*, which is what the
+  issue proposed: `val` **is** the live `TextEdit` buffer, so trimming on write-back eats a
+  trailing space the instant it is typed and the user can never get from `enabled` to
+  `enabled AND !clear` — the identical hazard the block-quote above describes for identity
+  buffers. Trim on read, mutate the buffer never.
+
+  > **`normalize_requires` trims but must never collapse `Some("")` to `None`.** Bundled
+  > manifests ship an explicit `"Requires": ""` (`dxvk.json`), so `Some("")` is a real
+  > on-disk state; nulling it makes `snapshot()` differ from `baseline` and merely *opening*
+  > DXVK marks it unsaved with nothing on screen to change back. Empty and absent both mean
+  > "always true" to `condition::eval_opt`, so keeping them distinct costs nothing and keeps
+  > the round-trip byte-exact. Caught by the existing
+  > `rendering_a_draft_without_touching_it_leaves_it_clean` and
+  > `an_empty_string_in_an_optional_slot_survives_a_render`; new regression:
+  > `requires_padding_is_canonicalised_at_the_snapshot_boundary`.
 - **Save and Rename are independent operations** (2026-07-19) — **Save writes the body
   and only the body; Rename writes the identity and only the identity.** Either can be
   pressed with the other's work still pending, in either order, with no coupling gate
@@ -1332,7 +1361,9 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   colors *entered* text `theme::TEXT` (red only on a parse error), not dim.
 - **Requires** fields are live-validated via `condition::parse` (`requires_edit`): red
   text on a parse error, the wordy error shown only once the field loses focus. Any
-  unparseable `Requires` blocks Save.
+  unparseable `Requires` blocks Save. The stored value is left untrimmed while it is being
+  typed and canonicalised at the `snapshot()` boundary instead — see "Module identity is
+  always trimmed", `Requires` expressions (issue #29).
 - **Explicit Save** (`GuiApp::save_module`) is gated by `ModuleDraft::save_enabled`
   (`save_gate`: `dirty && valid && all Requires parse && !name_error`, and `editable`).
   It serializes `snapshot()` and writes via `config::write_atomic`, then reloads
@@ -1456,6 +1487,32 @@ the single `Option<ModuleDraft>` slot that every module switch used to overwrite
   identities (excluded by manifest path) and is OR-ed into all three gates:
   `refresh_draft_name_error`, `refresh_identity_state`, and the Fork/Create dialog (which
   passes no exclusion, since a new module excludes nothing).
+- **`identity_error` is meaningful on the FOCUSED draft only** (2026-07-19, issue #32).
+  `refresh_identity_state` writes through `draft_mut()`, so a background draft's marker is
+  whatever it held when it last lost focus and can be arbitrarily stale — while
+  `draft_identity_collides` *reads* every draft's staged identity. That asymmetry is real
+  but **not** reachable: every read of `identity_error` goes through `draft()` (the
+  confirm-dialog label and its blocked-reason branch, the `perform_rename` gate,
+  `editor_header_info`), `ui()` refreshes it at the top of every frame against all drafts'
+  current staged identities, and an unfocused draft's identity cannot change while unfocused
+  because only the focused draft has an open editor. So a stale marker never reaches the
+  screen and **cannot let `perform_rename` commit a colliding rename** — no on-disk
+  consequence. Left as-is rather than refreshing every draft per frame (`dirty()`-adjacent
+  work, N× per frame, for a value nothing reads).
+
+  > The invariant is "**never read `identity_error` off a draft that is not focused**". A
+  > future per-row error marker in the module tree would break it — such a caller must
+  > refresh every draft or call `draft_identity_collides` live at the read. Pinned by
+  > `identity_error_is_refreshed_on_refocus`.
+- **`identity.var_edits` is seeded in UI declaration order** (2026-07-19, issue #31). Both
+  seeding sites — `ensure_draft` and the in-place re-base at the tail of `perform_rename` —
+  used to build this `IndexMap` by iterating the `HashSet<String>` of baseline vars, making
+  the order of an *order-preserving* map nondeterministic across runs. Nothing read it in
+  order yet (`changed_var_renames` walks `sections` and looks each key up), so the only
+  symptom would have been a future UI list or diff report silently reordering itself between
+  launches — close to unreproducible once shipped. Both sites now seed from an ordered walk
+  of `spec.ui`; `baseline_vars` stays a `HashSet` because every consumer only asks
+  `contains`. Regression: `ensure_draft_seeds_var_edits_in_declaration_order`.
 - **Lifecycle.** `perform_fork` sources the **focused draft's** `snapshot()` when one is
   open, falling back to disk — pre-S4a it always read disk, so forking a module you had just
   edited silently produced a fork of the *saved* version. The original draft keeps its edits

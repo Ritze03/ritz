@@ -656,6 +656,30 @@ struct ModuleDraft {
     /// [`GuiApp::refresh_identity_state`]. `Some(msg)` = there IS a pending change
     /// but it cannot be committed (empty/colliding name, or a bad var rename);
     /// `None` = either no pending change or a committable one.
+    ///
+    /// **Meaningful on the FOCUSED draft only.** `refresh_identity_state` writes
+    /// it through `draft_mut()`, so an unfocused draft's value is whatever it held
+    /// when it last lost focus and may be arbitrarily stale.
+    ///
+    /// *Why that is sound, and not the data-integrity bug it looks like*
+    /// (2026-07-19, issue #32): the asymmetry is real — the collision check
+    /// [`GuiApp::draft_identity_collides`] *reads* every draft's staged identity
+    /// while only the focused draft's error is *written*. But every read of this
+    /// field goes through `GuiApp::draft()` (the confirm-dialog label and its
+    /// blocked-reason branch, the `perform_rename` gate, and
+    /// `editor_header_info`), i.e. the focused draft — and `ui()` runs
+    /// `refresh_identity_state` at the top of every frame, against all drafts'
+    /// current staged identities, before any of them render. An unfocused draft's
+    /// identity cannot change while unfocused (only the focused draft has an open
+    /// editor), so refocusing recomputes the value before it is next read.
+    /// A stale marker is therefore never *observed*: it cannot reach the screen
+    /// and it cannot let `perform_rename` commit a colliding rename.
+    ///
+    /// The invariant this rests on is "**never read this off a draft that is not
+    /// focused**". If a future caller needs a background draft's validity — a
+    /// per-row error marker in the module tree, say — do not read this field:
+    /// either refresh every draft or call `draft_identity_collides` live at that
+    /// read. See the regression test `identity_error_is_refreshed_on_refocus`.
     identity_error: Option<String>,
 }
 
@@ -668,6 +692,19 @@ struct ModuleDraft {
 struct PendingIdentity {
     author: String,
     name: String,
+    /// **Insertion order is the extension's own UI declaration order** — the
+    /// order the fields appear on screen — and may be relied on.
+    ///
+    /// *Why it is pinned* (2026-07-19, issue #31): both seeding sites
+    /// ([`GuiApp::ensure_draft`] and the re-base at the tail of
+    /// [`GuiApp::perform_rename`]) used to build this by iterating the
+    /// `HashSet<String>` of baseline vars, which made the order of an
+    /// order-preserving `IndexMap` nondeterministic across runs. Nothing read it
+    /// in order *yet* — `changed_var_renames` walks `sections` and looks each key
+    /// up — so the only symptom would have been a future UI list or diff report
+    /// silently reordering itself between launches, which is close to
+    /// unreproducible once it ships. Both sites now seed from an ordered walk of
+    /// `spec.ui` and the `HashSet` is only ever asked `contains`.
     var_edits: IndexMap<String, String>,
 }
 
@@ -709,7 +746,8 @@ impl ModuleDraft {
     /// `IndexMap`, so `"General"` and `"General "` are two different sections
     /// that look identical on screen. Trimming here — at the fold, not in the
     /// live `sections` buffer — keeps interior spaces ("Advanced Options")
-    /// typable while making the written manifest canonical.
+    /// typable while making the written manifest canonical. Every `Requires`
+    /// expression is canonicalised the same way — see [`normalize_requires`].
     fn snapshot(&self) -> Extension {
         let mut e = self.ext.clone();
         e.ui = self
@@ -717,6 +755,7 @@ impl ModuleDraft {
             .iter()
             .map(|(k, v)| (k.trim().to_string(), v.clone()))
             .collect();
+        normalize_requires(&mut e);
         e
     }
     fn dirty(&self) -> bool {
@@ -1002,6 +1041,61 @@ fn all_requires_parse(ext: &Extension) -> bool {
             .iter()
             .all(|w| ok(&w.requires) && w.builder.iter().all(|b| ok(&b.requires)))
         && ext.game_launch_args.iter().all(|a| ok(&a.requires))
+}
+
+/// Canonicalise every `Requires` expression in `ext` by **trimming** it. Same
+/// walk as [`all_requires_parse`].
+///
+/// *Why it trims but never collapses `Some("")` to `None`* — which is the obvious
+/// next step, and is wrong: bundled manifests ship an explicitly empty
+/// `"Requires": ""` (`dxvk.json`), so `Some("")` is a real on-disk state. Nulling
+/// it here makes `snapshot()` differ from `baseline` for every such module, and
+/// [`ModuleDraft::dirty`] is a serialized comparison — so merely *opening* DXVK
+/// would mark it unsaved with nothing to see. The two existing tests
+/// `rendering_a_draft_without_touching_it_leaves_it_clean` and
+/// `an_empty_string_in_an_optional_slot_survives_a_render` both catch it; the
+/// same trap `6f47e5a` and the WRITE-BACK GATING rule exist for. Empty and absent
+/// mean the same thing to `condition::eval_opt` (always true), so preserving the
+/// distinction costs nothing and keeps a round-trip byte-exact.
+///
+/// *Why this exists* (2026-07-19, issue #29): `requires_edit` decides
+/// `None`-vs-`Some` on `s.trim()` but stores the untrimmed `s`, so `"  "`
+/// became `None` while `" enabled "` kept its padding. This never changed how
+/// the expression *evaluates* — `condition::tokenize` skips whitespace, so
+/// `" enabled "` and `"enabled"` parse to the same AST — it is a **data-hygiene**
+/// fix. It matters because [`ModuleDraft::dirty`] is a *serialized-value*
+/// comparison: two logically identical drafts differing only in `Requires`
+/// padding compare unequal, which re-triggers the spurious-dirty class of bug
+/// `6f47e5a` fixed, and the padding also lands verbatim in the written manifest.
+///
+/// *Why here and not in `requires_edit`'s write-back* — which is what issue #29
+/// suggested: `val` **is** the live `TextEdit` buffer, rebuilt from the stored
+/// `Option<String>` every frame. Trimming on write-back deletes a trailing space
+/// the instant it is typed, so the user could never get from `enabled` to
+/// `enabled AND !clear` — they would be stuck at `enabledAND`. That is the exact
+/// hazard already documented on [`PendingIdentity::staged_author`]: trim on
+/// *read*, mutate the buffer never. `snapshot()` is the read boundary — it feeds
+/// `dirty()`, the Save gate and the bytes written to disk — so canonicalising
+/// there gets the whole benefit with none of the typing regression. Section
+/// names are handled the same way, in the same fold.
+fn normalize_requires(ext: &mut Extension) {
+    let fix = |r: &mut Option<String>| {
+        if let Some(s) = r {
+            if s.trim().len() != s.len() {
+                *s = s.trim().to_string();
+            }
+        }
+    };
+    ext.ui.values_mut().flatten().for_each(|f| fix(&mut f.requires));
+    for e in ext.env_vars.iter_mut().chain(ext.game_env_vars.iter_mut()) {
+        fix(&mut e.requires);
+        e.builder.iter_mut().for_each(|b| fix(&mut b.requires));
+    }
+    for w in ext.wrappers.iter_mut() {
+        fix(&mut w.requires);
+        w.builder.iter_mut().for_each(|b| fix(&mut b.requires));
+    }
+    ext.game_launch_args.iter_mut().for_each(|a| fix(&mut a.requires));
 }
 
 /// Row-action returned by the reusable `[↑][↓][🗑]` widget; the caller applies the
@@ -1745,12 +1839,14 @@ impl GuiApp {
             return;
         };
         let baseline = serde_json::to_value(&spec).unwrap_or(Value::Null);
-        let baseline_vars: std::collections::HashSet<String> = spec
-            .ui
-            .values()
-            .flatten()
-            .map(|f| f.variable.clone())
-            .collect();
+        // Declaration order first, set second (issue #31): `baseline_vars` stays a
+        // `HashSet` because every consumer only ever asks `contains`, but the
+        // *order* `var_edits` is seeded in has to be the order the user sees, so
+        // it is taken from this ordered walk rather than from the set.
+        let baseline_var_order: Vec<String> =
+            spec.ui.values().flatten().map(|f| f.variable.clone()).collect();
+        let baseline_vars: std::collections::HashSet<String> =
+            baseline_var_order.iter().cloned().collect();
         let sections: Vec<(String, Vec<UiField>)> =
             spec.ui.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         let mut ext = spec;
@@ -1761,9 +1857,9 @@ impl GuiApp {
         let identity = PendingIdentity {
             author: ext.meta.author.clone(),
             name: ext.meta.name.clone(),
-            var_edits: baseline_vars
+            var_edits: baseline_var_order
                 .iter()
-                .map(|v: &String| (v.clone(), v.clone()))
+                .map(|v| (v.clone(), v.clone()))
                 .collect(),
         };
         self.drafts.insert(manifest.clone(), ModuleDraft {
@@ -2107,6 +2203,10 @@ impl GuiApp {
     /// collision check is Version-blind and excludes the module itself by manifest
     /// path — same rule as [`Self::refresh_draft_name_error`], but run against the
     /// *pending* (edited) Author/Name rather than the on-disk pair.
+    ///
+    /// **Focused draft only** — deliberately. Why refreshing every draft is not
+    /// needed (and what would make it needed) is on
+    /// [`ModuleDraft::identity_error`], issue #32.
     fn refresh_identity_state(&mut self) {
         let collides = self.draft().map(|d| {
             name_collides(
@@ -2363,8 +2463,11 @@ impl GuiApp {
         // on-disk), `dirty()` unchanged from before the rename (body edits vs. an
         // equally-renamed baseline), `has_unsaved_work()` therefore exactly
         // "there are body edits".
-        let new_vars: std::collections::HashSet<String> =
+        // Ordered walk first, set second — same rule as `ensure_draft` (issue #31).
+        let new_var_order: Vec<String> =
             ext.ui.values().flatten().map(|f| f.variable.clone()).collect();
+        let new_vars: std::collections::HashSet<String> =
+            new_var_order.iter().cloned().collect();
         let new_baseline = serde_json::to_value(&ext).unwrap_or(Value::Null);
         if let Some(d) = self.drafts.get_mut(&manifest) {
             // Rewrite references in the live body. `apply_var_renames` works on an
@@ -2402,7 +2505,7 @@ impl GuiApp {
             d.identity = PendingIdentity {
                 author: new_author,
                 name: new_name,
-                var_edits: d.baseline_vars.iter().map(|v| (v.clone(), v.clone())).collect(),
+                var_edits: new_var_order.iter().map(|v| (v.clone(), v.clone())).collect(),
             };
             d.identity_error = None;
         }
@@ -4367,6 +4470,12 @@ fn requires_edit(ui: &mut egui::Ui, id_salt: impl std::hash::Hash, val: &mut Opt
         .inner;
     // Write back ONLY on a real edit — see WRITE-BACK GATING above. `dxvk.json`
     // ships `"Requires": ""`, which this used to null out on the first frame.
+    //
+    // `s` is stored UNTRIMMED on purpose (issue #29): `val` is the live `TextEdit`
+    // buffer, so trimming here would eat a trailing space as it is typed and make
+    // `enabled AND !clear` unreachable. The emptiness test is on `s.trim()` so a
+    // whitespace-only entry still clears the field; canonicalisation of the kept
+    // value happens at the read boundary instead — see `normalize_requires`.
     if resp.changed() {
         *val = if s.trim().is_empty() { None } else { Some(s) };
     }
@@ -9731,21 +9840,21 @@ mod tests {
     fn draft_from(manifest: Value, editable: bool) -> ModuleDraft {
         let spec: Extension = serde_json::from_value(manifest).unwrap();
         let baseline = serde_json::to_value(&spec).unwrap();
-        let baseline_vars: std::collections::HashSet<String> = spec
-            .ui
-            .values()
-            .flatten()
-            .map(|f| f.variable.clone())
-            .collect();
+        // Ordered walk then set, exactly as `ensure_draft` does (issue #31) — the
+        // helper is only useful while it mirrors production.
+        let baseline_var_order: Vec<String> =
+            spec.ui.values().flatten().map(|f| f.variable.clone()).collect();
+        let baseline_vars: std::collections::HashSet<String> =
+            baseline_var_order.iter().cloned().collect();
         let sections = spec.ui.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         let mut ext = spec;
         ext.ui.clear();
         let identity = PendingIdentity {
             author: ext.meta.author.clone(),
             name: ext.meta.name.clone(),
-            var_edits: baseline_vars
+            var_edits: baseline_var_order
                 .iter()
-                .map(|v: &String| (v.clone(), v.clone()))
+                .map(|v| (v.clone(), v.clone()))
                 .collect(),
         };
         ModuleDraft {
@@ -11817,5 +11926,150 @@ mod tests {
             app.confirm
         );
         assert!(!app.pending_close);
+    }
+
+    // ---------------------------------------------------------------- issue #29
+
+    /// A `Requires` differing from disk **only** by surrounding whitespace must
+    /// not read as dirty, and must not travel to the manifest with its padding.
+    ///
+    /// `requires_edit` decides `None`-vs-`Some` on `s.trim()` but stores the raw
+    /// `s`, so `" enabled "` was kept verbatim; `dirty()` is a serialized-value
+    /// comparison, so the draft went permanently "unsaved" with nothing visible
+    /// to change back. Evaluation was never affected (`condition::tokenize` skips
+    /// whitespace) — this is data hygiene.
+    ///
+    /// Verified to fail before the fix: without the `normalize_requires` call in
+    /// `snapshot()` the first assert fires ("differs only by padding").
+    #[test]
+    fn requires_padding_is_canonicalised_at_the_snapshot_boundary() {
+        let mut d = draft_from(
+            json!({
+                "Extension": {"Name": "Sample", "Author": "Ritze", "Version": "1.0"},
+                "UI": {"Main": [
+                    {"Type": "toggle", "Variable": "enabled"},
+                    {"Type": "toggle", "Variable": "clear", "Requires": "enabled"}
+                ]}
+            }),
+            true,
+        );
+        assert!(!d.dirty(), "premise: a freshly seeded draft is clean");
+
+        // What typing a leading/trailing space into the Requires box leaves behind.
+        d.sections[0].1[1].requires = Some("  enabled  ".to_string());
+        assert!(!d.dirty(), "a Requires differing only by padding is not an edit");
+        assert_eq!(
+            d.snapshot().ui["Main"][1].requires.as_deref(),
+            Some("enabled"),
+            "the padding must not reach the written manifest"
+        );
+
+        // Whitespace-only trims to the empty string and is NOT collapsed to None:
+        // `Some("")` is a legitimate on-disk state (dxvk.json ships one) and
+        // nulling it would spuriously dirty every module that has one. See
+        // `normalize_requires`.
+        d.sections[0].1[1].requires = Some("   ".to_string());
+        assert_eq!(d.snapshot().ui["Main"][1].requires.as_deref(), Some(""));
+
+        // A real edit still registers.
+        d.sections[0].1[1].requires = Some("enabled AND !other".to_string());
+        assert!(d.dirty(), "a genuine Requires change is still an edit");
+    }
+
+    // ---------------------------------------------------------------- issue #31
+
+    /// `identity.var_edits` must be seeded in the extension's UI **declaration
+    /// order** — the order the user sees the fields in — not in `HashSet` order.
+    ///
+    /// Verified to fail before the fix: seeding from the `HashSet<String>` of
+    /// baseline vars, this asserts unequal on essentially every run (10 keys,
+    /// so accidentally landing in declaration order is ~1/10!).
+    #[test]
+    fn ensure_draft_seeds_var_edits_in_declaration_order() {
+        let vars = [
+            "zulu", "alpha", "mike", "bravo", "yankee", "charlie", "xray", "delta",
+            "whiskey", "echo",
+        ];
+        let manifest = json!({
+            "Extension": {"Name": "Ordered", "Author": "Ritze", "Version": "1.0"},
+            "UI": {
+                "First": vars[..5].iter().map(|v| json!({"Type": "toggle", "Variable": v}))
+                    .collect::<Vec<_>>(),
+                "Second": vars[5..].iter().map(|v| json!({"Type": "toggle", "Variable": v}))
+                    .collect::<Vec<_>>(),
+            }
+        });
+        let spec: Extension = serde_json::from_value(manifest).unwrap();
+        let id = spec.id();
+
+        let mut app = test_app();
+        app.all_specs = vec![spec];
+        app.all_dirs = vec![PathBuf::from("user")]; // non-bundled → editable
+        app.all_manifests = vec![PathBuf::from("/x/ordered.json")];
+
+        app.ensure_draft(&id);
+
+        let d = &app.drafts[&PathBuf::from("/x/ordered.json")];
+        assert_eq!(
+            d.identity.var_edits.keys().collect::<Vec<_>>(),
+            vars.iter().collect::<Vec<_>>(),
+            "var_edits must follow UI declaration order across sections"
+        );
+        // The set the `contains` consumers use is unchanged by the reordering.
+        assert_eq!(d.baseline_vars.len(), vars.len());
+        assert!(vars.iter().all(|v| d.baseline_vars.contains(*v)));
+    }
+
+    // ---------------------------------------------------------------- issue #32
+
+    /// Pins the invariant that makes the focused-only `identity_error` refresh
+    /// sound: a background draft's marker may go stale, but refocusing it
+    /// recomputes the value before anything reads it, so a stale marker can never
+    /// gate a rename. See `ModuleDraft::identity_error`.
+    ///
+    /// **Not a regression test** — it passes before and after, because #32 turned
+    /// out not to be a reachable bug. It exists so that a future change which
+    /// starts reading `identity_error` off an unfocused draft, or which drops the
+    /// per-frame refresh, fails here instead of shipping.
+    #[test]
+    fn identity_error_is_refreshed_on_refocus() {
+        let mut app = test_app();
+        let alpha_id = insert_draft(&mut app, "Ritze", "Alpha", "/x/alpha.json");
+        let beta_id = insert_draft(&mut app, "Ritze", "Beta", "/x/beta.json");
+
+        // Alpha, while focused, stages a free name: no error.
+        app.focused_module = Some(alpha_id.clone());
+        app.drafts.get_mut(&PathBuf::from("/x/alpha.json")).unwrap().identity.name =
+            "Gamma".to_string();
+        app.refresh_identity_state();
+        assert_eq!(app.draft().unwrap().identity_error, None);
+
+        // Focus moves to Beta, which stages the very name Alpha holds. Alpha is no
+        // longer refreshed, so its marker is now stale (still None) even though the
+        // pair is contested — this is exactly the staleness issue #32 describes.
+        app.focused_module = Some(beta_id);
+        app.drafts.get_mut(&PathBuf::from("/x/beta.json")).unwrap().identity.name =
+            "Gamma".to_string();
+        app.refresh_identity_state();
+        assert_eq!(
+            app.draft().unwrap().identity_error.as_deref(),
+            Some("Author + Name already in use"),
+            "the focused draft sees the other draft's staged identity"
+        );
+        assert_eq!(
+            app.drafts[&PathBuf::from("/x/alpha.json")].identity_error, None,
+            "premise: the unfocused draft's marker is stale"
+        );
+
+        // Refocusing Alpha recomputes it BEFORE any read — which is what `ui()`
+        // does at the top of every frame. The stale value never reaches a reader,
+        // so `perform_rename`'s `identity_error.is_none()` gate cannot be fooled.
+        app.focused_module = Some(alpha_id);
+        app.refresh_identity_state();
+        assert_eq!(
+            app.draft().unwrap().identity_error.as_deref(),
+            Some("Author + Name already in use"),
+            "refocus must correct the stale marker before it can gate a rename"
+        );
     }
 }
