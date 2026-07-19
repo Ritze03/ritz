@@ -3582,6 +3582,42 @@ fn row_actions(ui: &mut egui::Ui, cache: &mut IconCenterCache, idx: usize, len: 
     a
 }
 
+// ── WRITE-BACK GATING ───────────────────────────────────────────────────────
+//
+// **Every optional-text write-back in this editor is gated on
+// `Response::changed()`.** (2026-07-19 — the "opening a bundled module marks it
+// as edited" bug.)
+//
+// These editors bind an `Option<String>` to a `TextEdit` through a scratch
+// `String`, collapsing `None` into `""` on the way in. Writing the scratch back
+// unconditionally therefore re-encodes `Some("")` as `None` on *every frame* —
+// including the very first one, before the user has touched anything. A draft is
+// created clean (its `baseline` is serialized from the same `Extension` the draft
+// holds), so that unprompted normalisation was the entire bug: three shipped
+// manifests carry an empty-string `Value`/`Requires` (`amd`, `misc`, `dxvk`), so
+// those three — and only those three — grew a dirty marker in the IDE tree and an
+// "unsaved changes" prompt the instant they were opened, on modules the user
+// cannot even edit. It had nothing to do with which modules had stored config.
+//
+// *Why gate on `changed()` rather than "only assign if different":* an
+// if-different guard would still be lossy the moment the user *does* type,
+// because the round trip `Some("") -> "" -> None` is not information-preserving
+// in either direction. `changed()` is egui's own statement that this frame's
+// value came from the user, which is exactly the precondition for overwriting the
+// model. It also means a disabled widget can never write at all —
+// `add_enabled_ui(false, ..)` greys the control but does not stop the plain Rust
+// assignment after it, which is why read-only modules were affected too.
+//
+// *Why keep the `""` / absent distinction at all,* rather than declaring them
+// equivalent and normalising the manifests: for `Separator` they are genuinely
+// different values. `builder.rs` reads an absent separator as `","`
+// (`entry.separator.as_deref().unwrap_or(",")`), so silently turning
+// `"Separator": ""` into `null` would change the assembled launch command, not
+// merely the dirty flag.
+//
+// Sites: `opt_text_edit`, `requires_edit`, the field `Name` row, and the env
+// builder step's `Value` / `Separator` rows.
+
 /// Edit an `Option<String>` as a single line (empty text → `None`) with a leading
 /// `label` and a gray `hint` placeholder. `id_salt` gives the box a stable egui id
 /// so it never loses focus when banners above it appear/disappear.
@@ -3593,16 +3629,21 @@ fn opt_text_edit(
     hint: &str,
 ) {
     let mut s = val.clone().unwrap_or_default();
-    ui.horizontal(|ui| {
-        let w = editor_row_label(ui, label, 0.0);
-        ui.add(
-            egui::TextEdit::singleline(&mut s)
-                .id_salt(id_salt)
-                .hint_text(gray_hint(hint))
-                .desired_width(w),
-        );
-    });
-    *val = if s.is_empty() { None } else { Some(s) };
+    let resp = ui
+        .horizontal(|ui| {
+            let w = editor_row_label(ui, label, 0.0);
+            ui.add(
+                egui::TextEdit::singleline(&mut s)
+                    .id_salt(id_salt)
+                    .hint_text(gray_hint(hint))
+                    .desired_width(w),
+            )
+        })
+        .inner;
+    // Write back ONLY on a real edit — see WRITE-BACK GATING above.
+    if resp.changed() {
+        *val = if s.is_empty() { None } else { Some(s) };
+    }
 }
 
 /// A single-line `Requires` editor with a leading label, live-validated via
@@ -3626,7 +3667,11 @@ fn requires_edit(ui: &mut egui::Ui, id_salt: impl std::hash::Hash, val: &mut Opt
             )
         })
         .inner;
-    *val = if s.trim().is_empty() { None } else { Some(s) };
+    // Write back ONLY on a real edit — see WRITE-BACK GATING above. `dxvk.json`
+    // ships `"Requires": ""`, which this used to null out on the first frame.
+    if resp.changed() {
+        *val = if s.trim().is_empty() { None } else { Some(s) };
+    }
     if !ok && (!resp.has_focus() || resp.lost_focus()) {
         if let Err(e) = parsed {
             ui.label(egui::RichText::new(e.to_string()).color(theme::COL_GLOBAL).small());
@@ -3845,13 +3890,16 @@ fn render_field_editor(
         ui.horizontal(|ui| {
             let w = editor_row_label(ui, "Name", 0.0);
             let mut name = field.name.clone().unwrap_or_default();
-            ui.add(
+            let resp = ui.add(
                 egui::TextEdit::singleline(&mut name)
                     .id_salt(("field_name", si, fi))
                     .hint_text(gray_hint("Field label"))
                     .desired_width(w),
             );
-            field.name = if name.is_empty() { None } else { Some(name) };
+            // Write back ONLY on a real edit — see WRITE-BACK GATING above.
+            if resp.changed() {
+                field.name = if name.is_empty() { None } else { Some(name) };
+            }
         });
 
         // Variable — for an existing (on-disk) field this edits the STAGED rename
@@ -4030,13 +4078,21 @@ fn render_env_block_editor(
                                 ui.horizontal(|ui| {
                                     let w = editor_row_label(ui, "Value", 0.0);
                                     let mut v = step.value.clone().unwrap_or_default();
-                                    ui.add(
+                                    let resp = ui.add(
                                         egui::TextEdit::singleline(&mut v)
                                             .id_salt(("env_step_val", game, ei, bi))
                                             .hint_text(gray_hint("value"))
                                             .desired_width(w),
                                     );
-                                    step.value = if v.is_empty() { None } else { Some(v) };
+                                    // Write back ONLY on a real edit — see
+                                    // WRITE-BACK GATING above. `amd.json` and
+                                    // `misc.json` both ship `"Value": ""` (a
+                                    // `set` that clears the variable), which this
+                                    // used to null out on the first frame.
+                                    if resp.changed() {
+                                        step.value =
+                                            if v.is_empty() { None } else { Some(v) };
+                                    }
                                 });
                                 // The separator only means anything for `append`
                                 // (set/unset replace or clear), so it only shows
@@ -4045,14 +4101,22 @@ fn render_env_block_editor(
                                     ui.horizontal(|ui| {
                                         let w = editor_row_label(ui, "Separator", 0.0);
                                         let mut sep = step.separator.clone().unwrap_or_default();
-                                        ui.add(
+                                        let resp = ui.add(
                                             egui::TextEdit::singleline(&mut sep)
                                                 .id_salt(("env_step_sep", game, ei, bi))
                                                 .hint_text(gray_hint("e.g. :"))
                                                 .desired_width(w),
                                         );
-                                        step.separator =
-                                            if sep.is_empty() { None } else { Some(sep) };
+                                        // Write back ONLY on a real edit — see
+                                        // WRITE-BACK GATING above. Here it also
+                                        // guards a semantic difference, not just a
+                                        // dirty flag: an absent separator means
+                                        // `","` to `builder.rs`, an empty one means
+                                        // "join with nothing".
+                                        if resp.changed() {
+                                            step.separator =
+                                                if sep.is_empty() { None } else { Some(sep) };
+                                        }
                                     });
                                 }
                                 requires_edit(
@@ -9259,5 +9323,149 @@ mod tests {
 
     fn names_of(specs: &[Extension]) -> Vec<String> {
         specs.iter().map(|s| s.meta.name.clone()).collect()
+    }
+
+    // ── Merely rendering a draft must not dirty it (2026-07-19) ─────────────
+
+    /// Render `render_editor_body` once, headless, with no input events at all.
+    ///
+    /// A throwaway `egui::Context` runs one frame entirely offscreen — no window,
+    /// no winit, no event loop, and a `RawInput` carrying no events. That is the
+    /// whole point: the bug under test only manifests inside the *render* pass
+    /// (the widget write-backs), so a pure-function test could not see it, and
+    /// driving a real window is neither available in CI nor acceptable on a dev
+    /// box.
+    fn render_editor_body_once(draft: &mut ModuleDraft) {
+        let mut cache = IconCenterCache::new();
+        let mut deferred: Vec<Deferred> = Vec::new();
+        let ctx = egui::Context::default();
+        // An explicit screen rect: the default `RawInput` leaves it `None`, and a
+        // zero-sized viewport can short-circuit layout before the write-backs run.
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1200.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        // The `FullOutput` (textures, shapes, platform commands) is for a painter
+        // to consume; there is no painter here, and the effect under test is the
+        // mutation `render_editor_body` makes to `draft`.
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                render_editor_body(ui, &mut cache, draft, &mut deferred);
+            });
+        });
+        // Structural edits only ever come from a click; with no input there must
+        // be none. Asserted rather than applied, so a future renderer that queues
+        // a `Deferred` unprompted trips here instead of silently mutating.
+        assert!(deferred.is_empty(), "an untouched render queued a structural edit");
+    }
+
+    /// A real bundled manifest, read from `resources/extensions/` at test time.
+    ///
+    /// *Why the real file and not an inline `json!`:* the whole bug was that
+    /// three shipped manifests contain a JSON shape the editor round-trips
+    /// lossily. An inline fixture would only prove the fix against a shape
+    /// *we* chose to write down; reading what actually ships proves the shipped
+    /// modules are clean, and keeps proving it if someone edits them.
+    fn bundled_manifest(rel: &str) -> Value {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../resources/extensions")
+            .join(rel);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()))
+    }
+
+    /// Opening a module in the IDE and touching **nothing** must leave its draft
+    /// clean — no dirty marker in the tree, no "unsaved changes" prompt on the way
+    /// out. Reported 2026-07-19 against exactly `amd`, `dxvk` and `misc`.
+    ///
+    /// *Why those three and not the other five bundled modules:* they are the only
+    /// shipped manifests carrying an **empty-string** `Value` / `Requires`
+    /// (`"Value": ""` in amd + misc, `"Requires": ""` in dxvk). The editor's text
+    /// write-backs collapsed `Some("")` to `None` on every frame — an unprompted
+    /// edit, so the draft was born dirty the instant it first rendered. The
+    /// correlation the report drew with "modules that have stored config for this
+    /// game" was coincidence: gamescope has stored config and was never marked,
+    /// dxvk had no stored config and was.
+    ///
+    /// Every bundled module is checked, not just the three, so the property is
+    /// "rendering never dirties a draft" rather than "these three specific files
+    /// happen to be fine".
+    #[test]
+    fn rendering_a_draft_without_touching_it_leaves_it_clean() {
+        for rel in [
+            "default/amd.json",
+            "default/dxvk.json",
+            "default/misc.json",
+            "default/gamescope.json",
+            "default/proton.json",
+            "default/pulse.json",
+            "default/vkd3d.json",
+            "default/scripts/scripts.json",
+            "built-in/lsfg-vk/lsfg-vk.json",
+            "built-in/hypr-monctl/hypr-monctl.json",
+            "built-in/custom-env/custom-env.json",
+            "built-in/custom-args/custom-args.json",
+            "built-in/custom-game-env/custom-game-env.json",
+        ] {
+            // `editable: false` — these are the bundled, read-only set, which is
+            // precisely the case the report hit: `add_enabled_ui(false, ..)` greys
+            // the widgets out but the write-backs after them still run.
+            let mut draft = draft_from(bundled_manifest(rel), false);
+            render_editor_body_once(&mut draft);
+            assert!(
+                !draft.dirty(),
+                "{rel}: rendering the editor with no input marked the draft dirty\n\
+                 baseline: {}\n\
+                 snapshot: {}",
+                serde_json::to_string(&draft.baseline).unwrap(),
+                serde_json::to_string(&draft.snapshot()).unwrap(),
+            );
+        }
+    }
+
+    /// The narrow, shape-level statement of the same bug, so a regression is
+    /// diagnosable without diffing two whole manifests: an empty string in an
+    /// optional slot must survive a render as an empty string, not become `null`.
+    #[test]
+    fn an_empty_string_in_an_optional_slot_survives_a_render() {
+        let mut draft = draft_from(
+            json!({
+                "Extension": {
+                    "Name": "Sample", "Author": "Ritze", "Version": "1.0",
+                    "Description": ""
+                },
+                "UI": {"Main": [
+                    {"Type": "toggle", "Variable": "clear", "Name": "", "Requires": ""}
+                ]},
+                "ENV_VARS": [{
+                    "Name": "LD_PRELOAD",
+                    "Requires": "",
+                    // `set` to the empty string is a real operation — it clears the
+                    // variable — and `Separator: ""` is NOT the same as absent
+                    // (`builder.rs` defaults an absent separator to ","), so
+                    // neither may be normalised away behind the user's back.
+                    "Builder": [
+                        {"Requires": "clear", "Type": "set", "Value": ""},
+                        {"Requires": "clear", "Type": "append", "Value": "x", "Separator": ""}
+                    ]
+                }]
+            }),
+            false,
+        );
+        render_editor_body_once(&mut draft);
+
+        assert!(!draft.dirty(), "an untouched render must not dirty the draft");
+        let e = &draft.ext;
+        assert_eq!(e.meta.description.as_deref(), Some(""), "meta Description");
+        assert_eq!(draft.sections[0].1[0].name.as_deref(), Some(""), "field Name");
+        assert_eq!(draft.sections[0].1[0].requires.as_deref(), Some(""), "field Requires");
+        assert_eq!(e.env_vars[0].requires.as_deref(), Some(""), "env Requires");
+        assert_eq!(e.env_vars[0].builder[0].value.as_deref(), Some(""), "step Value");
+        assert_eq!(e.env_vars[0].builder[1].separator.as_deref(), Some(""), "step Separator");
     }
 }

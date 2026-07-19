@@ -897,6 +897,23 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   roots; those are bootstrapped into the user config dir but stay inspect-only until
   forked). Bundled modules render the same widgets **disabled**, Save shows a
   "Fork to edit" tooltip.
+- **Optional-text write-backs are gated on `Response::changed()`** (2026-07-19). Every
+  `Option<String>` in the manifest — `Description`, `Backend`, a field's `Name`/`Requires`,
+  an env builder step's `Value`/`Separator` — is edited through a scratch `String` that
+  collapses `None` into `""` on the way in (`opt_text_edit`, `requires_edit`, and the
+  inline `Name`/`Value`/`Separator` rows). The write-back back out of that scratch runs
+  **only when egui reports the widget actually changed**.
+  *Why:* writing it back unconditionally re-encoded `Some("")` as `None` on every frame,
+  including the first — so simply *opening* a module dirtied its draft before the user
+  touched anything. Three bundled manifests ship an empty-string value (`"Value": ""` in
+  `amd.json` and `misc.json`, `"Requires": ""` in `dxvk.json`), so those three, and only
+  those three, grew a spurious dirty marker in the IDE tree plus an "unsaved changes"
+  prompt on the way out — on modules that are read-only and cannot be edited at all
+  (`add_enabled_ui(false, ..)` greys a widget but does not stop the plain assignment after
+  it). It is *not* a `changed()`-free normalisation because `""` and absent are genuinely
+  different for `Separator`: `builder.rs` reads an absent separator as `","`. Regression:
+  `rendering_a_draft_without_touching_it_leaves_it_clean` renders every bundled manifest
+  headless with no input and asserts the draft stays clean.
 - **Staged identity edits vs Save** (Phase 3 stage 2b) — for an editable module, Author,
   Name and every *existing* field's `Variable` are editable, but their edits go into a
   separate `PendingIdentity` (`identity.author` / `identity.name` /
