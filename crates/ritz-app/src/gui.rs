@@ -300,8 +300,10 @@ enum DiscardThen {
     /// [`GuiApp::discard_module`], dropping the *focused* draft only and landing
     /// on the remembered view exactly as a clean Close would.
     CloseEditor,
-    /// A category tab (Profiles / Settings / IDE Mode) was clicked. Confirm drops
-    /// every draft and then applies that click.
+    /// A category tab (Profiles / Settings / IDE Mode) was clicked. Confirm
+    /// applies that click and drops exactly the drafts the destination itself
+    /// drops — the focused one for `GamesProfiles`, none for the other two
+    /// (issue #35). It used to `clear()` the whole map regardless.
     Nav(NavCategory),
     /// The whole window is closing — the OS close (X / Alt+F4 / the window
     /// manager) or a launch-mode title-bar button. Confirm drops every draft,
@@ -930,22 +932,6 @@ fn save_gate(dirty: bool, valid: bool, requires_all_parse: bool, name_error: boo
     dirty && valid && requires_all_parse && !name_error
 }
 
-/// Pure predicate (factored out for testing): would applying this category-tab
-/// click take unsaved module edits away from the user?
-///
-/// `any_unsaved` is `!unsaved_drafts.is_empty()` — whether *any* open draft holds
-/// unsaved work ([`ModuleDraft::has_unsaved_work`]: body edits **or** a staged
-/// rename, issue #34).
-///
-/// *Why the IDE arm is now unconditionally `false` (S4a):* it used to compare the
-/// tree's selection against the module under edit, because switching modules
-/// replaced the single draft slot and so destroyed the edits. With a keyed map,
-/// switching modules destroys nothing — the previous draft simply stops being
-/// focused and keeps its edits. There is nothing left to warn about, and a prompt
-/// on every module switch would be pure noise on the mode's primary gesture.
-///
-/// The two config destinations still prompt, because `apply_discard_edits` clears
-/// the whole map on confirm — that is a real, user-approved loss.
 /// Pure predicate (factored out for testing): must a request to close the whole
 /// window stop and ask, or may it close immediately? (2026-07-19, issue #33.)
 ///
@@ -992,10 +978,44 @@ fn empty_central_message(ide: bool) -> &'static str {
     }
 }
 
-fn nav_category_drops_draft(cat: NavCategory, any_unsaved: bool) -> bool {
+/// Pure predicate (factored out for testing): would applying this category-tab
+/// click take unsaved module edits away from the user?
+///
+/// `focused_unsaved` is [`GuiApp::focused_draft_unsaved`] — whether the *focused*
+/// draft holds unsaved work ([`ModuleDraft::has_unsaved_work`]: body edits **or**
+/// a staged rename, issue #34). **Not** `!unsaved_drafts.is_empty()` any more —
+/// see the per-arm reasoning below.
+///
+/// *Why the IDE arm is unconditionally `false` (S4a):* it used to compare the
+/// tree's selection against the module under edit, because switching modules
+/// replaced the single draft slot and so destroyed the edits. With a keyed map,
+/// switching modules destroys nothing — the previous draft simply stops being
+/// focused and keeps its edits. There is nothing left to warn about, and a prompt
+/// on every module switch would be pure noise on the mode's primary gesture.
+///
+/// *Why `GeneralSettings` is now `false` too* (2026-07-19, issue #35): the
+/// destination drops **nothing**. `GuiApp::select_nav_category(GeneralSettings)`
+/// deliberately clears `focused_module` and leaves every draft in the map — its
+/// own comment says so. The old arm returned `any_unsaved`, so the prompt fired,
+/// and confirming it ran `apply_discard_edits` → `drafts.clear()`. **The
+/// confirmation created a loss the destination never required**, with Cancel as
+/// the only non-destructive answer. A destination that costs nothing must not ask
+/// a question whose "yes" costs everything.
+///
+/// *Why `GamesProfiles` asks about the focused draft only* (same issue): its
+/// destination drops exactly one draft — `select_nav_category` calls
+/// `GuiApp::close_focused_draft`, which `shift_remove`s the focused key and
+/// leaves every other open draft alone. Asking `any_unsaved` made a background
+/// draft (one the user is *not* editing) raise a prompt for a click that would
+/// never have touched it. The gate and the destination now describe the same
+/// single draft, which is also exactly the set
+/// [`GuiApp::discard_names`] puts in the dialog.
+fn nav_category_drops_draft(cat: NavCategory, focused_unsaved: bool) -> bool {
     match cat {
-        // Both land on a config scope and drop every draft.
-        NavCategory::GamesProfiles | NavCategory::GeneralSettings => any_unsaved,
+        // Drops the focused draft (`close_focused_draft`) and nothing else.
+        NavCategory::GamesProfiles => focused_unsaved,
+        // Keeps every draft; only `focused_module` is cleared. Nothing to ask.
+        NavCategory::GeneralSettings => false,
         // Staying inside IDE mode never costs a draft any more.
         NavCategory::Ide => false,
     }
@@ -2305,17 +2325,25 @@ impl GuiApp {
         match then {
             // Close acting as Discard: drop the focused draft only.
             DiscardThen::CloseEditor => self.discard_module(),
-            // A category tab was clicked and the user approved the discard. Drop
-            // **every** draft: the prompt named them all ("These modules have
-            // unsaved changes: …"), so keeping any back would contradict what the
-            // user just agreed to.
+            // A category tab was clicked and the user approved the discard.
+            //
+            // *Why this no longer `clear()`s the map* (2026-07-19, issue #35):
+            // the destination already drops exactly what it needs — `GamesProfiles`
+            // calls `close_focused_draft` (one draft), `GeneralSettings` keeps
+            // every draft, `Ide` keeps every draft. Clearing here destroyed drafts
+            // no destination ever asked for, including on the `GeneralSettings`
+            // path where the confirmation was the *only* thing doing any damage.
+            // Delegating to `select_nav_category` makes the confirmed action and
+            // the plain (nothing-unsaved) action the same code path, so they
+            // cannot drift: Confirm now means "yes, complete the click", and the
+            // click costs precisely what `discard_names` said it would.
             DiscardThen::Nav(cat) => {
-                self.drafts.clear();
-                self.refresh_unsaved_drafts();
                 self.select_nav_category(cat);
+                self.refresh_unsaved_drafts();
             }
-            // The window is closing. Same reasoning as the nav arm — the prompt
-            // named every unsaved module, so every draft goes.
+            // The window is closing, so every draft goes — the prompt named every
+            // *unsaved* one, and the clean ones it did not name are byte-identical
+            // to disk (see `discard_names`), so clearing them destroys nothing.
             //
             // The outcome is applied *here*, not when the button was clicked: a
             // launch-mode "Launch Game" that the user then cancelled out of must
@@ -2412,6 +2440,61 @@ impl GuiApp {
             .filter(|(k, _)| self.unsaved_drafts.contains(*k))
             .map(|(_, d)| format!("{}::{}", d.ext.meta.author, d.ext.meta.name))
             .collect()
+    }
+
+    /// Does the **focused** draft hold unsaved work?
+    ///
+    /// The gate for every gesture whose destination drops only the focused draft
+    /// ([`nav_category_drops_draft`]'s `GamesProfiles` arm, the editor's Close
+    /// button). Reads the frame's cached [`Self::unsaved_drafts`], like
+    /// [`Self::unsaved_module_names`], so callers outside the render loop must
+    /// `refresh_unsaved_drafts` first.
+    fn focused_draft_unsaved(&self) -> bool {
+        self.focused_key()
+            .is_some_and(|k| self.unsaved_drafts.contains(&k))
+    }
+
+    /// `Author::Name` of exactly the drafts that confirming `then` will destroy —
+    /// the list the discard dialog prints (2026-07-19, issue #35).
+    ///
+    /// *Why this exists at all:* the dialog used to print
+    /// [`Self::unsaved_module_names`] — *every* unsaved draft — for all three
+    /// destinations, while [`Self::apply_discard_edits`] destroyed a different set
+    /// per destination. A prompt that names a set it does not destroy is
+    /// misleading; one that destroys a set it did not name is silent data loss.
+    /// This function is the single answer both halves now read, so the dialog
+    /// cannot promise less (or more) than the destination takes.
+    ///
+    /// The three arms mirror `apply_discard_edits` exactly:
+    /// - `CloseEditor` → `discard_module`, the focused draft only.
+    /// - `Nav(cat)` → whatever `select_nav_category(cat)` drops: the focused draft
+    ///   for `GamesProfiles`, nothing for `GeneralSettings`/`Ide` (which is why
+    ///   `nav_category_drops_draft` never raises the prompt for those two — an
+    ///   empty list here would be a dialog with nothing to say).
+    /// - `ExitApp` → every unsaved draft; the process is ending, so all of it goes.
+    ///
+    /// *Why the `ExitApp` arm names only the **unsaved** drafts even though
+    /// `apply_discard_edits` clears the whole map:* a clean, unstaged draft is
+    /// byte-identical to its manifest and can be rebuilt from disk by reopening
+    /// the module, so dropping it destroys nothing the user could notice. Naming
+    /// it would pad the prompt with modules that are not at risk. The map-clear is
+    /// a cache eviction for those entries and a real loss only for the unsaved
+    /// ones — which is precisely the set listed here.
+    fn discard_names(&self, then: DiscardThen) -> Vec<String> {
+        let focused = || {
+            self.focused_key()
+                .filter(|k| self.unsaved_drafts.contains(k))
+                .and_then(|k| self.drafts.get(&k))
+                .map(|d| format!("{}::{}", d.ext.meta.author, d.ext.meta.name))
+                .into_iter()
+                .collect()
+        };
+        match then {
+            DiscardThen::CloseEditor => focused(),
+            DiscardThen::Nav(NavCategory::GamesProfiles) => focused(),
+            DiscardThen::Nav(NavCategory::GeneralSettings | NavCategory::Ide) => Vec::new(),
+            DiscardThen::ExitApp(_) => self.unsaved_module_names(),
+        }
     }
 
     /// True when some **other open draft** has staged the identity `(author,
@@ -3544,14 +3627,18 @@ impl GuiApp {
                 "Delete Module",
                 format!("Delete the module \"{label}\"? This removes its manifest file."),
             ),
-            ConfirmAction::DiscardEdits { .. } => (
+            ConfirmAction::DiscardEdits { then } => (
                 "Discard Changes",
                 {
                     // Names are read live rather than captured into the action:
                     // the dialog and the draft can only disagree if the draft
                     // changed under an open modal, and the modal backdrop makes
                     // that impossible. One source of truth, no stale copy.
-                    let names = self.unsaved_module_names();
+                    //
+                    // `discard_names(then)`, not `unsaved_module_names()`: the
+                    // list must be what *this* destination destroys, not every
+                    // unsaved draft in the map (issue #35).
+                    let names = self.discard_names(*then);
                     // The empty case is unreachable (nothing raises this action
                     // with a clean draft) but must still read as a sentence —
                     // "These modules have unsaved changes: ." would be a visible
@@ -7597,6 +7684,90 @@ impl GuiApp {
         self.games = games;
     }
 
+    /// Re-point **every** stored reference to profile `old_name`: to `Some(new)`
+    /// on a rename, or to "no profile" on a delete.
+    ///
+    /// *Why one function serving both callers* (2026-07-19, issue #36): the sweep
+    /// used to live inline in [`Self::rename_preset`], and
+    /// [`Self::delete_profile`] had only a one-line version of it that fixed the
+    /// **ambient** game (`self.game_config`) and nothing else — while its doc
+    /// comment claimed "any game referencing it falls back to no profile". So
+    /// deleting profile `P` while viewing game Y left `games/X.json` still holding
+    /// `"Preset": "P"`. That degrades gracefully at first (`load_preset` returns
+    /// `Ok(None)`), but it is a **resurrection by name** bug: create an unrelated
+    /// new profile also called `P` and game X silently re-attaches to it,
+    /// inheriting settings nobody assigned. `config_cleanup` cannot catch this —
+    /// it sweeps undeclared module *variables*, not profile references. Rename and
+    /// delete are the same operation over the same reference graph, so they get
+    /// one implementation that cannot drift apart.
+    ///
+    /// Three kinds of reference exist, and all three resurrect:
+    /// 1. **`games/*.json` → `Preset`** — the assignment the issue reported.
+    /// 2. **`profiles/*.json` → `Parent`** — a profile's parent link
+    ///    (`crates/ritz-core/src/config.rs:Preset::parent`), which forms the extra
+    ///    inheritance layer under it. A dangling `Parent` is *worse* than a
+    ///    dangling `Preset`, because the resurrected name silently injects a whole
+    ///    inherited layer under an existing profile. The old inline sweep did not
+    ///    cover this for renames either — that was a live bug on both paths.
+    /// 3. **`general.json` → `DefaultPreset`** — the fallback profile for games
+    ///    with none assigned. Already handled for rename; now for delete too.
+    ///
+    /// *Why `Paths::list_games` and not `self.games`:* `self.games` is a cached
+    /// display list refreshed only on create/delete/rename and IDE-mode entry, so
+    /// a game written since the last refresh would have been skipped — silently
+    /// leaving exactly the dangling reference this exists to prevent. The
+    /// directory is the authority.
+    ///
+    /// In-memory mirrors of the same facts (`self.game_config`, `self.preset`,
+    /// `self.default_preset`) are updated alongside the files, so the open view
+    /// does not keep showing a profile that no longer exists.
+    fn retarget_preset_references(&mut self, old_name: &str, new_name: Option<&str>) {
+        let new = new_name.map(str::to_string);
+
+        // 1. Every game config on disk that names it.
+        for appid in self.paths.list_games() {
+            if let Ok(Some(mut gc)) = self.paths.load_game(&appid) {
+                if gc.config.modules.preset.as_deref() == Some(old_name) {
+                    gc.config.modules.preset = new.clone();
+                    let _ = self.paths.save_game(&gc);
+                }
+            }
+        }
+        // The ambient game is edited in memory and autosaved from there, so fixing
+        // only its file would be undone by the next `persist()`.
+        if self.game_config.config.modules.preset.as_deref() == Some(old_name) {
+            self.game_config.config.modules.preset = new.clone();
+            let _ = self.paths.save_game(&self.game_config);
+            if new.is_none() {
+                self.preset = None;
+            }
+        }
+
+        // 2. Every profile that names it as `Parent`.
+        for name in self.paths.list_presets() {
+            if let Ok(Some(mut p)) = self.paths.load_preset(&name) {
+                if p.parent.as_deref() == Some(old_name) {
+                    p.parent = new.clone();
+                    let _ = self.paths.save_preset(&p);
+                    // Keep the open profile editor's buffer in step, or the next
+                    // autosave would write the stale parent straight back.
+                    if let Some(buf) = &mut self.editing_preset_buf {
+                        if buf.name == name {
+                            buf.parent = new.clone();
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. The general-config default.
+        if self.general_config.default_preset.as_deref() == Some(old_name) {
+            self.general_config.default_preset = new.clone();
+            let _ = self.paths.save_general(&self.general_config);
+            self.default_preset = new;
+        }
+    }
+
     fn rename_preset(&mut self, old_name: &str, new_name: &str) {
         if old_name == new_name || new_name.is_empty() {
             return;
@@ -7606,24 +7777,9 @@ impl GuiApp {
             let _ = self.paths.save_preset(&p);
             let _ = self.paths.delete_preset(old_name);
         }
-        // Update any saved game config that references the old preset name.
-        let game_files: Vec<_> = self.games.iter().map(|(id, _)| id.clone()).collect();
-        for appid in game_files {
-            if let Ok(Some(mut gc)) = self.paths.load_game(&appid) {
-                if gc.config.modules.preset.as_deref() == Some(old_name) {
-                    gc.config.modules.preset = Some(new_name.to_string());
-                    let _ = self.paths.save_game(&gc);
-                    if self.appid == appid {
-                        self.game_config.config.modules.preset = Some(new_name.to_string());
-                    }
-                }
-            }
-        }
-        if self.general_config.default_preset.as_deref() == Some(old_name) {
-            self.general_config.default_preset = Some(new_name.to_string());
-            let _ = self.paths.save_general(&self.general_config);
-            self.default_preset = Some(new_name.to_string());
-        }
+        // Re-point every stored reference (games, profile `Parent`s, the general
+        // default) — shared with `delete_profile`, see `retarget_preset_references`.
+        self.retarget_preset_references(old_name, Some(new_name));
         self.refresh_presets();
         self.editing_preset_buf = self.paths.load_preset(new_name).ok().flatten();
         self.nav_sel = NavSel::Profile(new_name.to_string());
@@ -7708,10 +7864,12 @@ impl GuiApp {
             // without a word). Prompt instead, carrying the destination so Confirm
             // completes the click and Cancel leaves the editor exactly as it was.
             //
-            // Gated on the frame's dirty set, not on "a draft exists": a clean
-            // draft is byte-identical to disk, so dropping it loses nothing and a
-            // prompt on every tab click would be pure noise.
-            if nav_category_drops_draft(cat, !self.unsaved_drafts.is_empty()) {
+            // Gated on the *focused* draft's unsaved work, not on "a draft
+            // exists" and (since issue #35) not on "anything anywhere is
+            // unsaved": a clean draft is byte-identical to disk, so dropping it
+            // loses nothing, and a background draft this click would never touch
+            // is not a reason to ask. See `nav_category_drops_draft`.
+            if nav_category_drops_draft(cat, self.focused_draft_unsaved()) {
                 self.confirm =
                     Some(ConfirmAction::DiscardEdits { then: DiscardThen::Nav(cat) });
             } else {
@@ -8534,14 +8692,21 @@ impl GuiApp {
     }
 
     /// Delete a profile and return to the Global Profile view (`NavSel::GlobalSettings`).
-    /// Any game referencing it falls back to no profile.
+    ///
+    /// **Every** stored reference to it is swept, not just the ambient game's:
+    /// each `games/*.json` `Preset`, each `profiles/*.json` `Parent`, and the
+    /// general-config `DefaultPreset` all fall back to "none". See
+    /// [`Self::retarget_preset_references`] for why (issue #36 — resurrection by
+    /// name) and why the sweep is shared with [`Self::rename_preset`].
     fn delete_profile(&mut self, name: &str) {
         let _ = self.paths.delete_preset(name);
-        if self.game_config.config.modules.preset.as_deref() == Some(name) {
-            self.game_config.config.modules.preset = None;
-            self.preset = None;
-            self.persist();
+        // Drop the editor buffer *before* the sweep: it belongs to the profile
+        // just deleted, and `persist()` under `NavSel::Profile(name)` would
+        // `save_preset` it straight back — re-creating the file we just removed.
+        if matches!(&self.nav_sel, NavSel::Profile(p) if p == name) {
+            self.editing_preset_buf = None;
         }
+        self.retarget_preset_references(name, None);
         self.refresh_presets();
         self.nav_sel = NavSel::GlobalSettings;
     }
@@ -10990,6 +11155,180 @@ mod tests {
     ///    `nav_sel` still holds behind IDE mode — the property the `Preview` arm
     ///    was originally added for, and the one a naive "just delete the arm" fix
     ///    would regress.
+    // ── Deleting a profile sweeps every reference to it (issue #36) ─────────
+    //
+    // `delete_profile` used to fix only `self.game_config` (the ambient game).
+    // Every other reference — other games' `Preset`, other profiles' `Parent`,
+    // the general-config `DefaultPreset` — was left dangling. Dangling degrades
+    // gracefully (`load_preset` returns `Ok(None)`) right up until someone
+    // creates a new profile with the same name, at which point the stale
+    // reference silently re-attaches to a profile nobody assigned.
+
+    /// Scratch config dir for the profile-reference tests, plus an app pointed at
+    /// it whose ambient game is 42 (`test_app`'s default) — deliberately *not*
+    /// the game that references the profile, which is the whole point of #36.
+    fn preset_ref_app(tag: &str) -> (GuiApp, PathBuf) {
+        let base = std::env::temp_dir().join(format!(
+            "ritz-gui-test-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let mut app = test_app();
+        app.paths = Paths { base: base.clone() };
+        (app, base)
+    }
+
+    /// **Issue #36, the reported repro.** Assign profile `P` to game X, navigate
+    /// away to game Y, delete `P` — `games/X.json` must not keep `"Preset": "P"`.
+    ///
+    /// Verified to fail before the fix: `delete_profile` only touched
+    /// `self.game_config`, so this asserted `Some("P")` and failed on the first
+    /// `assert_eq!`.
+    #[test]
+    fn deleting_a_profile_clears_it_from_every_game_not_just_the_ambient_one() {
+        let (mut app, base) = preset_ref_app("del-profile-games");
+        app.paths.save_preset(&Preset { name: "P".to_string(), ..Default::default() }).unwrap();
+        let mut x = GameConfig::new("100", "Game X");
+        x.config.modules.preset = Some("P".to_string());
+        app.paths.save_game(&x).unwrap();
+        // The ambient game is 42 — we are "standing on" a different game, exactly
+        // as the issue's step 2 describes.
+        assert_ne!(app.appid, "100");
+
+        app.delete_profile("P");
+
+        let x = app.paths.load_game("100").unwrap().unwrap();
+        assert_eq!(
+            x.config.modules.preset, None,
+            "a game the user was not viewing must still lose the deleted profile"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **The bite.** The dangling reference is only dormant: re-creating a
+    /// profile with the same name must not silently re-attach the game that used
+    /// to reference the deleted one.
+    ///
+    /// Verified to fail before the fix: `games/100.json` still held `"Preset":
+    /// "P"`, so the freshly created, unrelated `P` resolved as game 100's
+    /// profile and this asserted `Some("P")`.
+    #[test]
+    fn a_recreated_profile_name_does_not_reattach_to_the_game_that_used_it() {
+        let (mut app, base) = preset_ref_app("del-profile-resurrect");
+        app.paths.save_preset(&Preset { name: "P".to_string(), ..Default::default() }).unwrap();
+        let mut x = GameConfig::new("100", "Game X");
+        x.config.modules.preset = Some("P".to_string());
+        app.paths.save_game(&x).unwrap();
+
+        app.delete_profile("P");
+
+        // A new, unrelated profile that merely happens to share the name.
+        let mut reborn = Preset { name: "P".to_string(), ..Default::default() };
+        reborn.set_value("Ritze", "Sample", "Enabled", json!(true));
+        app.paths.save_preset(&reborn).unwrap();
+
+        let x = app.paths.load_game("100").unwrap().unwrap();
+        assert_eq!(
+            x.config.modules.preset, None,
+            "the game must stay unassigned — the name is a coincidence, not an assignment"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `Parent` is the second kind of reference, and it resurrects the same way —
+    /// worse, in fact, since a stale parent injects a whole inherited layer under
+    /// an existing profile. Both delete (clears it) and rename (re-points it) must
+    /// sweep it.
+    ///
+    /// Verified to fail before the fix on **both** halves: `delete_profile` never
+    /// looked at profiles at all, and `rename_preset`'s inline sweep covered only
+    /// games and `DefaultPreset`, so the child kept `"Parent": "base"` in both.
+    #[test]
+    fn profile_parent_references_are_swept_on_delete_and_on_rename() {
+        let (mut app, base) = preset_ref_app("preset-parent-sweep");
+        app.paths.save_preset(&Preset { name: "base".to_string(), ..Default::default() }).unwrap();
+        app.paths
+            .save_preset(&Preset {
+                name: "child".to_string(),
+                parent: Some("base".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        // Rename: the child must follow its parent to the new name.
+        app.rename_preset("base", "renamed");
+        let child = app.paths.load_preset("child").unwrap().unwrap();
+        assert_eq!(
+            child.parent.as_deref(),
+            Some("renamed"),
+            "a renamed parent must be re-pointed, not left dangling"
+        );
+
+        // Delete: the child must lose the parent entirely.
+        app.delete_profile("renamed");
+        let child = app.paths.load_preset("child").unwrap().unwrap();
+        assert_eq!(
+            child.parent, None,
+            "a deleted parent must be cleared, or re-creating the name re-attaches it"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The general-config `DefaultPreset` is the third reference. Rename already
+    /// handled it; delete did not, so a deleted default came back the moment a
+    /// profile of that name existed again.
+    ///
+    /// Verified to fail before the fix: `default_preset` stayed `Some("P")` both
+    /// on disk and in `app.default_preset`.
+    #[test]
+    fn deleting_the_default_profile_clears_the_general_config_default() {
+        let (mut app, base) = preset_ref_app("del-profile-default");
+        app.paths.save_preset(&Preset { name: "P".to_string(), ..Default::default() }).unwrap();
+        app.general_config.default_preset = Some("P".to_string());
+        app.default_preset = Some("P".to_string());
+        app.paths.save_general(&app.general_config).unwrap();
+
+        app.delete_profile("P");
+
+        assert_eq!(app.general_config.default_preset, None, "in memory");
+        assert_eq!(app.default_preset, None, "and its mirror");
+        assert_eq!(
+            app.paths.load_general().unwrap().default_preset,
+            None,
+            "and on disk, or the next startup resurrects it"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Deleting the profile currently *open in the editor* must not have its file
+    /// written straight back by the autosave that follows.
+    ///
+    /// Verified to fail before the fix: `delete_profile` called `persist()`, which
+    /// under `NavSel::Profile(name)` runs `save_preset(editing_preset_buf)` — and
+    /// `profiles/P.json` reappeared on disk immediately after being removed.
+    #[test]
+    fn deleting_the_profile_being_edited_does_not_resurrect_its_file() {
+        let (mut app, base) = preset_ref_app("del-profile-open");
+        let p = Preset { name: "P".to_string(), ..Default::default() };
+        app.paths.save_preset(&p).unwrap();
+        app.nav_sel = NavSel::Profile("P".to_string());
+        app.editing_preset_buf = Some(p);
+        // The ambient game references it, which is what used to trigger `persist()`.
+        app.game_config.config.modules.preset = Some("P".to_string());
+
+        app.delete_profile("P");
+        app.persist();
+
+        assert!(
+            app.paths.load_preset("P").unwrap().is_none(),
+            "the deleted profile's file must stay deleted"
+        );
+        assert_eq!(app.game_config.config.modules.preset, None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn ide_preview_shades_against_its_own_preset_chain_not_nav_sels() {
         let base = std::env::temp_dir().join(format!(
@@ -11169,20 +11508,171 @@ mod tests {
     // draft without a word. Every route out is now either locked (the Config-mode
     // nav tree and MODULES tree, while a draft is open) or prompts.
 
-    /// The gate that decides whether a tab click needs a prompt at all. The two
-    /// config destinations clear every draft on confirm, so they prompt whenever
-    /// anything is dirty; IDE Mode never costs a draft since S4a made module
-    /// switching non-destructive.
+    /// The gate that decides whether a tab click needs a prompt at all — one arm
+    /// per destination, each matching what that destination actually drops
+    /// (issue #35).
+    ///
+    /// Rewritten from the pre-#35 version, which asserted that **both** config
+    /// destinations prompt on `any_unsaved`. That was the bug: `GeneralSettings`
+    /// drops nothing, so its prompt existed only to offer a "yes" that
+    /// `drafts.clear()` then made expensive.
     #[test]
     fn nav_category_gate_prompts_only_when_the_draft_would_be_dropped() {
-        for cat in [NavCategory::GamesProfiles, NavCategory::GeneralSettings] {
-            assert!(nav_category_drops_draft(cat, true));
-            // Nothing dirty ⇒ nothing to lose ⇒ no prompt.
-            assert!(!nav_category_drops_draft(cat, false));
-        }
+        // Profiles drops the focused draft — and only asks about that one.
+        assert!(nav_category_drops_draft(NavCategory::GamesProfiles, true));
+        assert!(!nav_category_drops_draft(NavCategory::GamesProfiles, false));
+        // General Settings keeps every draft (`select_nav_category` only clears
+        // `focused_module`), so there is nothing to warn about, ever.
+        assert!(!nav_category_drops_draft(NavCategory::GeneralSettings, true));
+        assert!(!nav_category_drops_draft(NavCategory::GeneralSettings, false));
         // Staying in IDE mode keeps every draft, dirty or not.
         assert!(!nav_category_drops_draft(NavCategory::Ide, true));
         assert!(!nav_category_drops_draft(NavCategory::Ide, false));
+    }
+
+    /// **Issue #35, the amplification.** Switching to General Settings with
+    /// unsaved drafts open must cost nothing: the destination keeps every draft
+    /// by design, so no prompt may be raised — and if one somehow is, confirming
+    /// it must still not destroy anything.
+    ///
+    /// Verified to fail before the fix: with `GeneralSettings => any_unsaved` and
+    /// the `drafts.clear()` in `apply_discard_edits`'s `Nav` arm, the gate
+    /// asserted `true` and the draft count went to 0.
+    #[test]
+    fn switching_to_general_settings_never_costs_a_draft() {
+        let mut app = test_app();
+        app.mode = Mode::Ide;
+        let alpha = insert_draft(&mut app, "Ritze", "Alpha", "/x/alpha.json");
+        insert_draft(&mut app, "Ritze", "Beta", "/x/beta.json");
+        for p in ["/x/alpha.json", "/x/beta.json"] {
+            app.drafts.get_mut(&PathBuf::from(p)).unwrap().ext.meta.version =
+                "9.9".to_string();
+        }
+        app.focused_module = Some(alpha);
+        app.refresh_unsaved_drafts();
+        assert_eq!(app.unsaved_module_names().len(), 2, "premise: both are unsaved");
+
+        // No prompt: the destination requires no loss, so the question is not
+        // asked at all.
+        assert!(!nav_category_drops_draft(
+            NavCategory::GeneralSettings,
+            app.focused_draft_unsaved()
+        ));
+        // And the click, applied through the confirmed path, keeps both drafts.
+        app.apply_discard_edits(DiscardThen::Nav(NavCategory::GeneralSettings));
+        assert_eq!(app.drafts.len(), 2, "General Settings keeps every draft");
+        assert_eq!(app.mode, Mode::Config, "the click is still applied");
+        assert_eq!(app.nav_sel, NavSel::GeneralSettings);
+        assert_eq!(app.focused_module, None, "only focus is cleared");
+    }
+
+    /// **Issue #35, the milder `GamesProfiles` version.** Its destination drops
+    /// exactly one draft (`close_focused_draft`), so confirming must drop exactly
+    /// one — not all N — and the dialog must name exactly that one.
+    ///
+    /// Verified to fail before the fix: `apply_discard_edits` ran `drafts.clear()`
+    /// (leaving 0, not 1) and the dialog listed both modules via
+    /// `unsaved_module_names`.
+    #[test]
+    fn switching_to_profiles_drops_only_the_focused_draft_and_names_only_it() {
+        let mut app = test_app();
+        app.mode = Mode::Ide;
+        insert_draft(&mut app, "Ritze", "Alpha", "/x/alpha.json");
+        let beta = insert_draft(&mut app, "Ritze", "Beta", "/x/beta.json");
+        for p in ["/x/alpha.json", "/x/beta.json"] {
+            app.drafts.get_mut(&PathBuf::from(p)).unwrap().ext.meta.version =
+                "9.9".to_string();
+        }
+        app.focused_module = Some(beta);
+        app.refresh_unsaved_drafts();
+
+        // The prompt fires (the focused draft really is at risk) and names one.
+        assert!(nav_category_drops_draft(
+            NavCategory::GamesProfiles,
+            app.focused_draft_unsaved()
+        ));
+        assert_eq!(
+            app.discard_names(DiscardThen::Nav(NavCategory::GamesProfiles)),
+            vec!["Ritze::Beta".to_string()],
+            "the prompt must name exactly what it destroys"
+        );
+
+        app.apply_discard_edits(DiscardThen::Nav(NavCategory::GamesProfiles));
+
+        assert_eq!(app.drafts.len(), 1, "only the focused draft may go");
+        assert!(app.drafts.contains_key(&PathBuf::from("/x/alpha.json")));
+        assert_eq!(app.mode, Mode::Config, "the click is still applied");
+    }
+
+    /// A background draft the click would never touch must not raise a prompt.
+    /// Pre-fix the gate read `!unsaved_drafts.is_empty()`, so an unsaved draft
+    /// sitting behind a *clean* focused one made every tab click ask — and then
+    /// destroy it on Confirm.
+    ///
+    /// *Not independently pre-fix-failing, and deliberately so:* the predicate it
+    /// pins (`focused_draft_unsaved`) did not exist before the fix, and the real
+    /// call-site expression only runs inside a live egui frame. It is a
+    /// characterisation test for the new gate's argument. The *behavioural* delta
+    /// for this state is covered by
+    /// `switching_to_profiles_drops_only_the_focused_draft_and_names_only_it`,
+    /// which does fail pre-fix. The assertion below spells out the old expression
+    /// beside the new one so the difference is visible in the test itself.
+    #[test]
+    fn an_unfocused_unsaved_draft_does_not_raise_a_prompt() {
+        let mut app = test_app();
+        app.mode = Mode::Ide;
+        insert_draft(&mut app, "Ritze", "Alpha", "/x/alpha.json");
+        let beta = insert_draft(&mut app, "Ritze", "Beta", "/x/beta.json");
+        // Alpha (unfocused) is unsaved; Beta (focused) is clean.
+        app.drafts.get_mut(&PathBuf::from("/x/alpha.json")).unwrap().ext.meta.version =
+            "9.9".to_string();
+        app.focused_module = Some(beta);
+        app.refresh_unsaved_drafts();
+
+        assert!(!app.unsaved_drafts.is_empty(), "premise: something is unsaved");
+        assert!(!app.focused_draft_unsaved(), "premise: but not the focused one");
+        // The old argument (whole-map) vs. the new one (focused draft), side by
+        // side on the same state: the old one asked, the new one does not.
+        assert!(nav_category_drops_draft(
+            NavCategory::GamesProfiles,
+            !app.unsaved_drafts.is_empty()
+        ));
+        assert!(!nav_category_drops_draft(
+            NavCategory::GamesProfiles,
+            app.focused_draft_unsaved()
+        ));
+    }
+
+    /// The dialog's list and the destruction are one answer, per destination.
+    /// `ExitApp` is the only one that names every unsaved draft, because it is the
+    /// only one that destroys them all.
+    #[test]
+    fn discard_names_match_the_destination() {
+        let mut app = test_app();
+        app.mode = Mode::Ide;
+        insert_draft(&mut app, "Ritze", "Alpha", "/x/alpha.json");
+        let beta = insert_draft(&mut app, "Ritze", "Beta", "/x/beta.json");
+        for p in ["/x/alpha.json", "/x/beta.json"] {
+            app.drafts.get_mut(&PathBuf::from(p)).unwrap().ext.meta.version =
+                "9.9".to_string();
+        }
+        app.focused_module = Some(beta);
+        app.refresh_unsaved_drafts();
+
+        assert_eq!(
+            app.discard_names(DiscardThen::CloseEditor),
+            vec!["Ritze::Beta".to_string()]
+        );
+        assert_eq!(
+            app.discard_names(DiscardThen::Nav(NavCategory::GeneralSettings)),
+            Vec::<String>::new(),
+            "nothing is destroyed, so nothing is named"
+        );
+        assert_eq!(
+            app.discard_names(DiscardThen::ExitApp(EditOutcome::Cancel)),
+            vec!["Ritze::Alpha".to_string(), "Ritze::Beta".to_string()],
+            "the process ends, so every unsaved draft is at risk"
+        );
     }
 
     /// The prompt names the modules at risk, in the plural form S4a grew into
@@ -11407,15 +11897,19 @@ mod tests {
         assert_eq!(app.unsaved_module_names(), vec!["Ritze::Alpha".to_string()]);
     }
 
-    /// Confirm on a tab-click prompt must do BOTH halves: drop every draft *and*
-    /// complete the navigation the user clicked. Dropping without navigating would
-    /// lose the edits and go nowhere — the worst of both.
+    /// Confirm on a tab-click prompt must do BOTH halves: complete the navigation
+    /// the user clicked *and* drop what that destination drops. Dropping without
+    /// navigating would lose the edits and go nowhere — the worst of both.
     ///
     /// Rewritten for S4b: `editor_return` is gone, and `nav_sel` is no longer
     /// what carries "which module is focused" (that's `focused_module` now), so
     /// there is nothing to "restore" — the destination comes entirely from
     /// `select_nav_category(cat)`, exercised here exactly as the real click path
     /// exercises it.
+    ///
+    /// Rewritten again for issue #35: the destination is now `GamesProfiles`
+    /// (the only tab that drops anything), and the assertion is that the *one*
+    /// focused draft went — not that the map was emptied.
     #[test]
     fn confirming_a_tab_click_discards_and_completes_the_switch() {
         let mut app = test_app();
@@ -11425,11 +11919,10 @@ mod tests {
         app.drafts.insert(draft.manifest.clone(), draft);
         app.focused_module = Some("Ritze::Sample::1.0".to_string());
 
-        app.apply_discard_edits(DiscardThen::Nav(NavCategory::GeneralSettings));
+        app.apply_discard_edits(DiscardThen::Nav(NavCategory::GamesProfiles));
 
-        assert!(app.drafts.is_empty(), "the confirmed discard must drop every draft");
+        assert!(app.drafts.is_empty(), "the focused draft — the only one — must go");
         assert_eq!(app.mode, Mode::Config, "the click must still be applied");
-        assert_eq!(app.nav_sel, NavSel::GeneralSettings, "the click must still be applied");
         assert_eq!(app.focused_module, None, "focus must be cleared along with the mode switch");
     }
 
@@ -12055,11 +12548,13 @@ mod tests {
             1
         );
 
-        // Gate 2 — the category-tab guard sees the draft.
+        // Gate 2 — the category-tab guard sees the draft. (Since issue #35 the
+        // guard asks about the *focused* draft, which is this one.)
         assert!(!app.unsaved_drafts.is_empty());
+        assert!(app.focused_draft_unsaved());
         assert!(nav_category_drops_draft(
             NavCategory::GamesProfiles,
-            !app.unsaved_drafts.is_empty()
+            app.focused_draft_unsaved()
         ));
 
         // Gate 3 — and the confirm dialog names it, by its on-disk identity (not
@@ -12069,6 +12564,11 @@ mod tests {
             app.unsaved_module_names(),
             vec!["Ritze::Alpha".to_string()],
             "the prompt must name a module it is about to destroy"
+        );
+        assert_eq!(
+            app.discard_names(DiscardThen::Nav(NavCategory::GamesProfiles)),
+            vec!["Ritze::Alpha".to_string()],
+            "and the per-destination list agrees"
         );
 
         // Gate 1 — Close prompts instead of discarding on the spot.

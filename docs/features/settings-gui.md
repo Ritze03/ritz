@@ -593,7 +593,11 @@ the band swap on `Mode`.
     toggle/slot picker, **Parent** combo (any other profile; a selection that would
     introduce a cycle is shown disabled and red via
     `crate::context::chain_would_have_cycle` rather than rejected server-side), Delete
-    and Duplicate buttons.
+    and Duplicate buttons. Rename and Delete both re-point **every** stored reference to
+    the profile — games' `Preset`, other profiles' `Parent`, the general-config
+    `DefaultPreset` — via the shared `crate::gui::GuiApp::retarget_preset_references`; see
+    [scoped-config.md](scoped-config.md#renaming-or-deleting-a-profile-sweeps-every-reference-to-it)
+    for why a leftover reference resurrects when the name is reused (issue #36).
   - *Game* — editable AppID (Enter renames the on-disk file via
     `crate::gui::GuiApp::rename_game_appid`), editable Name, a **Profile** combo
     assigning which preset the game uses, Delete button.
@@ -939,6 +943,37 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   `ConfirmAction::DiscardEdits { then: DiscardThen::Nav(cat) }` instead of applying the
   click. Confirm discards the draft **and completes the switch**; Cancel leaves the editor
   and the draft exactly as they were.
+  - **The prompt names exactly what it destroys, and destroys no more than the
+    destination requires** (2026-07-19, issue #35). Originally the dialog listed
+    `GuiApp::unsaved_module_names` (*every* unsaved draft) while
+    `GuiApp::apply_discard_edits` ran `drafts.clear()` (*every* draft, unsaved or not) —
+    two different sets, neither of which matched what any destination actually needed.
+    Three things changed, and they are one principle applied three times:
+    - `DiscardThen::Nav(cat)` **no longer clears the map**. It calls
+      `GuiApp::select_nav_category(cat)` and lets the destination drop what it drops, so
+      the confirmed path and the plain (nothing-unsaved) path are the same code and
+      cannot drift.
+    - **`NavCategory::GeneralSettings` no longer prompts at all.** `select_nav_category`
+      keeps every draft there and only clears `focused_module` — so the old prompt was
+      offering a "yes" that `drafts.clear()` then made expensive. *Why this is the whole
+      bug in miniature:* the confirmation created a loss the destination never required,
+      and Cancel was the only non-destructive answer. A destination that costs nothing
+      must not ask a question.
+    - **`NavCategory::GamesProfiles` asks about, and destroys, the focused draft only.**
+      Its destination calls `GuiApp::close_focused_draft` — one draft — so
+      `nav_category_drops_draft` now takes `GuiApp::focused_draft_unsaved` instead of
+      `!unsaved_drafts.is_empty()`. A background draft the click would never touch is no
+      longer a reason to prompt.
+
+    The dialog's list comes from `GuiApp::discard_names(then)`, keyed on the
+    destination, not from `unsaved_module_names`: focused-draft-only for `CloseEditor`
+    and `Nav(GamesProfiles)`, empty for the two destinations that drop nothing, every
+    unsaved draft for `ExitApp`. *Why `ExitApp` still clears the whole map while naming
+    only the unsaved ones:* a clean, unstaged draft is byte-identical to its manifest and
+    is rebuilt by reopening the module, so dropping it destroys nothing a user could
+    notice — naming it would pad the prompt with modules that are not at risk. The
+    map-clear is a cache eviction for those entries and a real loss only for the ones
+    listed.
   - *Why the destination is a payload on the existing variant* rather than three
     variants: all three cases render the identical dialog and differ only in what runs
     after Confirm. `DiscardThen::CloseEditor` is the editor's own Close button (Close
@@ -950,13 +985,14 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
     no staged rename, so dropping it loses nothing and prompting on every tab click would
     be pure noise. The gate is `ModuleDraft::has_unsaved_work`, not `dirty()` — see
     "Unsaved work vs. dirty" below. The pure predicate
-    `nav_category_drops_draft` decides *which* clicks even qualify: the two config
-    destinations always leave the editor (Confirm clears the whole draft map), while
-    **IDE Mode** never does — since S4a made `drafts` a keyed map, switching modules
-    inside IDE mode destroys nothing, so a prompt on the mode's primary gesture would be
-    pure noise.
+    `nav_category_drops_draft` decides *which* clicks even qualify: **Profiles** does
+    (it drops the focused draft), while **General Settings** and **IDE Mode** never do —
+    since S4a made `drafts` a keyed map, switching modules inside IDE mode destroys
+    nothing, and General Settings keeps every draft too, so a prompt on either would be
+    pure noise. (Pre-#35 both config destinations prompted on `any_unsaved`; see "The
+    prompt names exactly what it destroys" above.)
   - The prompt **names the modules at risk** — "These modules have unsaved changes:
-    Author::Name." — from `GuiApp::unsaved_module_names`, which returns a list even though
+    Author::Name." — from `GuiApp::discard_names`, which returns a list even though
     S3b only ever holds one draft, so multi-draft (S4) grows the list without rewording
     the dialog. Names come from the on-disk identity (`ext.meta`), not the staged rename
     buffers: a half-typed rename is not what the user recognises the module by.
@@ -1536,7 +1572,8 @@ that reason.
 
 *Why `GuiApp::unsaved_drafts` (the per-frame set) became unsaved-work-based rather than
 leaving it `dirty()`-based with callers switching:* `apply_discard_edits` destroys **whole
-drafts** (`drafts.clear()` / `shift_remove`), staged identity included. A dirty-based set
+drafts** (`shift_remove`, or `drafts.clear()` on the exit path), staged identity included.
+Which drafts, per destination, is `GuiApp::discard_names`' job (issue #35). A dirty-based set
 would let the confirm dialog name strictly fewer modules than confirming it destroys —
 exactly the silent-loss shape the prompt exists to prevent. The set and the destruction now
 describe the same thing. Everything else reading that set (nav lock, tree markers, preview
@@ -1645,11 +1682,13 @@ the single `Option<ModuleDraft>` slot that every module switch used to overwrite
   pre-rename manifest and are updated field by field. (It used to drop and re-seed from
   disk; once Rename stopped writing the body, re-seeding would have discarded the
   still-pending body edits — see "Rename / identity migration", step (6).)
-- **Exit confirmation.** `nav_category_drops_draft(cat, any_dirty)` now returns `false` for
+- **Exit confirmation.** `nav_category_drops_draft` returns `false` for
   the **IDE** tab unconditionally (switching modules inside IDE mode costs nothing, so a
-  prompt on the mode's primary gesture would be pure noise) and `any_dirty` for the two
-  config destinations, which clear the whole map on confirm
-  (`apply_discard_edits(Some(cat))`). The dialog wording, already plural, is unchanged.
+  prompt on the mode's primary gesture would be pure noise). At the time it returned
+  `any_dirty` for the two config destinations, which cleared the whole map on confirm;
+  **issue #35 later narrowed both** — General Settings to `false` and Profiles to the
+  focused draft — see "The prompt names exactly what it destroys" above. The dialog
+  wording, already plural, is unchanged throughout.
 
 **Two pre-existing bugs fixed alongside** (2026-07-19):
 

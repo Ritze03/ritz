@@ -50,6 +50,44 @@ Because stored config keys on `Author → Name → var` only (Version is dropped
 
 *Why a per-var safe prune instead of dropping the whole source entry:* an in-place field rename is `from == to` with only `rename` set — nuking the source entry would delete the just-written destination, so the prune removes only the renamed-away old names and never the clobber-skipped ones.
 
+### Renaming or deleting a profile sweeps every reference to it
+
+A profile is referenced from three places, and **all three are re-pointed together** by
+`crates/ritz-app/src/gui.rs:GuiApp::retarget_preset_references`, shared by
+`crate::gui::GuiApp::rename_preset` (re-point to the new name) and
+`crate::gui::GuiApp::delete_profile` (clear to "none"):
+
+1. `games/<appid>.json` → `Preset` — the profile assigned to a game.
+2. `profiles/<name>.json` → `Parent` — the parent link forming the extra inheritance
+   layer described above.
+3. `general.json` → `DefaultPreset` — the fallback for games with none assigned.
+
+*Why the sweep must be exhaustive, and why one function serves both callers*
+(2026-07-19, issue #36): `delete_profile` used to fix only the **ambient** game
+(`self.game_config`) despite a doc comment claiming "any game referencing it falls back to
+no profile", and `rename_preset`'s inline sweep covered games and `DefaultPreset` but never
+`Parent`. A left-behind reference degrades gracefully at first — `Paths::load_preset`
+returns `Ok(None)` for a missing file — but it is dormant, not harmless: create a new,
+unrelated profile with the **same name** and the stale reference silently re-attaches,
+inheriting settings nobody assigned. A dangling `Parent` is the worse of the two, since the
+resurrected name injects a whole inherited layer under an existing profile. Rename and
+delete are the same operation over the same reference graph (`Some(new)` vs. `None`), so
+they share one implementation and cannot drift apart.
+
+*Why `Paths::list_games` and not the GUI's cached `self.games` list:* the cache is
+refreshed only on create/delete/rename and IDE-mode entry, so a game written since the last
+refresh would be skipped — leaving exactly the dangling reference the sweep exists to
+prevent. The directory is the authority.
+
+**`config_cleanup` does not cover this.** It sweeps *undeclared module variables* out of
+the scope files; profile references are a different kind of link and it never looks at
+them. The sweep at the point of rename/delete is the only thing that keeps them honest.
+
+Related: deleting the profile currently open in the editor also drops
+`GuiApp::editing_preset_buf` first, because the autosave `crate::gui::GuiApp::persist`
+performs under `NavSel::Profile(name)` would `save_preset` it straight back and re-create
+the file just removed.
+
 ## Provenance display
 
 The resolved `Provenance` drives the colour a field (and its tree row) is tinted with, via `crates/ritz-app/src/theme.rs:scope_color`:
