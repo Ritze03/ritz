@@ -3384,8 +3384,7 @@ fn editor_status_lines(info: &EditorHeaderInfo) -> Vec<StatusLine> {
         );
     } else if info.dirty {
         push(
-            "Unsaved changes \u{2014} config autosave paused until you Save or Discard."
-                .to_string(),
+            "Unsaved changes \u{2014} Save or Discard to apply.".to_string(),
             theme::COL_PROFILE,
             DiagSeverity::Info,
         );
@@ -3407,8 +3406,7 @@ fn editor_status_lines(info: &EditorHeaderInfo) -> Vec<StatusLine> {
         // Merging them would either lose the state line in the "body dirty AND
         // rename staged" case or duplicate it in this one.
         push(
-            "Unsaved rename \u{2014} config autosave paused until you Rename or Discard."
-                .to_string(),
+            "Unsaved rename \u{2014} Rename or Discard to apply.".to_string(),
             theme::COL_PROFILE,
             DiagSeverity::Info,
         );

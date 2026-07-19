@@ -1162,6 +1162,11 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   a destructive dialog (`DeleteModule`/`DiscardEdits`) makes `render_confirm_dialog` return
   `true` unconditionally, which used to fall through to a harmless re-save of an unmodified
   `game_config` — now it's a genuine no-op.
+- **Status-line wording caught up (2026-07-19).** Both unsaved arms of `editor_status_lines`
+  used to read "…config autosave paused until you Save/Rename or Discard.", describing the
+  interlock removed above. They now read "Unsaved changes — Save or Discard to apply." and
+  "Unsaved rename — Rename or Discard to apply." — the mechanism is gone and autosave is not
+  planned to come back, so the clause was deleted rather than the interlock restored.
 
 ### Unsaved work vs. dirty (2026-07-19, issue #34)
 
@@ -1385,7 +1390,7 @@ both halves of that.
 
 **A staged rename counts as unsaved** (2026-07-19, issue #34). With a clean body and a
 pending Author/Name/`Variable` edit the state line reads
-*"Unsaved rename — config autosave paused until you Rename or Discard."*, not
+*"Unsaved rename — Rename or Discard to apply."*, not
 "All changes saved." — the user's words: *"to the user, that's just wrong."*
 
 - *Why its own arm rather than reusing the "Unsaved changes" wording:* the button that
