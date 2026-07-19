@@ -324,7 +324,7 @@ pub enum OptionsSpec {
 pub struct EnvVarSpec {
     #[serde(rename = "Name")]
     pub name: String,
-    #[serde(rename = "Requires", default)]
+    #[serde(rename = "Requires", default, skip_serializing_if = "Option::is_none")]
     pub requires: Option<String>,
     #[serde(rename = "Builder", default)]
     pub builder: Vec<EnvBuilderEntry>,
@@ -332,13 +332,13 @@ pub struct EnvVarSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvBuilderEntry {
-    #[serde(rename = "Requires", default)]
+    #[serde(rename = "Requires", default, skip_serializing_if = "Option::is_none")]
     pub requires: Option<String>,
     #[serde(rename = "Type")]
     pub op: EnvOp,
-    #[serde(rename = "Value", default)]
+    #[serde(rename = "Value", default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
-    #[serde(rename = "Separator", default)]
+    #[serde(rename = "Separator", default, skip_serializing_if = "Option::is_none")]
     pub separator: Option<String>,
 }
 
@@ -522,6 +522,40 @@ mod tests {
         assert!(!out.contains("WRAPPERS"), "unexpected WRAPPERS key:\n{out}");
 
         // Round-trips: re-parse equals the original (compare via JSON value).
+        let reparsed: Extension = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            serde_json::to_value(&ext).unwrap(),
+            serde_json::to_value(&reparsed).unwrap()
+        );
+    }
+
+    /// The same no-noise convention, for the `ENV_VARS` / `Builder` types.
+    ///
+    /// These four fields (`EnvVarSpec::requires`, and `EnvBuilderEntry`'s `requires`
+    /// / `value` / `separator`) carried `default` without `skip_serializing_if`, so
+    /// saving a module rewrote its manifest with explicit `"Requires": null` /
+    /// `"Separator": null` that hand-written manifests never contain. That asymmetry
+    /// is also why the spurious-dirty bug fixed in `6f47e5a` presented as a
+    /// `"" -> null` diff instead of a key simply disappearing.
+    #[test]
+    fn env_var_and_builder_entries_serialize_without_null_noise() {
+        // An `unset` step needs no Value and no Separator; nothing here is optional-
+        // but-present, so a correct serializer emits none of those keys.
+        let ext: Extension = serde_json::from_value(serde_json::json!({
+            "Extension": {"Name": "Mini", "Author": "Ritze", "Version": "1.0"},
+            "ENV_VARS": [{
+                "Name": "RADV_PERFTEST",
+                "Builder": [{"Type": "unset"}]
+            }]
+        }))
+        .unwrap();
+
+        let out = serde_json::to_string_pretty(&ext).unwrap();
+        assert!(!out.contains("null"), "ENV_VARS block has null noise:\n{out}");
+        for key in ["Requires", "Value", "Separator"] {
+            assert!(!out.contains(key), "unexpected {key} key in:\n{out}");
+        }
+
         let reparsed: Extension = serde_json::from_str(&out).unwrap();
         assert_eq!(
             serde_json::to_value(&ext).unwrap(),
