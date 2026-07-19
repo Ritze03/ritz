@@ -1066,7 +1066,7 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
     `PendingIdentity::staged_author()` / `staged_name()` / `staged_var_changed()`.
     Everything downstream goes through them: `has_pending_identity`,
     `compute_identity_error`, `draft_identity_collides`, `refresh_identity_state`,
-    `perform_rename`, the `SaveWithPendingRename` dialog label, and the
+    `perform_rename`, and the
     `(rename pending)` notes under Author / Name / Variable. The Fork/Create dialog
     already trimmed at its own boundary (`render_module_dialog`).
 
@@ -1094,46 +1094,57 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   `ext.ui` is an `IndexMap`, so `"General"` and `"General "` are two visually identical
   keys — untrimmed, one of them silently disappeared on Save instead of being reported as
   the duplicate it is.
-- **Save with a staged rename pending — the prompt** (2026-07-19) — the Save button and
-  Ctrl+S both route through **`GuiApp::request_save_module`**, never `save_module`
-  directly. It checks the Save gate first (a disabled Save stays a no-op), then, if
-  `has_pending_identity()`, raises `ConfirmAction::SaveWithPendingRename { blocked }`
-  instead of writing. *Why this exists:* because `PendingIdentity` is outside
-  `snapshot()`, the Save gate is opened purely by the **body** edits — so `save_module`
-  wrote the body under the **old** identity and then `drafts.shift_remove(&manifest)`
-  deleted the draft, taking the staged rename with it, **silently**. The user's typed
-  new name simply evaporated. The write was never wrong; the missing step was asking.
-  The two arms:
-  - `blocked: None` (identity committable) — one confirm button, **"Rename & Save"**,
-    running `GuiApp::rename_and_save`. *Why no "save body only" alternative:* Rename
-    already writes `snapshot()` — the whole body — with the new Author/Name applied, so
-    Rename & Save is strictly better than a body-only save, and **Cancel already loses
-    nothing** (both the body edits and the staged identity stay in the draft). Offering
-    a lossy third option next to a lossless one would only re-create the confusion the
-    prompt exists to remove.
-  - `blocked: Some(reason)` (identity invalid — empty, colliding, or a bad var rename)
-    — Rename cannot run at all, so the confirm button is **"Save Without Renaming"**,
-    falling back to plain `save_module`. *Why offer the lossy save here and not above:*
-    refusing outright would trap the user — they could not save legitimate body work
-    until they fixed or reverted an unrelated identity edit. Here it is the only way
-    forward, so it is offered with the reason stated and the discard spelled out
-    ("discards the staged rename"), i.e. informed consent rather than silent loss.
-  - `GuiApp::rename_and_save` calls `perform_rename` and then closes the editor
-    **only if the rename landed** (re-seeded draft is clean *and* has no pending
-    identity). *Why the conditional close:* the user pressed *Save*, so Save's outcome
-    (leave the editor) is what they asked for — but `perform_rename` can abort on a
-    failed `migrate_renamed_module` having touched nothing, and reports that through
-    the `carryover_report` banner **inside** the editor. Closing on that path would
-    discard the still-unsaved draft and hide the failure message.
+- **Save and Rename are independent operations** (2026-07-19) — **Save writes the body
+  and only the body; Rename writes the identity and only the identity.** Either can be
+  pressed with the other's work still pending, in either order, with no prompt, no
+  coupling gate and nothing discarded.
+
+  *Why (the user's reasoning, verbatim):* "Pressing the Rename button currently also
+  saves the whole config, which is wrong. Those two should be independent, like rename
+  should actually only do the renaming, and saving should actually only do the saving."
+  Offered "fully separate" against two merging alternatives, the user chose fully
+  separate.
+
+  What each half does with the other's pending work:
+  - **Save** (`GuiApp::save_module`) writes `snapshot()` and leaves `identity`
+    untouched — not committed, not cleared, not discarded. With an identity staged it
+    also **does not drop the draft and does not close the editor**: the draft *is*
+    where the staged rename lives, so closing would destroy it. Instead the draft is
+    re-based in place (`baseline` / `baseline_vars` ← what was just written), leaving
+    `dirty() == false`, `has_pending_identity() == true`, `has_unsaved_work() == true`.
+    With nothing staged, Save keeps its historical outcome (drop draft, reload, close).
+  - **Rename** (`GuiApp::perform_rename`) — see the next bullet.
+  - The Save button and Ctrl+S still share one entry point,
+    **`GuiApp::request_save_module`**, but it is no longer a router: all it carries is
+    the "not while a modal is up" guard (the dialog backdrop eats pointer input but not
+    key presses, so a held Ctrl+S would otherwise write under an open confirmation).
   - Config mode is unaffected: `focused_module` is only ever set under `Mode::Ide`, so
-    `draft()` is `None` and `request_save_module` returns immediately.
-  - Regressions: `save_with_a_valid_staged_rename_prompts_instead_of_writing`,
-    `save_with_an_invalid_staged_rename_prompts_with_the_reason`,
+    `draft()` is `None` and `save_module` returns immediately.
+  - Regressions: `save_with_a_staged_rename_writes_the_body_and_leaves_the_identity_staged`,
+    `save_with_an_invalid_staged_rename_still_writes_only_the_body`,
     `save_without_a_staged_rename_does_not_prompt`,
-    `rename_and_save_writes_the_new_identity_and_the_body_edit` (real files in a scratch
-    base dir — asserts the manifest still says the *old* name at prompt time and both
-    the new name and the body edit after confirming),
-    `rename_and_save_keeps_the_editor_open_when_the_rename_does_not_land`.
+    `rename_writes_the_new_identity_and_leaves_the_body_edit_pending`,
+    `rename_succeeds_with_an_invalid_body_in_progress`,
+    `rename_with_an_invalid_identity_does_nothing_and_keeps_the_editor_open` (the first
+    four use real files in a scratch base dir — the point of the split is what lands on
+    disk, so a mocked writer would only re-assert the mock).
+
+  **Superseded: the `SaveWithPendingRename` prompt** (also 2026-07-19, earlier the same
+  day; kept here because the hazard it named is real and the new design must keep
+  answering it). Because `PendingIdentity` sits outside `snapshot()`, the Save gate is
+  opened purely by *body* edits — so `save_module` wrote the body under the **old**
+  identity and then `drafts.shift_remove(&manifest)` deleted the draft, taking the
+  staged rename with it, **silently**. That was patched with a confirmation
+  (`ConfirmAction::SaveWithPendingRename { blocked }`, two arms: "Rename & Save" when
+  the identity was committable, "Save Without Renaming" when it was not) plus a
+  `GuiApp::rename_and_save` helper. The variant, both arms, the helper and the prompt's
+  three tests are **deleted**. *Why the hazard is gone rather than merely unasked:* the
+  prompt existed to decide what happens to a staged rename that Save was about to
+  destroy. Save no longer destroys it — it keeps the draft — so there is no decision
+  left to put to the user, and asking anyway would be a modal on the editor's most
+  common gesture. The `confirm_label` / `destructive` overrides in
+  `render_confirm_dialog` (added for that prompt's non-destructive "Rename & Save"
+  button) survive as defaults; no current variant overrides them.
 - **Rename / identity migration** (Phase 3 stage 2b, `GuiApp::perform_rename`) — a **Rename**
   header button, enabled only when `has_pending_identity() && identity_error.is_none()`.
   `identity_error` rejects an empty/colliding (Author, Name) (`name_collides`, Version-blind,
@@ -1143,7 +1154,8 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   in **exactly** this order: (1) compute `from` = on-disk `(Author,Name)`, `to` = new pair,
   `var_rename` = changed existing-field vars; (2) **scope sweep FIRST** —
   `config::migrate_renamed_module` moves stored config across every scope; on error, abort
-  **without** touching the manifest; (3) build the new manifest from `snapshot()` — apply
+  **without** touching the manifest; (3) build the new manifest from the **on-disk body**
+  (`ModuleDraft::baseline`, *not* `snapshot()` — see below) — apply
   the new Author/Name and rewrite in-module references via `schema::apply_var_renames`
   (each `{old}` interpolation token → `{new}`, each exact `old` identifier in a `Requires`
   → `new`, plus each field's own `Variable`; exact-token match so `old_thing` / `global:old`
@@ -1151,11 +1163,46 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   JSON meta) via `config::write_atomic`. *Why this order:* the sweep is idempotent and the
   manifest is written last, so a crash between (2) and (4) leaves the manifest on the OLD
   identity — re-pressing Rename re-runs cleanly (already-moved scopes no-op). No WAL/journal.
-  Dropped vars reuse the `carryover_report` banner; the editor reopens on the new `id`.
-  Because step (3) builds the manifest from `snapshot()`, **Rename already saves the
-  body** — which is why the Save-with-pending-rename prompt above needs no separate
-  save step, and why `perform_rename` is gated on `!dirty() || save_enabled()`. This
-  step order is load-bearing and must not be reordered by anything that reuses it.
+  Dropped vars reuse the `carryover_report` banner; the editor stays open on the new `id`.
+  This step order is load-bearing and must not be reordered by anything that reuses it.
+
+  **Rename writes the identity only** (2026-07-19 — the independence decision above).
+  Step (3) used to build the manifest from `snapshot()`, i.e. the whole *in-memory*
+  body, so Rename silently saved the body too. It now builds from
+  `ModuleDraft::baseline`. *Why `baseline` and not a re-read of the file:* `baseline`
+  **is** the on-disk state by definition — it is the value `ModuleDraft::dirty` measures
+  against. A re-read would be a second source of truth that can disagree with it (an
+  external edit, a text-vs-serde round-trip difference), and step (6) re-bases the draft
+  onto exactly these bytes, so a disagreement would leave `dirty()` answering about
+  state the write never saw. `from` (the identity the scope sweep migrates *away* from)
+  is read off the same value for the same reason.
+
+  **The `!dirty() || save_enabled()` gate is gone.** It was added earlier the same day
+  because Rename wrote the body and could therefore commit unsaved — even
+  `extension::validate`-rejecting — edits behind the user's back. Rename no longer
+  writes the body, so a dirty or invalid body is not a reason to refuse a rename;
+  renaming a module with a half-finished field in progress must work. The surviving
+  gates are `editable && has_pending_identity() && identity_error.is_none()`.
+
+  **Step (6), the draft bookkeeping** — the subtle half. After the write, disk holds the
+  NEW identity and the OLD body. The draft used to be dropped and re-seeded from disk
+  via `ensure_draft` (correct only while disk and draft agreed, i.e. while Rename also
+  wrote the body); re-seeding now would throw the pending body edits away. So the entry
+  is **re-based in place** instead — it never needed re-keying, since the manifest is
+  rewritten in place and `drafts` is keyed by path. Updated: `id`, `baseline`,
+  `baseline_vars`, and `identity` (re-seeded from the new on-disk identity, so nothing
+  reads as pending). The live body travels across the rename too — its Author/Name are
+  set to the new pair and `apply_var_renames` runs over it. *Why rename the live body's
+  variables as well:* otherwise a later Save would write the OLD variable names back,
+  undoing the manifest half of the rename while the config sweep had already moved the
+  stored values under the new ones. Its UI fields make that trip through **one synthetic
+  section** and are split back by the original per-section counts, because
+  `Extension::ui` is an `IndexMap` and folding `sections` into it would collapse two
+  identically-named sections — legal in a draft mid-edit, blocked only at the Save gate.
+  Resulting state: `has_pending_identity()` false, `dirty()` unchanged (body edits
+  against an equally-renamed baseline), `has_unsaved_work()` therefore exactly "there
+  are body edits". Pinned by
+  `rename_writes_the_new_identity_and_leaves_the_body_edit_pending`.
 - **Fork / Create / Delete** (Phase 3 stage 2a) — the editor header carries a **Fork**
   button (on *any* module, bundled or user) and a **Delete** button (only when
   `editable`), laid out **[Fork] [Delete] [Close] [Save]** left→right (plus **Rename** when an
@@ -1315,12 +1362,11 @@ rename-only draft's `snapshot()` is byte-identical to the spec it would replace.
 
 *Why `save_enabled()` did **not** change.* Save writes `snapshot()`, and a rename-only
 draft's snapshot equals disk — Save would rewrite the file with identical bytes under the
-**old** identity and then close the editor, applying nothing. Enabling it would also make
-the `ConfirmAction::SaveWithPendingRename` prompt's "save body only" arm a no-op write. The
-rename's affordance is the **Rename** button, which is gated on the identity being valid
-and explicitly allows a clean body (`!dirty() || save_enabled()`). Net effect: a rename-only
-draft reports unsaved work everywhere the user is *asked about losing it*, while Save stays
-greyed and Rename is the lit control.
+**old** identity, applying nothing. The rename's affordance is the **Rename** button,
+which is gated on the identity being valid and does not look at the body at all (see
+"Save and Rename are independent operations"). Net effect: a rename-only draft reports
+unsaved work everywhere the user is *asked about losing it*, while Save stays greyed and
+Rename is the lit control.
 
 ### Multi-draft — `GuiApp::drafts` (S4a, 2026-07-19)
 
@@ -1375,9 +1421,11 @@ the single `Option<ModuleDraft>` slot that every module switch used to overwrite
   edited silently produced a fork of the *saved* version. The original draft keeps its edits
   (multi-draft makes carrying them into the fork *and* keeping them free).
   `perform_create` no longer clears drafts. `delete_module` removes only that manifest's
-  entry. `perform_rename` re-seeds its entry from disk after `reload_extensions`, since the
-  draft's `id`, `baseline`, `baseline_vars` and staged `identity` all describe the
-  pre-rename manifest.
+  entry. `perform_rename` **re-bases its entry in place** after `reload_extensions` —
+  the draft's `id`, `baseline`, `baseline_vars` and staged `identity` all describe the
+  pre-rename manifest and are updated field by field. (It used to drop and re-seed from
+  disk; once Rename stopped writing the body, re-seeding would have discarded the
+  still-pending body edits — see "Rename / identity migration", step (6).)
 - **Exit confirmation.** `nav_category_drops_draft(cat, any_dirty)` now returns `false` for
   the **IDE** tab unconditionally (switching modules inside IDE mode costs nothing, so a
   prompt on the mode's primary gesture would be pure noise) and `any_dirty` for the two
@@ -1389,8 +1437,11 @@ the single `Option<ModuleDraft>` slot that every module switch used to overwrite
 - `perform_rename` was gated on `editable && has_pending_identity && identity_error.is_none()`
   but **not** on `save_enabled()`, while writing `snapshot()` — the whole in-memory body — to
   disk. Rename therefore committed unsaved body edits behind the user's back, including ones
-  that fail `extension::validate` and so could never have gone out via Save. It is now also
-  gated on `!dirty() || save_enabled()` (renaming a clean draft stays allowed).
+  that fail `extension::validate` and so could never have gone out via Save. It was then
+  also gated on `!dirty() || save_enabled()` (renaming a clean draft stays allowed).
+  **Superseded later the same day:** Rename stopped writing the body at all, which
+  removed the reason for the gate along with the bug — the gate is gone again. See
+  "Save and Rename are independent operations".
 - `perform_rename` never remapped `GuiApp::preview_config`, the IDE preview's in-memory
   scratch layer. `config::remap_all_scopes` walks *files*, so it could not reach it, and the
   scratch values silently orphaned under the old identity. `config::remap_one_scope` is now
@@ -1785,13 +1836,14 @@ dialog is interactive). *Why route everything through one enum instead of five a
 confirm flags:* one dialog renderer handles the modal chrome/backdrop once; each variant
 just supplies its title/message and its own commit logic.
 
-Not every variant is destructive. `ConfirmAction::SaveWithPendingRename` (see "Save with
-a staged rename pending" above) is a *hazard* prompt rather than a delete confirmation,
-so the renderer lets an arm override two things: `confirm_label` (default `"Confirm"`)
-and `destructive` (default `true`, selecting `theme::danger_button` over
-`theme::primary_button`). *Why an override and not a second dialog renderer:* the modal
-chrome, backdrop and Cancel wiring are byte-identical — the arms differ in one word on
-one button and in whether that button should read as red.
+Not every variant need be destructive: the renderer lets an arm override two things —
+`confirm_label` (default `"Confirm"`) and `destructive` (default `true`, selecting
+`theme::danger_button` over `theme::primary_button`). *Why an override and not a second
+dialog renderer:* the modal chrome, backdrop and Cancel wiring are byte-identical — such
+an arm differs in one word on one button and in whether that button should read as red.
+The one arm that used it, `ConfirmAction::SaveWithPendingRename`, was deleted on
+2026-07-19 (see "Save and Rename are independent operations"), so every *current* variant
+takes the destructive defaults.
 
 ## Using it
 

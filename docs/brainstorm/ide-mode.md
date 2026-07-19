@@ -461,6 +461,12 @@ rationale live in [`../features/settings-gui.md`](../features/settings-gui.md), 
   `id()` comes from the JSON meta), so the key is stable across exactly the operation the
   risk was about. Re-keying is a non-event. What a rename *does* need is a **re-seed** from
   disk, because the entry's `id`/`baseline`/`baseline_vars`/`identity` go stale.
+  > **Amended 2026-07-19 (later that day):** "re-seed from disk" held only while Rename
+  > also wrote the body. Once Save and Rename were made independent, Rename writes the
+  > on-disk body under the new identity and the draft's body edits stay pending — so a
+  > re-seed would discard them. Those four fields are now updated **in place**. The
+  > stale-field list above is still exactly right; only the mechanism changed. See
+  > `docs/features/settings-gui.md`, "Rename / identity migration", step (6).
 - **The `icon_cache` label-poisoning trap does not exist.** The plan warns that a dirty
   glyph must never be appended to the label string because it would poison
   `IconCenterCache`. `IconCenterCache` keys on the *leading char of the icon string* plus
@@ -495,6 +501,14 @@ header-button rearrangement is likewise still pending.
 on `save_enabled()` despite writing `snapshot()` to disk, and never remapped
 `preview_config`. `config::remap_one_scope` is now `pub` for the latter — note the plan
 calls this symbol `remap_module_config` in one place, which is a *different* function.
+
+> **Amended 2026-07-19 (later that day):** the first of those two fixes was superseded at
+> the root. On the user's call — "rename should actually only do the renaming, and saving
+> should actually only do the saving" — `perform_rename` stopped writing `snapshot()`
+> altogether and now writes the *on-disk* body (`ModuleDraft::baseline`) under the new
+> identity. With no body write there is nothing for a `save_enabled()` gate to protect, so
+> the gate was removed again and renaming with a dirty or even invalid body now works by
+> design. The `preview_config` remap fix is untouched and still correct.
 
 ### 2026-07-19 — diagnostics band opened (partial, ahead of the full panel)
 

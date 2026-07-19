@@ -328,30 +328,6 @@ enum ConfirmAction {
     /// so Confirm completes it instead of merely discarding. See
     /// [`DiscardThen`] for the three destinations and why they share one variant.
     DiscardEdits { then: DiscardThen },
-    /// Save was pressed while the open draft has a **staged identity change**
-    /// (Author / Name / an existing field's `Variable`) sitting in
-    /// `ModuleDraft::identity`.
-    ///
-    /// *Why this needs a prompt at all (2026-07-19):* `PendingIdentity` lives
-    /// outside `ModuleDraft::snapshot`, so Save wrote the body under the **old**
-    /// identity and then [`GuiApp::save_module`] dropped the draft — taking the
-    /// staged rename with it, silently. The user typed a new name and it simply
-    /// evaporated. Save must stop and ask instead.
-    ///
-    /// `blocked` is the payload, mirroring `ModuleDraft::identity_error`:
-    /// - `None` — the staged identity is committable. Confirm runs
-    ///   [`GuiApp::rename_and_save`]: Rename already writes `snapshot()` (the
-    ///   whole body) with the new Author/Name applied, so "rename, then save" is
-    ///   one operation, not two.
-    /// - `Some(reason)` — the staged identity is invalid (empty, colliding, or a
-    ///   bad var rename), so Rename cannot run. Confirm falls back to a body-only
-    ///   [`GuiApp::save_module`], with the dialog stating plainly that the staged
-    ///   rename is discarded.
-    ///
-    /// *Why a payload and not two variants:* same reason as `DiscardEdits` — one
-    /// dialog, one decision point, differing only in the wording and in what
-    /// Confirm runs.
-    SaveWithPendingRename { blocked: Option<String> },
 }
 
 /// The Fork / Create-new module dialog. Both share the same Author/Name form;
@@ -1783,80 +1759,42 @@ impl GuiApp {
         });
     }
 
-    /// The **only** entry point for the Save button and Ctrl+S. Saves directly
-    /// when nothing is staged, and otherwise raises
-    /// [`ConfirmAction::SaveWithPendingRename`] instead of writing.
+    /// The **only** entry point for the Save button and Ctrl+S.
     ///
-    /// *Why a router in front of [`Self::save_module`] (2026-07-19):* a staged
-    /// Author/Name/`Variable` edit lives in `ModuleDraft::identity`, deliberately
-    /// outside `snapshot()`, so it neither dirties the draft nor opens the Save
-    /// gate — Save is enabled purely by the *body* edits. `save_module` then wrote
-    /// the body under the old identity and dropped the draft from `self.drafts`,
-    /// destroying the staged rename with no message at all. The write itself was
-    /// never wrong; the missing step was asking. Keeping the ask here rather than
-    /// inside `save_module` leaves `save_module` a plain "write what you're told"
-    /// primitive that the confirmed body-only path can still call.
+    /// *Why a wrapper in front of [`Self::save_module`] at all (2026-07-19):* it
+    /// holds the one thing a keyboard shortcut needs and a button does not — a
+    /// guard against acting while a modal is up. Ctrl+S is not swallowed by the
+    /// dialog's backdrop (that only eats pointer input), so a user holding it
+    /// down would otherwise write under an open confirmation.
     ///
-    /// The Save gate is checked *first*, so a draft that could not be saved
-    /// anyway never raises a dialog — pressing a disabled Save stays a no-op.
+    /// It used to also route to a `SaveWithPendingRename` confirmation when an
+    /// identity edit was staged. That prompt is **gone** (2026-07-19): Save and
+    /// Rename are now fully independent operations — Save writes the body and
+    /// leaves the staged identity exactly where it is — so there is nothing left
+    /// to ask about. See [`Self::save_module`] and [`Self::perform_rename`].
     fn request_save_module(&mut self) {
-        // Never stack a second modal on top of a live one: Ctrl+S is not swallowed
-        // by the dialog's backdrop (that only eats pointer input), so a user
-        // holding Ctrl+S would otherwise re-arm this every frame.
         if self.confirm.is_some() {
-            return;
-        }
-        let Some(draft) = self.draft() else {
-            return;
-        };
-        if !draft.save_enabled() {
-            return;
-        }
-        if draft.has_pending_identity() {
-            let blocked = draft.identity_error.clone();
-            self.confirm = Some(ConfirmAction::SaveWithPendingRename { blocked });
             return;
         }
         self.save_module();
     }
 
-    /// Confirmed "Rename & Save": commit the staged identity (which writes the
-    /// body along with it) and then land where a plain Save lands.
+    /// Serialize the draft's **body** and write it to its manifest via
+    /// `write_atomic`. Refuses to write unless the Save gate is satisfied.
     ///
-    /// *Why this is not just `perform_rename` in the dialog's match arm:*
-    /// [`Self::perform_rename`] deliberately **stays in the editor** — it is
-    /// normally reached from the Rename button, where remaining on the freshly
-    /// renamed module is the right outcome. Reached from *Save*, the user asked
-    /// for Save's outcome, which is to leave the editor. So close afterwards —
-    /// but **only if the rename actually landed**. `perform_rename` can abort
-    /// (a failed `migrate_renamed_module` returns early, having touched nothing,
-    /// and reports itself through the `carryover_report` banner *inside* the
-    /// editor); closing on that path would both discard the still-unsaved draft
-    /// and hide the one place the failure is shown.
+    /// **Save writes the body and nothing else** (2026-07-19, user's decision):
+    /// a staged identity change is neither committed, cleared nor discarded here
+    /// — it stays staged, and only [`Self::perform_rename`] commits it. *Why:*
+    /// the user asked for the two operations to be genuinely independent
+    /// ("rename should actually only do the renaming, and saving should actually
+    /// only do the saving"), so both kinds of pending work can be committed in
+    /// either order, with two clicks and no coupling gate.
     ///
-    /// The success discriminator is the re-seeded draft itself: on success
-    /// `perform_rename` drops the old entry and re-seeds from the rewritten
-    /// manifest, so the draft is clean **and** has no pending identity. On abort
-    /// the original draft is untouched, so it is still dirty and still pending.
-    fn rename_and_save(&mut self) {
-        self.perform_rename();
-        let landed = self
-            .draft()
-            .is_some_and(|d| !d.dirty() && !d.has_pending_identity());
-        if landed {
-            self.close_focused_draft();
-        }
-        self.refresh_unsaved_drafts();
-    }
-
-    /// Serialize the draft and write it to its manifest via `write_atomic`, then
-    /// reload extensions so `cur_specs`/dirty reset (draft == disk). Refuses to
-    /// write unless the Save gate is satisfied.
-    ///
-    /// **Not a UI entry point.** Reached only through [`Self::request_save_module`]
-    /// (or the confirmed body-only arm of
-    /// [`ConfirmAction::SaveWithPendingRename`]), which is what guarantees a
-    /// staged identity change is never dropped without being offered first.
+    /// That independence is what decides the two exit paths below. With a staged
+    /// identity still pending, dropping the draft would destroy it (the exact
+    /// silent loss the old confirmation prompt existed to prevent), so the draft
+    /// is re-based **in place** and the editor stays open on the still-pending
+    /// rename. With nothing staged, Save keeps its historical outcome.
     fn save_module(&mut self) {
         let Some(draft) = self.draft() else {
             return;
@@ -1865,7 +1803,8 @@ impl GuiApp {
             return;
         }
         let manifest = draft.manifest.clone();
-        let json = match serde_json::to_string_pretty(&draft.snapshot()) {
+        let snap = draft.snapshot();
+        let json = match serde_json::to_string_pretty(&snap) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("ritz: failed to serialize module: {e:#}");
@@ -1874,6 +1813,23 @@ impl GuiApp {
         };
         if let Err(e) = core_config::write_atomic(&manifest, json.as_bytes()) {
             eprintln!("ritz: failed to save module: {e:#}");
+            return;
+        }
+        if self.draft().is_some_and(ModuleDraft::has_pending_identity) {
+            // Body landed, identity still staged: re-base the draft onto what was
+            // just written so `dirty()` reads false, and keep everything else —
+            // `identity` above all — untouched. Staying in the editor is not a
+            // preference, it is the only way the pending rename survives: closing
+            // drops the draft.
+            let vars: std::collections::HashSet<String> =
+                snap.ui.values().flatten().map(|f| f.variable.clone()).collect();
+            let baseline = serde_json::to_value(&snap).unwrap_or(Value::Null);
+            if let Some(d) = self.drafts.get_mut(&manifest) {
+                d.baseline = baseline;
+                d.baseline_vars = vars;
+            }
+            self.reload_extensions();
+            self.refresh_unsaved_drafts();
             return;
         }
         // Drop **this** draft and reload from disk, then clear focus so the tree's
@@ -2207,38 +2163,57 @@ impl GuiApp {
     ///    `old→new` var renames from the changed existing fields;
     /// 2. **scope sweep FIRST** — [`migrate_renamed_module`] moves stored config
     ///    across every scope; on error, abort **without** touching the manifest;
-    /// 3. build the new manifest from the draft snapshot: apply the new
-    ///    Author/Name and rewrite in-module `{var}`/`Requires` references + field
-    ///    `Variable`s via [`apply_var_renames`];
+    /// 3. build the new manifest from the **on-disk body** (`ModuleDraft::baseline`)
+    ///    with the new Author/Name applied and in-module `{var}`/`Requires`
+    ///    references + field `Variable`s rewritten via [`apply_var_renames`];
     /// 4. write the manifest **LAST, in place** (file never renamed; `id()` comes
     ///    from JSON meta) — only after the sweep succeeded.
     ///
     /// Because the sweep is idempotent and the manifest is written last, a crash
     /// between steps 2 and 4 leaves the manifest on the OLD identity, so
     /// re-pressing Rename re-runs cleanly (already-moved scopes no-op).
+    ///
+    /// **Rename writes the identity and nothing else** (2026-07-19, user's
+    /// decision). It used to build the manifest from `snapshot()` — the whole
+    /// *in-memory* body — so pressing Rename silently saved the body too. The
+    /// user's call: "rename should actually only do the renaming, and saving
+    /// should actually only do the saving". Body edits therefore stay pending in
+    /// the draft and are still dirty after the rename lands; Save commits them.
+    ///
+    /// *Why the body comes from `baseline` and not a re-read of the file:*
+    /// `baseline` **is** the on-disk state by definition — it is the value
+    /// [`ModuleDraft::dirty`] measures against. Re-reading would introduce a
+    /// second source of truth that can disagree with it (an external edit, or a
+    /// text-vs-serde round-trip difference), and then the post-rename baseline
+    /// bookkeeping below would be re-basing onto bytes the dirty check never saw.
+    /// One source, so the write and the dirty check cannot drift apart.
+    ///
+    /// *Why the old `!dirty() || save_enabled()` gate is gone:* it existed purely
+    /// because Rename wrote the body — it stopped Rename committing unsaved (and
+    /// possibly invalid) body edits behind the user's back. Rename no longer
+    /// writes the body, so a dirty or even invalid body is not a reason to refuse
+    /// a rename. Renaming with a half-finished field in progress must work.
     fn perform_rename(&mut self) {
         // Snapshot everything we need out of the draft so the immutable borrow is
         // released before we touch `self.paths` / reload.
         let Some((mut ext, manifest, old_author, old_name, new_author, new_name, var_rename)) = self
             .draft()
             .filter(|d| d.editable && d.has_pending_identity() && d.identity_error.is_none())
-            // `!dirty() || save_enabled()` — pre-existing bug fixed in S4a: Rename
-            // writes `snapshot()`, i.e. the whole in-memory body, to disk. Gated
-            // only on the *identity* being valid it therefore committed unsaved
-            // body edits behind the user's back, including ones that fail
-            // `core_extension::validate` and so could never have gone out via
-            // Save. Renaming a clean draft stays allowed (nothing to gate).
-            .filter(|d| !d.dirty() || d.save_enabled())
-            .map(|d| {
-                (
-                    d.snapshot(),
+            .and_then(|d| {
+                // The on-disk body. `from` is read off it too (rather than off
+                // `d.ext.meta`), so the identity the scope sweep migrates *from*
+                // and the body being rewritten are provably the same file state.
+                let disk: Extension = serde_json::from_value(d.baseline.clone()).ok()?;
+                let (old_author, old_name) = (disk.meta.author.clone(), disk.meta.name.clone());
+                Some((
+                    disk,
                     d.manifest.clone(),
-                    d.ext.meta.author.clone(),
-                    d.ext.meta.name.clone(),
+                    old_author,
+                    old_name,
                     d.identity.staged_author().to_string(),
                     d.identity.staged_name().to_string(),
                     d.changed_var_renames(),
-                )
+                ))
             })
         else {
             return;
@@ -2275,9 +2250,11 @@ impl GuiApp {
             true,
         );
 
-        // Step 3: build the new manifest (identity + reference rewrite).
-        ext.meta.author = new_author;
-        ext.meta.name = new_name;
+        // Step 3: build the new manifest — the ON-DISK body (`ext` came from
+        // `baseline`) with the new identity and the reference rewrite applied.
+        // The draft's in-memory body edits are deliberately NOT part of this.
+        ext.meta.author = new_author.clone();
+        ext.meta.name = new_name.clone();
         apply_var_renames(&mut ext, &var_rename);
 
         // Step 4: write the manifest LAST, in place, only after the sweep succeeded.
@@ -2301,13 +2278,70 @@ impl GuiApp {
         self.reload_extensions();
         self.reload_configs();
         self.focused_module = Some(new_id.clone());
-        // Manifest-path keying means the entry does NOT need re-keying (the file
-        // was rewritten in place, never renamed). It DOES need re-seeding: its
-        // `id`, `baseline`, `baseline_vars` and staged `identity` all describe the
-        // pre-rename manifest and are now stale — a draft left as-is would read
-        // back as permanently dirty against a baseline that no longer exists.
-        self.drafts.shift_remove(&manifest);
-        self.ensure_draft(&new_id);
+        // Step 6: re-base the draft **in place**, keeping its body edits.
+        //
+        // Manifest-path keying means the entry does not need re-keying (the file
+        // was rewritten in place, never renamed). It used to be dropped and
+        // re-seeded from disk via `ensure_draft` — correct only while Rename also
+        // wrote the body, since then disk and draft agreed. Now that the body
+        // stays pending, re-seeding would silently throw those edits away, so the
+        // stale parts (`id`, `baseline`, `baseline_vars`, staged `identity`) are
+        // updated field by field instead.
+        //
+        // The live body is carried across the rename too: its Author/Name become
+        // the new pair (they are the on-disk identity `has_pending_identity`
+        // compares against) and `apply_var_renames` runs over it, so a renamed
+        // variable is renamed in the pending edits as well. Without that, a later
+        // Save would write the OLD variable names back and undo the rename in the
+        // manifest while the config sweep had already moved the stored values.
+        //
+        // Post-state, by construction: `has_pending_identity()` false (staged ==
+        // on-disk), `dirty()` unchanged from before the rename (body edits vs. an
+        // equally-renamed baseline), `has_unsaved_work()` therefore exactly
+        // "there are body edits".
+        let new_vars: std::collections::HashSet<String> =
+            ext.ui.values().flatten().map(|f| f.variable.clone()).collect();
+        let new_baseline = serde_json::to_value(&ext).unwrap_or(Value::Null);
+        if let Some(d) = self.drafts.get_mut(&manifest) {
+            // Rewrite references in the live body. `apply_var_renames` works on an
+            // `Extension`, whose `ui` is an `IndexMap` — folding `sections` into
+            // one would collapse two identically-named sections (legal in a draft
+            // mid-edit, blocked only at the Save gate) and lose one. So the fields
+            // travel through a single synthetic section and are split back by the
+            // original per-section counts, leaving section names untouched.
+            let counts: Vec<usize> = d.sections.iter().map(|(_, f)| f.len()).collect();
+            let mut live = d.ext.clone();
+            live.ui = std::iter::once((
+                String::new(),
+                d.sections.iter().flat_map(|(_, f)| f.iter().cloned()).collect::<Vec<_>>(),
+            ))
+            .collect();
+            live.meta.author = new_author.clone();
+            live.meta.name = new_name.clone();
+            apply_var_renames(&mut live, &var_rename);
+            let mut flat = std::mem::take(&mut live.ui)
+                .into_iter()
+                .next()
+                .map(|(_, f)| f)
+                .unwrap_or_default()
+                .into_iter();
+            for ((_, fields), n) in d.sections.iter_mut().zip(counts) {
+                *fields = flat.by_ref().take(n).collect();
+            }
+            d.ext = live; // `ui` emptied by the take above — sections stay authoritative
+            d.id = new_id.clone();
+            d.baseline = new_baseline;
+            d.baseline_vars = new_vars;
+            // Re-seed the staged identity from the (new) on-disk identity, so
+            // nothing reads as pending. Per-field var buffers are re-seeded lazily
+            // by the editor (`or_insert_with`), keyed by each field's current name.
+            d.identity = PendingIdentity {
+                author: new_author,
+                name: new_name,
+                var_edits: d.baseline_vars.iter().map(|v| (v.clone(), v.clone())).collect(),
+            };
+            d.identity_error = None;
+        }
         self.refresh_unsaved_drafts();
     }
 
@@ -2508,12 +2542,13 @@ impl GuiApp {
         if self.focused_module().is_some() {
             // Ctrl+S: Save when the editor is open and the Save gate is satisfied
             // (same condition as the button); a no-op otherwise. Save exits the
-            // editor on success.
+            // editor on success — unless a rename is staged, which it leaves
+            // staged and stays put for.
             //
             // Routes through `request_save_module` — the *same* entry point as
-            // `TopAction::Save` — so the pending-rename prompt cannot be bypassed
-            // by preferring the keyboard. `request_save_module` re-checks the Save
-            // gate itself; `save_ok` stays only to skip the input poll.
+            // `TopAction::Save` — so the keyboard cannot bypass its modal guard.
+            // `save_module` re-checks the Save gate itself; `save_ok` stays only
+            // to skip the input poll.
             let save_ok = self.draft().is_some_and(|d| d.save_enabled());
             if save_ok && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
                 self.request_save_module();
@@ -3019,14 +3054,13 @@ impl GuiApp {
         let Some(action) = self.confirm.clone() else {
             return false;
         };
-        // `confirm_label` / `destructive` default to the historical "Confirm" in a
-        // red danger button; only the pending-rename arm overrides them.
-        // *Why an override and not a second dialog:* the modal chrome, backdrop
-        // and Cancel wiring are identical — the arm differs in one word on one
-        // button, plus whether that button should read as destructive at all
-        // ("Rename & Save" destroys nothing).
-        let mut confirm_label = "Confirm";
-        let mut destructive = true;
+        // Every surviving variant is destructive and reads "Confirm" in a red
+        // danger button. These stay named (rather than being inlined) because the
+        // renderer is written to let a non-destructive hazard arm override them —
+        // the shape the removed `SaveWithPendingRename` arm used, and the shape any
+        // future one would.
+        let confirm_label = "Confirm";
+        let destructive = true;
         let (title, msg) = match &action {
             ConfirmAction::DeleteGame(_) => (
                 "Delete Game",
@@ -3081,46 +3115,6 @@ impl GuiApp {
                     }
                 },
             ),
-            ConfirmAction::SaveWithPendingRename { blocked } => {
-                let label = self
-                    .draft()
-                    .map(|d| {
-                        format!("{}::{}", d.identity.staged_author(), d.identity.staged_name())
-                    })
-                    .unwrap_or_default();
-                match blocked {
-                    // Committable: Rename writes the body too, so one button does
-                    // both. No "save body only" option is offered — see the
-                    // `SaveWithPendingRename` doc comment.
-                    None => {
-                        confirm_label = "Rename & Save";
-                        destructive = false;
-                        (
-                            "Rename Pending",
-                            format!(
-                                "This module has an unapplied rename to \"{label}\".\n\n\
-                                 Saving alone would write your changes under the old \
-                                 name and lose the rename. Rename first, then save?"
-                            ),
-                        )
-                    }
-                    // Not committable: Rename is impossible, so the only way to
-                    // keep the body work is to save without it. Say so plainly.
-                    Some(reason) => {
-                        confirm_label = "Save Without Renaming";
-                        (
-                            "Rename Pending",
-                            format!(
-                                "This module has an unapplied rename, but it cannot be \
-                                 applied: {reason}.\n\n\
-                                 Saving now writes your changes under the current name \
-                                 and discards the staged rename. Cancel to go back and \
-                                 fix it instead."
-                            ),
-                        )
-                    }
-                }
-            }
         };
 
         // Modal backdrop: dim everything and swallow clicks meant for the panels
@@ -3185,16 +3179,6 @@ impl GuiApp {
                     self.delete_module_purge = false;
                 }
                 ConfirmAction::DiscardEdits { then } => self.apply_discard_edits(then),
-                // `blocked.is_none()` = the staged identity is committable, so
-                // commit it (Rename carries the body with it). Otherwise the user
-                // has explicitly accepted a body-only save under the old identity.
-                ConfirmAction::SaveWithPendingRename { blocked } => {
-                    if blocked.is_none() {
-                        self.rename_and_save();
-                    } else {
-                        self.save_module();
-                    }
-                }
             }
             self.confirm = None;
             return true;
@@ -3737,8 +3721,8 @@ impl GuiApp {
     /// prompt for it too.
     fn dispatch_top_action(&mut self, action: TopAction, id: &str, unsaved: bool, editable: bool) {
         match action {
-            // `request_save_module`, not `save_module`: a staged identity change
-            // must be offered before the body is written under the old identity.
+            // `request_save_module`, not `save_module`: one entry point shared
+            // with Ctrl+S, carrying the "not while a modal is up" guard.
             TopAction::Save => self.request_save_module(),
             // Close doubles as Discard: warn before dropping unsaved edits.
             TopAction::Close => {
@@ -11061,53 +11045,99 @@ mod tests {
         assert_eq!(e.env_vars[0].builder[1].separator.as_deref(), Some(""), "step Separator");
     }
 
-    // ── Save vs a staged identity change (2026-07-19) ───────────────────────
+    // ── Save and Rename are independent operations (2026-07-19) ─────────────
     //
-    // The data-loss path these cover: `PendingIdentity` sits outside
+    // The user's call, verbatim: "rename should actually only do the renaming,
+    // and saving should actually only do the saving." Save writes the body and
+    // leaves a staged identity staged; Rename writes the identity and leaves body
+    // edits pending. Both pending → two clicks, either order, no prompt.
+    //
+    // The data-loss path this replaced: `PendingIdentity` sits outside
     // `snapshot()`, so a staged Author/Name edit neither dirties the draft nor
-    // opens the Save gate. `save_module` therefore wrote the body under the OLD
-    // identity and then `drafts.shift_remove(&manifest)` deleted the draft —
-    // taking the staged rename with it, with no message. Save now routes through
-    // `request_save_module`, which stops and asks.
+    // opens the Save gate. `save_module` wrote the body under the old identity and
+    // then `drafts.shift_remove(&manifest)` deleted the draft, taking the staged
+    // rename with it, with no message. That was patched with a
+    // `SaveWithPendingRename` confirmation, now deleted: Save no longer drops a
+    // draft that holds a staged rename, so there is nothing to ask about.
 
-    /// A dirty, saveable draft with a *valid* staged rename must raise the
-    /// prompt instead of writing, and must leave the staged identity intact so
-    /// Cancel loses nothing.
-    ///
-    /// Verified to bite: routing `TopAction::Save`/Ctrl+S back to `save_module`
-    /// (i.e. reverting the fix) leaves `app.confirm` at `None` and this fails on
-    /// the first assert.
-    #[test]
-    fn save_with_a_valid_staged_rename_prompts_instead_of_writing() {
+    /// Scratch-dir variant of the module-editor fixture: real files, a real
+    /// draft, one body edit and one staged rename. Returns `(app, base, manifest)`;
+    /// the caller removes `base`.
+    fn app_with_pending_body_and_rename(tag: &str, new_name: &str) -> (GuiApp, PathBuf, PathBuf) {
+        let (base, manifest) = scratch_base(tag);
         let mut app = test_app();
-        let id = insert_draft(&mut app, "Ritze", "Alpha", "/x/alpha.json");
-        app.focused_module = Some(id);
+        app.paths = Paths { base: base.clone() };
+        app.reload_extensions();
 
+        let id = app.all_specs.iter().find(|s| s.meta.name == "Old").unwrap().id();
+        app.focused_module = Some(id.clone());
+        app.ensure_draft(&id);
         {
-            let d = app.drafts.get_mut(&PathBuf::from("/x/alpha.json")).unwrap();
-            // A body edit — this, and only this, is what opens the Save gate.
+            let d = app.drafts.get_mut(&manifest).expect("draft keyed by manifest path");
             d.ext.meta.description = Some("body edit".to_string());
-            // A staged rename, which the Save gate cannot see.
-            d.identity.name = "Renamed".to_string();
+            d.identity.name = new_name.to_string();
         }
         app.refresh_identity_state();
         app.refresh_unsaved_drafts();
+        (app, base, manifest)
+    }
 
+    fn manifest_json(manifest: &PathBuf) -> Value {
+        serde_json::from_str(&std::fs::read_to_string(manifest).unwrap()).unwrap()
+    }
+
+    /// Save writes the **body only**. The staged identity is not committed, not
+    /// cleared, not discarded — it is still there afterwards, in an editor that
+    /// stayed open so it can still be committed with Rename.
+    ///
+    /// Verified to bite: restoring `save_module`'s unconditional
+    /// `drafts.shift_remove` + `close_focused_draft` fails the `draft must
+    /// survive` expect, which is the silent loss the deleted prompt guarded.
+    #[test]
+    fn save_with_a_staged_rename_writes_the_body_and_leaves_the_identity_staged() {
+        let (mut app, base, manifest) = app_with_pending_body_and_rename("save-pending", "New");
         assert!(app.draft().unwrap().save_enabled(), "the body edit must open the Save gate");
         assert_eq!(app.draft().unwrap().identity_error, None, "the staged rename is valid");
 
         app.request_save_module();
 
-        assert!(
-            matches!(app.confirm, Some(ConfirmAction::SaveWithPendingRename { blocked: None })),
-            "Save with a valid staged rename must prompt, not write; got {:?}",
-            app.confirm
+        assert!(app.confirm.is_none(), "Save must not prompt about a staged rename any more");
+        let after = manifest_json(&manifest);
+        assert_eq!(after["Extension"]["Description"], "body edit", "the body must land");
+        assert_eq!(
+            after["Extension"]["Name"], "Old",
+            "Save must NOT commit the staged identity — that is Rename's job"
         );
-        // Nothing committed: the draft (and its staged rename) survive untouched,
-        // so Cancel is a genuine no-op rather than a delayed discard.
-        assert_eq!(app.drafts.len(), 1, "the prompt must not drop the draft");
-        assert_eq!(app.draft().unwrap().identity.name, "Renamed");
-        assert_eq!(app.draft().unwrap().ext.meta.description.as_deref(), Some("body edit"));
+
+        let d = app.draft().expect("Save must keep the draft while a rename is pending");
+        assert_eq!(d.identity.staged_name(), "New", "the staged rename survives Save");
+        assert!(d.has_pending_identity());
+        assert!(!d.dirty(), "the body just landed, so it is clean against the new baseline");
+        assert!(d.has_unsaved_work(), "but the staged rename is still unsaved work");
+        assert!(app.focused_module.is_some(), "and the editor stays open on it");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// An *invalid* staged rename no longer blocks, prompts about, or is destroyed
+    /// by a Save: the body lands and the broken identity edit stays exactly where
+    /// the user left it, to be fixed at leisure.
+    #[test]
+    fn save_with_an_invalid_staged_rename_still_writes_only_the_body() {
+        // Staging an empty Name is a pending-but-uncommittable identity.
+        let (mut app, base, manifest) = app_with_pending_body_and_rename("save-invalid", "   ");
+        assert!(app.draft().unwrap().identity_error.is_some(), "premise: the rename is invalid");
+
+        app.request_save_module();
+
+        assert!(app.confirm.is_none(), "no prompt, blocked identity or not");
+        let after = manifest_json(&manifest);
+        assert_eq!(after["Extension"]["Description"], "body edit");
+        assert_eq!(after["Extension"]["Name"], "Old");
+        let d = app.draft().expect("the draft must survive");
+        assert_eq!(d.identity.name, "   ", "the invalid buffer is left untouched");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// **Issue #34, the regression that motivated `has_unsaved_work`.** A draft
@@ -11200,37 +11230,8 @@ mod tests {
         assert_eq!(app.drafts.len(), 1, "and must not have dropped it yet");
     }
 
-    /// An *invalid* staged rename (here: colliding with another open draft) still
-    /// prompts — but carries the reason, so the dialog offers the body-only save
-    /// rather than a Rename that could never run.
-    #[test]
-    fn save_with_an_invalid_staged_rename_prompts_with_the_reason() {
-        let mut app = test_app();
-        insert_draft(&mut app, "Ritze", "Alpha", "/x/alpha.json");
-        let beta_id = insert_draft(&mut app, "Ritze", "Beta", "/x/beta.json");
-        app.focused_module = Some(beta_id);
-
-        {
-            let d = app.drafts.get_mut(&PathBuf::from("/x/beta.json")).unwrap();
-            d.ext.meta.description = Some("body edit".to_string());
-            d.identity.name = "Alpha".to_string(); // collides with the other draft
-        }
-        app.refresh_identity_state();
-        app.refresh_unsaved_drafts();
-
-        assert!(app.draft().unwrap().identity_error.is_some());
-        app.request_save_module();
-
-        match &app.confirm {
-            Some(ConfirmAction::SaveWithPendingRename { blocked: Some(reason) }) => {
-                assert_eq!(reason, "Author + Name already in use");
-            }
-            other => panic!("expected a blocked pending-rename prompt, got {other:?}"),
-        }
-    }
-
-    /// A draft with **no** staged rename must not gain a prompt: the router is a
-    /// gate on one specific hazard, not a new confirmation on every Save.
+    /// A draft with **no** staged rename must not gain a prompt either — Save is
+    /// unconditionally promptless now, in both directions.
     #[test]
     fn save_without_a_staged_rename_does_not_prompt() {
         let mut app = test_app();
@@ -11253,7 +11254,7 @@ mod tests {
     /// Create a scratch config base with one user extension manifest in it, and
     /// return `(base, manifest path)`. Cleaned up by the caller.
     ///
-    /// *Why real files:* the whole point of the rename-and-save path is what ends
+    /// *Why real files:* the whole point of the Save / Rename split is what ends
     /// up **on disk** — `perform_rename` sweeps stored config and then rewrites
     /// the manifest in place. A mocked writer would only re-assert the mock.
     fn scratch_base(tag: &str) -> (PathBuf, PathBuf) {
@@ -11274,70 +11275,107 @@ mod tests {
         (base, manifest)
     }
 
-    /// The payoff: confirming "Rename & Save" must land **both** halves on disk —
-    /// the new identity *and* the body edit — in one go, and then leave the
-    /// editor the way a plain Save does.
+    /// **The acceptance criterion.** This test's ancestor
+    /// (`rename_and_save_writes_the_new_identity_and_the_body_edit`) asserted the
+    /// opposite — that Rename wrote the body edit in the same write. That premise
+    /// is exactly what the user rejected: "pressing the Rename button currently
+    /// also saves the whole config, which is wrong". Rename now writes the ON-DISK
+    /// body under the new identity, and the body edit stays pending in the draft.
     ///
-    /// Verified to bite: reverting `TopAction::Save` to call `save_module`
-    /// directly makes `request_save_module`'s prompt never appear, and the
-    /// equivalent flow writes `"Name": "Old"` with the description — i.e. exactly
-    /// the reported bug. Asserting the *absence* of the old name here is what
-    /// catches it.
+    /// Also pins the post-rename bookkeeping triple — the subtle half. The draft
+    /// must come out clean of pending *identity* and still dirty in the *body*; a
+    /// draft reporting "saved" while holding unwritten edits is issue #34 in
+    /// reverse.
+    ///
+    /// Verified to bite: building the manifest from `snapshot()` again (the old
+    /// behaviour) writes `"Description": "body edit"` and fails the absence
+    /// assert; re-seeding the draft via `ensure_draft` afterwards loses the
+    /// pending edit and fails the `still dirty` assert.
     #[test]
-    fn rename_and_save_writes_the_new_identity_and_the_body_edit() {
-        let (base, manifest) = scratch_base("rename-save");
-        let mut app = test_app();
-        app.paths = Paths { base: base.clone() };
-        app.reload_extensions();
+    fn rename_writes_the_new_identity_and_leaves_the_body_edit_pending() {
+        let (mut app, base, manifest) = app_with_pending_body_and_rename("rename-only", "New");
 
-        let id = app.all_specs.iter().find(|s| s.meta.name == "Old").unwrap().id();
-        app.focused_module = Some(id.clone());
-        app.ensure_draft(&id);
+        app.perform_rename();
 
-        {
-            let d = app.drafts.get_mut(&manifest).expect("draft keyed by manifest path");
-            d.ext.meta.description = Some("body edit".to_string());
-            d.identity.name = "New".to_string();
-        }
-        app.refresh_identity_state();
-        app.refresh_unsaved_drafts();
-
-        // Step 1: Save prompts rather than writing under the old identity.
-        app.request_save_module();
-        assert!(
-            matches!(app.confirm, Some(ConfirmAction::SaveWithPendingRename { blocked: None })),
-            "expected the rename-and-save prompt"
-        );
-        let before: Value =
-            serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
-        assert_eq!(before["Extension"]["Name"], "Old", "the prompt must not have written");
-
-        // Step 2: the user confirms. This is what the dialog's Confirm arm runs.
-        app.confirm = None;
-        app.rename_and_save();
-
-        let after: Value =
-            serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
+        let after = manifest_json(&manifest);
         assert_eq!(after["Extension"]["Name"], "New", "the staged rename must land");
         assert_eq!(after["Extension"]["Author"], "Ritze");
-        assert_eq!(
-            after["Extension"]["Description"], "body edit",
-            "the body edit must land in the SAME write — that is the whole point"
+        assert!(
+            after["Extension"].get("Description").is_none(),
+            "Rename must NOT write the body edit — it writes the on-disk body: {after}"
         );
         // The manifest is rewritten in place, never renamed (id comes from meta).
         assert!(manifest.exists());
-        // And Save's outcome: the editor is closed, no draft left behind.
-        assert!(app.focused_module.is_none(), "Rename & Save must land where Save lands");
-        assert!(app.drafts.is_empty());
+
+        // The editor stays open, on the new id, with the body edit intact.
+        assert_eq!(app.focused_module.as_deref(), Some("Ritze::New::1.0"));
+        let d = app.drafts.get(&manifest).expect("the draft must survive the rename");
+        assert_eq!(
+            d.ext.meta.description.as_deref(),
+            Some("body edit"),
+            "the pending body edit must survive the post-rename reload round-trip"
+        );
+        assert_eq!(d.id, "Ritze::New::1.0", "and be re-keyed to the new identity");
+
+        // The triple, in every combination that matters.
+        assert!(!d.has_pending_identity(), "the identity landed: staged == on-disk");
+        assert_eq!(d.identity.staged_name(), "New");
+        assert!(d.dirty(), "the body did NOT land, so it is still dirty");
+        assert!(d.has_unsaved_work(), "and still reports unsaved work");
+        assert!(d.save_enabled(), "Save is the affordance that commits it, and it is lit");
+        assert_eq!(app.unsaved_module_names(), vec!["Ritze::New".to_string()]);
+
+        // Second click, the other operation: now the body lands, under the new name.
+        app.request_save_module();
+        let after = manifest_json(&manifest);
+        assert_eq!(after["Extension"]["Name"], "New");
+        assert_eq!(after["Extension"]["Description"], "body edit");
 
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// The failure half of `rename_and_save`'s success check: when the rename
-    /// cannot run at all, the editor must stay open with the draft intact rather
-    /// than being closed on a write that never happened.
+    /// The removed gate. `perform_rename` used to also be gated on
+    /// `!dirty() || save_enabled()`, because it wrote the body and so could
+    /// commit edits that `extension::validate` would reject. It no longer writes
+    /// the body, so a half-finished field (here: one with no `Variable` yet) is
+    /// not a reason to refuse the rename.
+    ///
+    /// Verified to bite: restoring that filter makes the rename a no-op and the
+    /// manifest still says `"Old"`.
     #[test]
-    fn rename_and_save_keeps_the_editor_open_when_the_rename_does_not_land() {
+    fn rename_succeeds_with_an_invalid_body_in_progress() {
+        let (mut app, base, manifest) = app_with_pending_body_and_rename("rename-invalid", "New");
+        {
+            let d = app.drafts.get_mut(&manifest).unwrap();
+            // A field the user has added but not named yet: `validate` rejects an
+            // empty `Variable`, so the Save gate is shut.
+            d.sections[0]
+                .1
+                .push(serde_json::from_value(json!({"Type": "toggle", "Variable": ""})).unwrap());
+        }
+        assert!(app.draft().unwrap().dirty());
+        assert!(!app.draft().unwrap().save_enabled(), "premise: the body cannot be saved");
+
+        app.perform_rename();
+
+        let after = manifest_json(&manifest);
+        assert_eq!(
+            after["Extension"]["Name"], "New",
+            "a rename must not be blocked by a body that happens to be mid-edit"
+        );
+        // And the invalid body is still where the user left it, still unsaveable.
+        let d = app.drafts.get(&manifest).expect("the draft must survive");
+        assert_eq!(d.sections[0].1.last().unwrap().variable, "");
+        assert!(!d.save_enabled());
+        assert!(!d.has_pending_identity(), "while the identity half did land");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// When the rename cannot run at all, nothing happens: no write, no closed
+    /// editor, no dropped draft, staged identity left for the user to fix.
+    #[test]
+    fn rename_with_an_invalid_identity_does_nothing_and_keeps_the_editor_open() {
         let mut app = test_app();
         let id = insert_draft(&mut app, "Ritze", "Alpha", "/x/alpha.json");
         app.focused_module = Some(id);
@@ -11351,11 +11389,12 @@ mod tests {
         }
         app.refresh_unsaved_drafts();
 
-        app.rename_and_save();
+        app.perform_rename();
 
         assert!(app.focused_module.is_some(), "an aborted rename must not close the editor");
         assert_eq!(app.drafts.len(), 1, "an aborted rename must not drop the draft");
         assert_eq!(app.draft().unwrap().identity.name, "Renamed");
+        assert_eq!(app.draft().unwrap().ext.meta.description.as_deref(), Some("body edit"));
     }
 
     // ── Closing the window with unsaved drafts (2026-07-19, issue #33) ───────
