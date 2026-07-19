@@ -823,7 +823,8 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   `editor_return`/`editor_exit_target` — both deleted, nothing left to restore) removes
   that one entry and clears focus. The header's
   always-present close button (labelled **Discard** in IDE mode, **✕ Close** in Config mode;
-  both `TopAction::Close`) acts on the *focused* draft only — with a dirty editable draft it
+  both `TopAction::Close`) acts on the *focused* draft only — with an editable draft that
+  holds unsaved work (`has_unsaved_work`, so a staged rename counts, issue #34) it
   opens the `ConfirmAction::DiscardEdits` modal first and only `discard_module()`s on
   confirm, which in IDE mode re-seeds that draft from disk and stays on the same module.
   **Save** also clears focus on success (`GuiApp::close_focused_draft`), so the
@@ -845,14 +846,16 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
     Discard), which drops the focused draft via `discard_module` and clears focus — there
     is no separate "remembered view" to land on any more (S4b); in IDE mode the reopen
     invariant picks the tree's current selection up again the next frame.
-  - **Only when dirty.** A clean draft is byte-identical to disk, so dropping it loses
-    nothing and prompting on every tab click would be pure noise. The pure predicate
+  - **Only when there is unsaved work.** A clean draft is byte-identical to disk *and* has
+    no staged rename, so dropping it loses nothing and prompting on every tab click would
+    be pure noise. The gate is `ModuleDraft::has_unsaved_work`, not `dirty()` — see
+    "Unsaved work vs. dirty" below. The pure predicate
     `nav_category_drops_draft` decides *which* clicks even qualify: the two config
     destinations always leave the editor, while **IDE Mode** only does when the IDE
     tree's selection is a *different* module than the one under edit (clicking IDE Mode
     while already on that module is a genuine no-op and must not prompt).
   - The prompt **names the modules at risk** — "These modules have unsaved changes:
-    Author::Name." — from `GuiApp::dirty_module_names`, which returns a list even though
+    Author::Name." — from `GuiApp::unsaved_module_names`, which returns a list even though
     S3b only ever holds one draft, so multi-draft (S4) grows the list without rewording
     the dialog. Names come from the on-disk identity (`ext.meta`), not the staged rename
     buffers: a half-typed rename is not what the user recognises the module by.
@@ -865,9 +868,9 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
 - **Locked trees while editing** — the nav-away guard above is now a *backstop*, not the
   normal path: while a draft exists the **MODULES tree** is wrapped
   in `ui.add_enabled_ui(module_draft.is_none(), …)`, so it greys out and can't swap the
-  module out mid-edit; while the draft is **dirty** the **left nav** (Profiles / Games /
-  General / Global) is likewise disabled, so a stray click can't silently discard unsaved
-  edits. *Why the left nav is only locked when dirty:* it retargets the editor's live
+  module out mid-edit; while the draft holds **unsaved work** the **left nav** (Profiles /
+  Games / General / Global) is likewise disabled, so a stray click can't silently discard
+  unsaved edits. *Why the left nav is only locked then:* it retargets the editor's live
   launch preview, which is useful — the lock exists to protect unsaved edits, not to pin
   the preview. Exit stays Close / Save (or Ctrl+S).
 - **Keybinds** (handled at the top of `GuiApp::ui`, before panels render) — **Ctrl+S**
@@ -889,8 +892,10 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
 - **Header / status / body split** (2026-07-19) — `render_module_editor` is assembled from
   three pieces rather than one straight-line function:
   - `GuiApp::editor_header_info(id) -> Option<EditorHeaderInfo>` snapshots the name,
-    version, author and every gate flag (`editable`, `dirty`, `save_on`, `has_identity`,
-    `identity_err`, `sections_unique`, `validate_err`, `req_ok`) out of the draft. It takes
+    version, author and every gate flag (`editable`, `dirty`, `unsaved`, `save_on`,
+    `has_identity`, `identity_err`, `sections_unique`, `validate_err`, `req_ok`) out of the
+    draft. `dirty` is the body-vs-disk check that explains the Save gate; `unsaved` is
+    `has_unsaved_work` and is what the state line and Close read. It takes
     `&self` only, so it can run **before any panel is declared**.
   - `render_editor_header_row(ui, cache, info, ide_mode) -> TopAction` draws the
     name/version/author heading and the `[Fork] [Delete] [✕] [Save]` (+ `Rename`)
@@ -926,7 +931,7 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   what actually means "this column owns the header"; the two agree today, and if a third
   call site ever disagrees, the header and its status lines should still travel together.
 
-  `GuiApp::dispatch_top_action(action, id, dirty, editable)` carries out the click and is
+  `GuiApp::dispatch_top_action(action, id, unsaved, editable)` carries out the click and is
   shared by both paths, so Save / Close-as-Discard / Fork / Rename / Delete can never drift
   between modes.
 
@@ -1158,6 +1163,57 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   `true` unconditionally, which used to fall through to a harmless re-save of an unmodified
   `game_config` — now it's a genuine no-op.
 
+### Unsaved work vs. dirty (2026-07-19, issue #34)
+
+Two predicates on `ModuleDraft`, deliberately not the same thing:
+
+| predicate | means | asked by |
+| --- | --- | --- |
+| `dirty()` | the **body** (`snapshot()`) differs from the on-disk manifest | `save_enabled()`, and only it |
+| `has_unsaved_work()` | `dirty() \|\| has_pending_identity()` — anything at all would be lost by dropping the draft | every "will the user lose something?" gate |
+
+*Why `PendingIdentity` stays outside `snapshot()`.* Staged Author/Name/`Variable` edits are
+held on the draft but **not** folded into `snapshot()`, so `dirty()` cannot see them. That
+asymmetry is load-bearing: it is what lets the editor tell "the body changed" (→ Save
+writes it) apart from "a rename is staged" (→ only `perform_rename` may commit it, after
+migrating stored config across every scope). Folding identity into the snapshot would
+collapse the distinction and let a plain Save write a half-typed identity with no scope
+migration. **So the fix for issue #34 is at the predicate layer, not the snapshot.**
+
+*Why one predicate and not four patches.* An audit found four gates asking bare `dirty()`,
+and with a clean body plus a staged rename **all four** failed at once, each in a way that
+looked like a separate bug:
+
+1. `dispatch_top_action`'s `TopAction::Close` — discarded with no prompt, and since Save is
+   also `dirty()`-gated, Close was the only lit button in that state.
+2. `nav_category_drops_draft`'s `any_unsaved` argument — clicking the Profiles tab
+   `shift_remove`d the draft silently.
+3. `unsaved_module_names` — the confirm dialog could never name a rename-only draft, in a
+   prompt that then `clear()`s the whole map.
+4. `editor_status_lines` — the state line, which read "All changes saved."
+
+They are one question with one answer, so they route through one predicate.
+`a_rename_only_draft_reports_unsaved_work_at_every_gate` asserts all four together, for
+that reason.
+
+*Why `GuiApp::unsaved_drafts` (the per-frame set) became unsaved-work-based rather than
+leaving it `dirty()`-based with callers switching:* `apply_discard_edits` destroys **whole
+drafts** (`drafts.clear()` / `shift_remove`), staged identity included. A dirty-based set
+would let the confirm dialog name strictly fewer modules than confirming it destroys —
+exactly the silent-loss shape the prompt exists to prevent. The set and the destruction now
+describe the same thing. Everything else reading that set (nav lock, tree markers, preview
+splice) wants the same answer anyway; the preview splice is unaffected either way, since a
+rename-only draft's `snapshot()` is byte-identical to the spec it would replace.
+
+*Why `save_enabled()` did **not** change.* Save writes `snapshot()`, and a rename-only
+draft's snapshot equals disk — Save would rewrite the file with identical bytes under the
+**old** identity and then close the editor, applying nothing. Enabling it would also make
+the `ConfirmAction::SaveWithPendingRename` prompt's "save body only" arm a no-op write. The
+rename's affordance is the **Rename** button, which is gated on the identity being valid
+and explicitly allows a clean body (`!dirty() || save_enabled()`). Net effect: a rename-only
+draft reports unsaved work everywhere the user is *asked about losing it*, while Save stays
+greyed and Rename is the lit control.
+
 ### Multi-draft — `GuiApp::drafts` (S4a, 2026-07-19)
 
 Unsaved manifest edits survive switching modules. `GuiApp::drafts` is an
@@ -1184,14 +1240,14 @@ the single `Option<ModuleDraft>` slot that every module switch used to overwrite
   above the IDE module tree (`render_orphan_draft_banner`). *Why a banner:* the tree renders
   `all_specs`, which by definition can no longer give the orphan a row. Saving it recreates
   the manifest at its remembered path.
-- **Per-frame dirty set.** `ModuleDraft::dirty()` clones the draft, rebuilds an `IndexMap`
+- **Per-frame unsaved set.** `ModuleDraft::dirty()` clones the draft, rebuilds an `IndexMap`
   and serializes it, so it is far too expensive to ask per query — it already ran ~4–6× per
   frame with one draft, and per-row dirty markers would make that N× per frame.
-  `GuiApp::refresh_dirty_drafts` computes `GuiApp::dirty_drafts: HashSet<PathBuf>` **once**
-  at the top of `ui()` (and again at the frame tail, so the tree's per-row markers and the
-  exit-confirmation gate see edits the frame just made, not stale state from the top of the
-  frame); the tree, the exit gate, the preview splice and `dirty_module_names` all read
-  the cached set.
+  `GuiApp::refresh_unsaved_drafts` computes `GuiApp::unsaved_drafts: HashSet<PathBuf>`
+  **once** at the top of `ui()` (and again at the frame tail, so the tree's per-row markers
+  and the exit-confirmation gate see edits the frame just made, not stale state from the top
+  of the frame); the tree, the exit gate, the preview splice and `unsaved_module_names` all
+  read the cached set.
 - **Dirty markers in the tree.** `theme::ICON_DIRTY` (a filled dot, `theme::ACCENT`) is
   prepended into the existing `icon_lists` glyph column in `render_ext_tree`, which already
   lays coloured glyphs into the row's `LayoutJob` with correct gaps. *Never appended to the
@@ -1322,9 +1378,26 @@ undone, because adding palette tokens is a theme decision rather than a diagnost
 
 The draft's **state line is always first, always `Info`, and always blue.** It is
 unconditional — `editor_status_lines` emits exactly one of "Unsaved changes…" /
-"All changes saved." / "Bundled module — read-only" on every path, and nothing else in the
-list is ever `Info`. The test `status_lines_have_exactly_one_pinned_info_line` walks all
-128 flag combinations to hold both halves of that.
+"Unsaved rename…" / "All changes saved." / "Bundled module — read-only" on every path, and
+nothing else in the list is ever `Info`. The test
+`status_lines_have_exactly_one_pinned_info_line` walks all 256 flag combinations to hold
+both halves of that.
+
+**A staged rename counts as unsaved** (2026-07-19, issue #34). With a clean body and a
+pending Author/Name/`Variable` edit the state line reads
+*"Unsaved rename — config autosave paused until you Rename or Discard."*, not
+"All changes saved." — the user's words: *"to the user, that's just wrong."*
+
+- *Why its own arm rather than reusing the "Unsaved changes" wording:* the button that
+  commits it is **Rename**, not Save. `ModuleDraft::save_enabled` stays `dirty()`-gated
+  (see "Unsaved work vs. dirty" below), so naming Save here would point at a greyed
+  control.
+- *Why the "Pending identity change — press Rename to migrate saved settings and apply it."
+  `Warning` still fires alongside it:* the two entries do different jobs. The `Info` line
+  says **that** there is unsaved work; the `Warning` says **what** is unfinished about it
+  (staged, settings not yet migrated). Merging them would either lose the state line in the
+  "body dirty *and* rename staged" case or duplicate it in the rename-only case. The
+  invariant is unaffected: the state line grew a third *arm*, not a second entry.
 
 *Why pinned at the top rather than sorted in* (2026-07-19, issue #26, user's call): it
 answers "is my work saved", and that question should not slide down the list as errors

@@ -540,8 +540,19 @@ pub struct GuiApp {
     /// never dropped — losing unsaved work is the worse failure. Such orphans are
     /// surfaced by [`GuiApp::orphan_draft_names`].
     drafts: IndexMap<PathBuf, ModuleDraft>,
-    /// Manifest paths of the drafts that are dirty **this frame**, recomputed once
-    /// per frame by [`GuiApp::refresh_dirty_drafts`].
+    /// Manifest paths of the drafts holding **unsaved work** this frame —
+    /// [`ModuleDraft::has_unsaved_work`], not bare `dirty()` — recomputed once per
+    /// frame by [`GuiApp::refresh_unsaved_drafts`].
+    ///
+    /// *Why unsaved-work and not dirty* (2026-07-19, issue #34): everything
+    /// downstream of this set answers the user's question "will I lose
+    /// something?" — the discard prompts, the modules they name, the nav lock, the
+    /// tree's per-row markers. A staged-but-uncommitted rename is something to
+    /// lose, so it belongs in the set. Crucially, [`GuiApp::apply_discard_edits`]
+    /// destroys whole drafts (`drafts.clear()` / `shift_remove`), staged identity
+    /// included, so a dirty-based set would let the confirm dialog name strictly
+    /// fewer modules than confirming it destroys. The set and the destruction now
+    /// describe the same thing.
     ///
     /// *Why cached and not asked per call:* [`ModuleDraft::dirty`] clones the
     /// whole draft, rebuilds an `IndexMap` and serializes it. It was already
@@ -553,8 +564,8 @@ pub struct GuiApp {
     /// **Frame-scoped.** Written in exactly one place (the top of [`GuiApp::ui`],
     /// right after `ensure_draft`) and read by everything downstream in the same
     /// frame. Anything that mutates a draft outside the render path must call
-    /// `refresh_dirty_drafts` itself.
-    dirty_drafts: std::collections::HashSet<PathBuf>,
+    /// `refresh_unsaved_drafts` itself.
+    unsaved_drafts: std::collections::HashSet<PathBuf>,
     /// The open Fork / Create-new module dialog, if any.
     module_dialog: Option<ModuleDialog>,
     /// "Also purge stored config" checkbox state for the pending Delete-module
@@ -632,6 +643,18 @@ impl ModuleDraft {
     }
     /// Save is enabled only when the draft is on a writable module, differs from
     /// disk, validates, every `Requires` parses, and there is no name collision.
+    ///
+    /// *Why the gate stays `dirty()` and not [`Self::has_unsaved_work`]*
+    /// (2026-07-19, issue #34): Save writes `snapshot()` to the manifest, and a
+    /// rename-only draft's snapshot is byte-identical to disk — pressing Save
+    /// would rewrite the file with the same bytes under the *old* identity and
+    /// then close the editor, which neither applies the rename nor is what Save
+    /// was asked to do. The rename is committed by the Rename button
+    /// ([`GuiApp::perform_rename`]), which is gated on the identity being valid
+    /// and explicitly allows a clean body. So a rename-only draft reports unsaved
+    /// work everywhere the user is asked about losing it, while Save stays greyed
+    /// and Rename is the lit affordance.
+    ///
     /// Duplicate UI-section names collide when folded into `ext.ui` (an
     /// `IndexMap`), silently dropping a section on Save — block Save instead.
     fn sections_unique(&self) -> bool {
@@ -679,6 +702,27 @@ impl ModuleDraft {
             }
         }
         out
+    }
+
+    /// True when this draft holds **any** work that would be lost by dropping it —
+    /// body edits, a staged identity change, or both. The single predicate every
+    /// "is there unsaved work?" gate asks (2026-07-19, issue #34).
+    ///
+    /// *Why this exists instead of folding identity into [`Self::snapshot`]:*
+    /// `PendingIdentity` is deliberately **outside** the snapshot, so
+    /// [`Self::dirty`] cannot see it — that asymmetry is what lets the editor
+    /// distinguish "the body changed" (→ Save writes it) from "a rename is staged"
+    /// (→ only the Rename path may commit it), and moving identity into the
+    /// snapshot would collapse the distinction and break the rename flow. But
+    /// *the user* has no such distinction: they typed something and it is not on
+    /// disk. So the two notions are unified here, at the predicate layer, and
+    /// nowhere else — four gates used to ask bare `dirty()` and each one silently
+    /// lost a rename-only draft.
+    ///
+    /// **Not the Save gate.** [`Self::save_enabled`] stays `dirty()`-based on
+    /// purpose — see its doc comment.
+    fn has_unsaved_work(&self) -> bool {
+        self.dirty() || self.has_pending_identity()
     }
 
     /// True when the staged identity differs from the on-disk identity.
@@ -748,8 +792,9 @@ fn save_gate(dirty: bool, valid: bool, requires_all_parse: bool, name_error: boo
 /// Pure predicate (factored out for testing): would applying this category-tab
 /// click take unsaved module edits away from the user?
 ///
-/// `any_dirty` is `!dirty_drafts.is_empty()` — whether *any* open draft differs
-/// from disk.
+/// `any_unsaved` is `!unsaved_drafts.is_empty()` — whether *any* open draft holds
+/// unsaved work ([`ModuleDraft::has_unsaved_work`]: body edits **or** a staged
+/// rename, issue #34).
 ///
 /// *Why the IDE arm is now unconditionally `false` (S4a):* it used to compare the
 /// tree's selection against the module under edit, because switching modules
@@ -760,10 +805,10 @@ fn save_gate(dirty: bool, valid: bool, requires_all_parse: bool, name_error: boo
 ///
 /// The two config destinations still prompt, because `apply_discard_edits` clears
 /// the whole map on confirm — that is a real, user-approved loss.
-fn nav_category_drops_draft(cat: NavCategory, any_dirty: bool) -> bool {
+fn nav_category_drops_draft(cat: NavCategory, any_unsaved: bool) -> bool {
     match cat {
         // Both land on a config scope and drop every draft.
-        NavCategory::GamesProfiles | NavCategory::GeneralSettings => any_dirty,
+        NavCategory::GamesProfiles | NavCategory::GeneralSettings => any_unsaved,
         // Staying inside IDE mode never costs a draft any more.
         NavCategory::Ide => false,
     }
@@ -1007,7 +1052,7 @@ impl GuiApp {
             confirm: None,
             logo: None,
             drafts: IndexMap::new(),
-            dirty_drafts: std::collections::HashSet::new(),
+            unsaved_drafts: std::collections::HashSet::new(),
             module_dialog: None,
             delete_module_purge: false,
             carryover_report: None,
@@ -1510,13 +1555,13 @@ impl GuiApp {
         self.drafts.get_mut(&key)
     }
 
-    /// Recompute [`Self::dirty_drafts`] for this frame. See that field's doc for
+    /// Recompute [`Self::unsaved_drafts`] for this frame. See that field's doc for
     /// why the set is cached rather than recomputed per query.
-    fn refresh_dirty_drafts(&mut self) {
-        self.dirty_drafts = self
+    fn refresh_unsaved_drafts(&mut self) {
+        self.unsaved_drafts = self
             .drafts
             .iter()
-            .filter(|(_, d)| d.dirty())
+            .filter(|(_, d)| d.has_unsaved_work())
             .map(|(k, _)| k.clone())
             .collect();
     }
@@ -1564,7 +1609,7 @@ impl GuiApp {
             self.drafts.shift_remove(&key);
         }
         self.focused_module = None;
-        self.refresh_dirty_drafts();
+        self.refresh_unsaved_drafts();
     }
 
     /// Load a draft for `id` unless one already exists for it (keeping any
@@ -1688,7 +1733,7 @@ impl GuiApp {
         if landed {
             self.close_focused_draft();
         }
-        self.refresh_dirty_drafts();
+        self.refresh_unsaved_drafts();
     }
 
     /// Serialize the draft and write it to its manifest via `write_atomic`, then
@@ -1751,7 +1796,7 @@ impl GuiApp {
         if let Some(id) = self.focused_module().map(str::to_string) {
             self.ensure_draft(&id);
         }
-        self.refresh_dirty_drafts();
+        self.refresh_unsaved_drafts();
     }
 
     /// Carry out a confirmed [`ConfirmAction::DiscardEdits`].
@@ -1772,7 +1817,7 @@ impl GuiApp {
             // user just agreed to.
             Some(cat) => {
                 self.drafts.clear();
-                self.refresh_dirty_drafts();
+                self.refresh_unsaved_drafts();
                 self.select_nav_category(cat);
             }
         }
@@ -1785,17 +1830,17 @@ impl GuiApp {
     /// changes: …"). S4a made it list several drafts; neither the dialog text nor
     /// its callers needed rewording.
     ///
-    /// Reads the frame's cached [`Self::dirty_drafts`] rather than calling
+    /// Reads the frame's cached [`Self::unsaved_drafts`] rather than calling
     /// `dirty()` again — see that field's doc. Callers outside the render loop
-    /// (tests included) must `refresh_dirty_drafts` first.
+    /// (tests included) must `refresh_unsaved_drafts` first.
     ///
     /// Names come from `ext.meta` (the on-disk identity), not from the staged
     /// `identity` buffers: a half-typed rename is not what the user recognises
     /// the module by.
-    fn dirty_module_names(&self) -> Vec<String> {
+    fn unsaved_module_names(&self) -> Vec<String> {
         self.drafts
             .iter()
-            .filter(|(k, _)| self.dirty_drafts.contains(*k))
+            .filter(|(k, _)| self.unsaved_drafts.contains(*k))
             .map(|(_, d)| format!("{}::{}", d.ext.meta.author, d.ext.meta.name))
             .collect()
     }
@@ -2075,7 +2120,7 @@ impl GuiApp {
         // back as permanently dirty against a baseline that no longer exists.
         self.drafts.shift_remove(&manifest);
         self.ensure_draft(&new_id);
-        self.refresh_dirty_drafts();
+        self.refresh_unsaved_drafts();
     }
 
     /// Write a minimal valid template module (meta + one empty UI section) to the
@@ -2130,7 +2175,7 @@ impl GuiApp {
         // Only the deleted module's draft goes: the map is keyed by manifest path,
         // which is exactly what was just unlinked. Every other draft survives.
         self.drafts.shift_remove(manifest);
-        self.refresh_dirty_drafts();
+        self.refresh_unsaved_drafts();
         self.reload_extensions();
         if purge {
             // The deleted module's vars are now undeclared, so cleanup removes
@@ -2260,13 +2305,13 @@ impl GuiApp {
 
         // Make sure the focused module has a draft (insert-if-absent; never
         // touches the other entries), then recompute this frame's dirty set —
-        // ONCE, here, for every consumer downstream. See `dirty_drafts`.
+        // ONCE, here, for every consumer downstream. See `unsaved_drafts`.
         if let Some(id) = self.focused_module().map(str::to_string) {
             self.ensure_draft(&id);
             self.refresh_draft_name_error();
             self.refresh_identity_state();
         }
-        self.refresh_dirty_drafts();
+        self.refresh_unsaved_drafts();
         if self.focused_module().is_some() {
             // Ctrl+S: Save when the editor is open and the Save gate is satisfied
             // (same condition as the button); a no-op otherwise. Save exits the
@@ -2279,7 +2324,7 @@ impl GuiApp {
             let save_ok = self.draft().is_some_and(|d| d.save_enabled());
             if save_ok && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
                 self.request_save_module();
-                self.refresh_dirty_drafts();
+                self.refresh_unsaved_drafts();
             }
         }
 
@@ -2427,7 +2472,7 @@ impl GuiApp {
             // silently changes `lossy_env_overwrites` attribution and wrapper
             // `Priority` ordering. Replacement in place preserves both.
             for (path, d) in &self.drafts {
-                if !self.dirty_drafts.contains(path) {
+                if !self.unsaved_drafts.contains(path) {
                     continue;
                 }
                 if let Some(pos) = specs.iter().position(|s| s.id() == d.id) {
@@ -2737,8 +2782,8 @@ impl GuiApp {
         if let (Some(info), Some(id)) =
             (ide_header.as_ref(), self.focused_module().map(str::to_string))
         {
-            let (dirty, editable) = (info.dirty, info.editable);
-            self.dispatch_top_action(ide_action, &id, dirty, editable);
+            let (unsaved, editable) = (info.unsaved, info.editable);
+            self.dispatch_top_action(ide_action, &id, unsaved, editable);
         }
 
         if self.render_confirm_dialog(ctx) {
@@ -2753,9 +2798,9 @@ impl GuiApp {
 
         // Re-derive the dirty set at the frame tail: the body that just rendered
         // may have made a draft dirty (or hand-reverted one back to disk), and
-        // `dirty_drafts` must reflect that for the tree's per-row markers and the
+        // `unsaved_drafts` must reflect that for the tree's per-row markers and the
         // exit-confirmation gate next frame, not the state from the top of this one.
-        self.refresh_dirty_drafts();
+        self.refresh_unsaved_drafts();
         // `persist()` is a no-op under `Mode::Ide` (S4b) — see its doc comment for
         // why that supersedes the old config-autosave interlock outright, rather
         // than reproducing its hold-while-dirty/flush-when-clean dance.
@@ -2815,7 +2860,7 @@ impl GuiApp {
                     // the dialog and the draft can only disagree if the draft
                     // changed under an open modal, and the modal backdrop makes
                     // that impossible. One source of truth, no stale copy.
-                    let names = self.dirty_module_names();
+                    let names = self.unsaved_module_names();
                     // The empty case is unreachable (nothing raises this action
                     // with a clean draft) but must still read as a sentence —
                     // "These modules have unsaved changes: ." would be a visible
@@ -3072,7 +3117,15 @@ struct EditorHeaderInfo {
     /// string has to survive to here so the hover tooltip can show it.
     description: Option<String>,
     editable: bool,
+    /// The **body** differs from disk (`ModuleDraft::dirty`). Feeds the Save
+    /// gate's explanation, not the "is anything unsaved?" question — see
+    /// [`EditorHeaderInfo::unsaved`].
     dirty: bool,
+    /// Anything at all is unsaved: `dirty` **or** a staged identity change
+    /// ([`ModuleDraft::has_unsaved_work`], issue #34). What the state line and
+    /// Close's discard prompt read; `dirty` alone let a rename-only draft claim
+    /// "All changes saved" and be closed without a word.
+    unsaved: bool,
     save_on: bool,
     has_identity: bool,
     identity_err: Option<String>,
@@ -3336,6 +3389,29 @@ fn editor_status_lines(info: &EditorHeaderInfo) -> Vec<StatusLine> {
             theme::COL_PROFILE,
             DiagSeverity::Info,
         );
+    } else if info.unsaved {
+        // Clean body, staged rename (2026-07-19, issue #34). This arm used to fall
+        // through to "All changes saved." because the ladder asked `dirty` only —
+        // which the user called out as flatly wrong: they had typed a new name and
+        // it was not on disk.
+        //
+        // *Why its own sentence rather than reusing the line above:* the state line
+        // answers "is my work saved", and here the honest answer is "no, and the
+        // button that saves it is Rename, not Save". Save is greyed for a clean
+        // body (see `ModuleDraft::save_enabled`), so naming Save would point at a
+        // dead control.
+        //
+        // *Why the "Pending identity change" Warning below still fires:* the two
+        // say different things. This Info says THAT there is unsaved work; the
+        // Warning says WHAT is unfinished about it (staged, settings not migrated).
+        // Merging them would either lose the state line in the "body dirty AND
+        // rename staged" case or duplicate it in this one.
+        push(
+            "Unsaved rename \u{2014} config autosave paused until you Rename or Discard."
+                .to_string(),
+            theme::COL_PROFILE,
+            DiagSeverity::Info,
+        );
     } else {
         push("All changes saved.".to_string(), theme::FAINT, DiagSeverity::Info);
     }
@@ -3436,6 +3512,7 @@ impl GuiApp {
             description: d.ext.meta.description.clone(),
             editable: d.editable,
             dirty: d.dirty(),
+            unsaved: d.has_unsaved_work(),
             save_on: d.save_enabled(),
             has_identity: d.has_pending_identity(),
             identity_err: d.identity_error.clone(),
@@ -3454,14 +3531,18 @@ impl GuiApp {
     /// preview column have rendered. Saving or closing mid-frame drops the
     /// draft, and everything downstream would then render a "no longer
     /// available" flash against state the header already invalidated.
-    fn dispatch_top_action(&mut self, action: TopAction, id: &str, dirty: bool, editable: bool) {
+    ///
+    /// `unsaved` is [`EditorHeaderInfo::unsaved`], **not** `dirty` (issue #34): a
+    /// draft whose only change is a staged rename has work to lose, so Close must
+    /// prompt for it too.
+    fn dispatch_top_action(&mut self, action: TopAction, id: &str, unsaved: bool, editable: bool) {
         match action {
             // `request_save_module`, not `save_module`: a staged identity change
             // must be offered before the body is written under the old identity.
             TopAction::Save => self.request_save_module(),
             // Close doubles as Discard: warn before dropping unsaved edits.
             TopAction::Close => {
-                if dirty && editable {
+                if unsaved && editable {
                     // `pending_nav: None` — Close has no destination to complete
                     // beyond what `discard_module` already does on Confirm.
                     self.confirm = Some(ConfirmAction::DiscardEdits { pending_nav: None });
@@ -3557,7 +3638,7 @@ impl GuiApp {
             self.icon_cache = cache;
             return;
         };
-        let (dirty, editable) = (info.dirty, info.editable);
+        let (unsaved, editable) = (info.unsaved, info.editable);
 
         ui.add_space(6.0);
         if header_inline {
@@ -3614,7 +3695,7 @@ impl GuiApp {
         // Only the inline (Config-mode) header produces an action here; IDE mode's
         // header panel dispatches its own, after the preview column has rendered.
         if header_inline {
-            self.dispatch_top_action(action, id, dirty, editable);
+            self.dispatch_top_action(action, id, unsaved, editable);
         }
     }
 }
@@ -6900,7 +6981,7 @@ impl GuiApp {
                                 // stays usable with a *clean* draft. Once the draft is
                                 // dirty it locks: navigating away drops the draft, and a
                                 // stray click must not silently discard unsaved edits.
-                                let nav_live = self.dirty_drafts.is_empty();
+                                let nav_live = self.unsaved_drafts.is_empty();
                                 ui.add_enabled_ui(nav_live, |ui| {
                                     self.render_nav_tree(ui);
                                 });
@@ -6922,7 +7003,7 @@ impl GuiApp {
             // Gated on the frame's dirty set, not on "a draft exists": a clean
             // draft is byte-identical to disk, so dropping it loses nothing and a
             // prompt on every tab click would be pure noise.
-            if nav_category_drops_draft(cat, !self.dirty_drafts.is_empty()) {
+            if nav_category_drops_draft(cat, !self.unsaved_drafts.is_empty()) {
                 self.confirm = Some(ConfirmAction::DiscardEdits { pending_nav: Some(cat) });
             } else {
                 self.select_nav_category(cat);
@@ -7112,7 +7193,7 @@ impl GuiApp {
         let dirty_flags: Vec<bool> = self
             .all_manifests
             .iter()
-            .map(|m| self.dirty_drafts.contains(m))
+            .map(|m| self.unsaved_drafts.contains(m))
             .collect();
         let before = self.ide_selected.min(specs.len().saturating_sub(1));
         let mut selected = before;
@@ -8934,6 +9015,7 @@ mod tests {
             description: Some("Compositing micro-compositor for games.".to_string()),
             editable: true,
             dirty: true,
+            unsaved: true,
             save_on: false,
             has_identity: true,
             identity_err: Some("a module with that name already exists".to_string()),
@@ -8956,7 +9038,7 @@ mod tests {
     /// height cost, so there is no longer a layout budget for a message count to
     /// overrun. Asserting a ceiling nothing enforces would be theatre.
     ///
-    /// The exhaustive 128-combination walk is kept, because two *new* invariants
+    /// The exhaustive combination walk is kept, because two *new* invariants
     /// took the old one's place and both are exactly as easy to break by adding
     /// a branch to [`editor_status_lines`]:
     ///
@@ -8972,16 +9054,33 @@ mod tests {
     /// The old "the reservation is tight" check is kept in spirit as the
     /// `MAX_LINES` assertion below: it no longer guards a layout budget, but it
     /// still catches the ladder growing a branch nobody described.
+    ///
+    /// *Why `unsaved` joined the walk* (2026-07-19, issue #34): the state line's
+    /// first branch split into three arms (dirty / rename-only / clean), and the
+    /// rename-only arm is the whole point of that issue. It is walked
+    /// **independently** of `dirty` and `has_identity` rather than derived from
+    /// them: production upholds `unsaved == dirty || has_identity`, but this
+    /// test's job is to prove the ladder stays well-formed for *any* flag
+    /// combination, including ones a future refactor could make reachable.
+    /// Doubles the walk to 256 cases and still runs instantly.
     #[test]
     fn status_lines_have_exactly_one_pinned_info_line() {
         /// The four branches [`editor_status_lines`] enumerates: state line,
         /// section-collision *or* validate error, `Requires` parse, pending
         /// identity. Not a layout budget any more — a description of the ladder,
         /// asserted tight so it cannot silently stop describing it.
+        ///
+        /// Unchanged by issue #34: the state line grew a third *arm*, not a second
+        /// line — the arms are mutually exclusive.
         const MAX_LINES: usize = 4;
         let mut worst = 0usize;
         for editable in [true, false] {
-            for dirty in [true, false] {
+            // `dirty` and `unsaved` walked as a pair rather than as a nested loop:
+            // all four combinations, no extra indentation level on a stack that is
+            // already seven deep.
+            for (dirty, unsaved) in
+                [(true, true), (true, false), (false, true), (false, false)]
+            {
                 for sections_unique in [true, false] {
                     for validate_err in [true, false] {
                         for req_ok in [true, false] {
@@ -8990,6 +9089,7 @@ mod tests {
                                     let info = EditorHeaderInfo {
                                         editable,
                                         dirty,
+                                        unsaved,
                                         sections_unique,
                                         validate_err: validate_err
                                             .then(|| "boom".to_string()),
@@ -9007,6 +9107,7 @@ mod tests {
                                     // test's failure message.
                                     let case = format!(
                                         "editable={editable} dirty={dirty} \
+                                         unsaved={unsaved} \
                                          sections_unique={sections_unique} \
                                          validate_err={validate_err} req_ok={req_ok} \
                                          has_identity={has_identity} \
@@ -9090,7 +9191,7 @@ mod tests {
         assert_eq!(count(DiagSeverity::Info), 1, "exactly one pinned info line");
         // worst_case_header_info: section collision (validate_err is the same
         // `else if` branch, so it does NOT add a line), unparseable Requires,
-        // blocked rename \u{2014} three errors. Plus the one env warning.
+        // blocked rename — three errors. Plus the one env warning.
         assert_eq!(count(DiagSeverity::Error), 3);
         assert_eq!(count(DiagSeverity::Warning), 1);
 
@@ -9590,7 +9691,7 @@ mod tests {
             confirm: None,
             logo: None,
             drafts: IndexMap::new(),
-            dirty_drafts: std::collections::HashSet::new(),
+            unsaved_drafts: std::collections::HashSet::new(),
             module_dialog: None,
             delete_module_purge: false,
             carryover_report: None,
@@ -10057,15 +10158,15 @@ mod tests {
         // A clean draft is byte-identical to disk: nothing at risk, nothing named.
         let clean = draft_from(sample_manifest(), true);
         app.drafts.insert(clean.manifest.clone(), clean);
-        app.refresh_dirty_drafts();
-        assert_eq!(app.dirty_module_names(), Vec::<String>::new());
+        app.refresh_unsaved_drafts();
+        assert_eq!(app.unsaved_module_names(), Vec::<String>::new());
         // Any edit makes it dirty and puts it in the prompt, by on-disk identity.
         let mut draft = draft_from(sample_manifest(), true);
         draft.ext.meta.version = "9.9".to_string();
         assert!(draft.dirty());
         app.drafts.insert(draft.manifest.clone(), draft);
-        app.refresh_dirty_drafts();
-        assert_eq!(app.dirty_module_names(), vec!["Ritze::Sample".to_string()]);
+        app.refresh_unsaved_drafts();
+        assert_eq!(app.unsaved_module_names(), vec!["Ritze::Sample".to_string()]);
     }
 
     // ── S4a: several drafts at once (2026-07-19) ────────────────────────────
@@ -10171,8 +10272,8 @@ mod tests {
             app.draft().unwrap().ext.meta.description.as_deref(),
             Some("unsaved work")
         );
-        app.refresh_dirty_drafts();
-        assert_eq!(app.dirty_module_names(), vec!["Ritze::Alpha".to_string()]);
+        app.refresh_unsaved_drafts();
+        assert_eq!(app.unsaved_module_names(), vec!["Ritze::Alpha".to_string()]);
     }
 
     /// A draft whose module has left `all_specs` (external delete, or a manifest
@@ -10243,8 +10344,8 @@ mod tests {
         );
         // …and the original draft still has them.
         assert_eq!(app.drafts.len(), 1);
-        app.refresh_dirty_drafts();
-        assert_eq!(app.dirty_module_names(), vec!["Ritze::Alpha".to_string()]);
+        app.refresh_unsaved_drafts();
+        assert_eq!(app.unsaved_module_names(), vec!["Ritze::Alpha".to_string()]);
     }
 
     /// Discard is per-module (S4a decision): it drops the focused draft and
@@ -10268,7 +10369,7 @@ mod tests {
         assert!(app.drafts.contains_key(&PathBuf::from("/x/alpha.json")));
         // Beta is not re-seeded here: `all_specs` is empty, so there is nothing on
         // disk to re-seed FROM — the point is that Alpha survived.
-        assert_eq!(app.dirty_module_names(), vec!["Ritze::Alpha".to_string()]);
+        assert_eq!(app.unsaved_module_names(), vec!["Ritze::Alpha".to_string()]);
     }
 
     /// Confirm on a tab-click prompt must do BOTH halves: drop every draft *and*
@@ -10678,7 +10779,7 @@ mod tests {
             d.identity.name = "Renamed".to_string();
         }
         app.refresh_identity_state();
-        app.refresh_dirty_drafts();
+        app.refresh_unsaved_drafts();
 
         assert!(app.draft().unwrap().save_enabled(), "the body edit must open the Save gate");
         assert_eq!(app.draft().unwrap().identity_error, None, "the staged rename is valid");
@@ -10697,6 +10798,96 @@ mod tests {
         assert_eq!(app.draft().unwrap().ext.meta.description.as_deref(), Some("body edit"));
     }
 
+    /// **Issue #34, the regression that motivated `has_unsaved_work`.** A draft
+    /// whose *only* change is a staged rename — clean body, `dirty() == false` —
+    /// must report unsaved work at **every** gate that asks "will the user lose
+    /// something?". Before the fix all four asked bare `dirty()`, so a rename-only
+    /// draft was invisible to all of them at once: the state line said "All
+    /// changes saved", Close discarded without a prompt (and Save was greyed, so
+    /// Close was the only lit button), clicking a category tab `clear()`ed the
+    /// draft silently, and the confirm dialog could never name the module.
+    ///
+    /// Asserted together in one test rather than split into four, because the bug
+    /// *was* that four sites had four separate answers to one question. If a
+    /// future change routes any of them back through `dirty()`, this fails.
+    #[test]
+    fn a_rename_only_draft_reports_unsaved_work_at_every_gate() {
+        let mut app = test_app();
+        let id = insert_draft(&mut app, "Ritze", "Alpha", "/x/alpha.json");
+        app.focused_module = Some(id.clone());
+        // Stage a rename and nothing else. The body is untouched.
+        app.drafts
+            .get_mut(&PathBuf::from("/x/alpha.json"))
+            .unwrap()
+            .identity
+            .name = "Renamed".to_string();
+        app.refresh_identity_state();
+        app.refresh_unsaved_drafts();
+
+        // Premise: the body really is clean, so this is the exact state that used
+        // to slip through. If this fails, the test has stopped testing the bug.
+        let d = app.draft().unwrap();
+        assert!(!d.dirty(), "the body must be byte-identical to disk");
+        assert!(d.has_pending_identity());
+        assert!(d.has_unsaved_work(), "the unifying predicate itself");
+        assert!(
+            !d.save_enabled(),
+            "Save stays gated on the body \u{2014} Rename is what commits this"
+        );
+
+        // Gate 4 — the state line (what the user complained about). It reports
+        // unsaved work, AND the separate warning explaining what is incomplete
+        // survives beside it. Two jobs, two entries, neither dropped.
+        let info = app.editor_header_info(&id).unwrap();
+        assert!(info.unsaved, "the header snapshot must carry unsaved work");
+        let lines = editor_status_lines(&info);
+        assert_eq!(lines[0].severity, DiagSeverity::Info);
+        assert!(
+            lines[0].text.starts_with("Unsaved rename"),
+            "state line still claims saved: {:?}",
+            lines[0].text
+        );
+        assert!(
+            lines.iter().any(|l| l.severity == DiagSeverity::Warning
+                && l.text.starts_with("Pending identity change")),
+            "the pending-identity warning must NOT be merged away by the fix"
+        );
+        // Exactly one Info: the new state line is an arm, not a second entry, so
+        // the band's tally still counts problems only.
+        assert_eq!(
+            lines.iter().filter(|l| l.severity == DiagSeverity::Info).count(),
+            1
+        );
+
+        // Gate 2 — the category-tab guard sees the draft.
+        assert!(!app.unsaved_drafts.is_empty());
+        assert!(nav_category_drops_draft(
+            NavCategory::GamesProfiles,
+            !app.unsaved_drafts.is_empty()
+        ));
+
+        // Gate 3 — and the confirm dialog names it, by its on-disk identity (not
+        // the half-typed one). This list must match what `apply_discard_edits`
+        // destroys, which is the whole draft, staged identity included.
+        assert_eq!(
+            app.unsaved_module_names(),
+            vec!["Ritze::Alpha".to_string()],
+            "the prompt must name a module it is about to destroy"
+        );
+
+        // Gate 1 — Close prompts instead of discarding on the spot.
+        app.dispatch_top_action(TopAction::Close, &id, info.unsaved, info.editable);
+        assert!(
+            matches!(
+                app.confirm,
+                Some(ConfirmAction::DiscardEdits { pending_nav: None })
+            ),
+            "Close must confirm before dropping a staged rename; got {:?}",
+            app.confirm
+        );
+        assert_eq!(app.drafts.len(), 1, "and must not have dropped it yet");
+    }
+
     /// An *invalid* staged rename (here: colliding with another open draft) still
     /// prompts — but carries the reason, so the dialog offers the body-only save
     /// rather than a Rename that could never run.
@@ -10713,7 +10904,7 @@ mod tests {
             d.identity.name = "Alpha".to_string(); // collides with the other draft
         }
         app.refresh_identity_state();
-        app.refresh_dirty_drafts();
+        app.refresh_unsaved_drafts();
 
         assert!(app.draft().unwrap().identity_error.is_some());
         app.request_save_module();
@@ -10739,7 +10930,7 @@ mod tests {
             .ext
             .meta
             .description = Some("body edit".to_string());
-        app.refresh_dirty_drafts();
+        app.refresh_unsaved_drafts();
 
         app.request_save_module();
         assert!(app.confirm.is_none(), "a plain body save must not prompt");
@@ -10797,7 +10988,7 @@ mod tests {
             d.identity.name = "New".to_string();
         }
         app.refresh_identity_state();
-        app.refresh_dirty_drafts();
+        app.refresh_unsaved_drafts();
 
         // Step 1: Save prompts rather than writing under the old identity.
         app.request_save_module();
@@ -10846,7 +11037,7 @@ mod tests {
             // having touched nothing.
             d.identity_error = Some("nope".to_string());
         }
-        app.refresh_dirty_drafts();
+        app.refresh_unsaved_drafts();
 
         app.rename_and_save();
 
