@@ -91,6 +91,13 @@ pub const COL_GAME: Color32 = Color32::from_rgb(0x4D, 0x9D, 0xE0);
 pub const COL_DEFAULT: Color32 = Color32::from_rgb(0x46, 0x4D, 0x57);
 /// Empty (off) checkbox outline — light so it reads on any scope tint.
 pub const CHECK_OUTLINE: Color32 = Color32::from_rgb(0xE1, 0xE3, 0xE6);
+/// Pin-slot id (`[1]`…`[10]`) trailing a pinned profile's row in the nav tree.
+///
+/// Deliberately its own token rather than [`FAINT`]: this label sits *inside* a
+/// selectable row and must stay quieter than the profile name beside it even when
+/// that row is hovered or selected, so it is a step darker than the general
+/// tertiary text color.
+pub const PIN_ID: Color32 = Color32::from_rgb(0x59, 0x5E, 0x66);
 
 /// Inheritance arrow (value comes from a lower scope).
 pub const ICON_INHERIT: &str = "\u{f432}";

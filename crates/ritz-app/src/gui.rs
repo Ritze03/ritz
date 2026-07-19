@@ -8254,7 +8254,7 @@ impl GuiApp {
                     .map(|n| (n.clone(), None)),
             )
             .collect();
-        let id_col = egui::Color32::from_rgb(0x59, 0x5E, 0x66);
+        let id_col = theme::PIN_ID;
         egui::CollapsingHeader::new(egui::RichText::new("Profiles").color(COL_PROFILE))
             .default_open(true)
             .show(ui, |ui| {
@@ -8310,7 +8310,15 @@ impl GuiApp {
                     }
                     // Right-bound pin id.
                     if let Some(id) = pin {
-                        let font = egui::TextStyle::Body.resolve(ui.style());
+                        // Monospaced so `[1]` and `[10]` occupy the same width and the
+                        // column of ids stays scannable — a proportional digit shifts
+                        // the label's left edge per profile. Body's *size* is kept and
+                        // only the family swapped, so this reads as the same label, not
+                        // a smaller one (TextStyle::Monospace is 12pt against Body's 13).
+                        let font = egui::FontId::new(
+                            egui::TextStyle::Body.resolve(ui.style()).size,
+                            egui::FontFamily::Monospace,
+                        );
                         let r = resp.rect;
                         ui.painter().text(
                             egui::pos2(r.right() - 8.0, r.center().y),
