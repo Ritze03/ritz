@@ -378,6 +378,29 @@ enum ConfirmAction {
     /// only ever go stale, and stale captures are a known hazard here (same
     /// reasoning as `DiscardEdits`, which reads its module names live).
     SaveWithPendingRename,
+    /// **Rename was pressed with a committable identity change staged** — the
+    /// one-shot offer to migrate stored config onto the new names (issue #19).
+    ///
+    /// *Why this must be asked, and asked exactly here:* stored config keys on
+    /// **Author + Name + variable** and on nothing else (see [`name_collides`]:
+    /// "compares Author+Name only, since config keys on those two"). The instant
+    /// the manifest is rewritten, the old Author / Name / variable strings exist
+    /// nowhere — not in the manifest, not in a lineage field, not in a sidecar.
+    /// The `old → new` mapping lives *only* in the staged
+    /// [`PendingIdentity`], which the rename consumes. So this really is the
+    /// last moment at which the migration is even expressible, which is why the
+    /// dialog says so in as many words: the choice cannot be revisited later.
+    ///
+    /// The affirmative migrates (the historical behaviour, and the sensible
+    /// default); the alternative renames without migrating; Cancel leaves the
+    /// rename staged and nothing touched.
+    ///
+    /// **Carries no payload**, for exactly the reason
+    /// [`ConfirmAction::SaveWithPendingRename`] carries none: the on-disk
+    /// identity, the staged one and `ModuleDraft::changed_var_renames` are all
+    /// read **live** off the draft at render *and* at confirm time, and the
+    /// modal backdrop makes a change in between impossible.
+    RenameMigrate,
 }
 
 /// The Fork / Create-new module dialog. Both share the same Author/Name form;
@@ -2222,45 +2245,70 @@ impl GuiApp {
         self.reload_configs();
     }
 
+    /// True when [`Self::perform_rename`]'s own gate would accept — i.e. there is
+    /// a focused, editable draft holding a committable staged identity change.
+    ///
+    /// Exists so [`Self::request_rename`] can decline to raise a dialog whose
+    /// only outcome would be `RenameError::NotApplicable`, a modal that asks a
+    /// question and then does nothing whichever way it is answered. Deliberately
+    /// mirrors the gate rather than duplicating its *logic*: both read the same
+    /// three predicates off the same live draft, so they cannot disagree, and
+    /// `perform_rename` still re-checks for itself (the dialog is advisory, the
+    /// gate is authoritative — the same division `apply_save_with_pending_rename`
+    /// documents).
+    fn rename_applicable(&self) -> bool {
+        self.draft()
+            .is_some_and(|d| d.editable && d.has_pending_identity() && d.identity_error.is_none())
+    }
+
+    /// The **only** entry point for committing a staged rename (issue #19). Both
+    /// the Rename header button and the affirmative of the Save-time notice land
+    /// here, and neither renames on the spot any more: they raise
+    /// [`ConfirmAction::RenameMigrate`], which is where the migrate decision is
+    /// actually made.
+    ///
+    /// *Why a funnel:* the migrate offer is one-shot, so a second path to
+    /// `perform_rename` that skipped it would silently spend the user's only
+    /// chance to answer. One entry point makes that unrepresentable — the same
+    /// reasoning `request_save_module` is built on.
+    fn request_rename(&mut self) {
+        if self.rename_applicable() {
+            self.confirm = Some(ConfirmAction::RenameMigrate);
+        }
+    }
+
     /// What the [`ConfirmAction::SaveWithPendingRename`] dialog's affirmative
     /// button runs. Shared by the renderer and the tests so the two cannot drift.
     ///
     /// The branch is on live `identity_error`, the *same* read the dialog labelled
     /// its button from one frame earlier — and the backdrop makes a change in
     /// between impossible:
-    /// - **committable** → apply the rename, and *only* the rename. The body edits
-    ///   stay pending and the user presses Save themselves, which is precisely the
-    ///   "first your rename, then your changes" they asked for. Deliberately **not**
-    ///   a rename-then-save combo: that coupling is the thing they rejected.
+    /// - **committable** → hand off to [`Self::request_rename`], which replaces
+    ///   this dialog with the one-shot migrate offer (issue #19). The rename is
+    ///   still the *only* thing that will be applied: the body edits stay pending
+    ///   and the user presses Save themselves, which is precisely the "first your
+    ///   rename, then your changes" they asked for. Deliberately **not** a
+    ///   rename-then-save combo: that coupling is the thing they rejected.
     /// - **not committable** → [`Self::perform_rename`] would filter itself out and
     ///   silently do nothing, so the affirmative offers the only action that is
     ///   actually available: write the body. Non-destructive now — the unappliable
     ///   rename stays staged for the user to fix.
     fn apply_save_with_pending_rename(&mut self) {
         if self.draft().is_some_and(|d| d.identity_error.is_none()) {
-            // Deliberately ignored, with a reason (issue #30). This branch has
-            // exactly one thing to do and no alternative to fall back to:
+            // Hands off to `request_rename` rather than renaming here (issue
+            // #19): the migrate offer is one-shot, and a path that reached
+            // `perform_rename` directly would spend the user's only chance to
+            // answer it without asking. This dialog therefore **closes and is
+            // replaced by** the migrate dialog — the two never stack, because
+            // `render_confirm_dialog` clears `self.confirm` before dispatching,
+            // precisely so an arm can raise a successor.
             //
-            // - `Err(NotApplicable)` cannot be acted on. It would mean the gate
-            //   disagreed with the `identity_error.is_none()` check one line up
-            //   — i.e. nothing is staged after all — so there is no rename to
-            //   retry and no body write to substitute (that is the *other* arm,
-            //   chosen by the condition above).
-            // - The two "tried and broke" variants have already told the user,
-            //   through the banner and stderr respectively. Doing anything more
-            //   here would be a second report of one event.
-            //
-            // The value is matched rather than `let _ =`'d so that a future
-            // variant is a compile error here instead of silently joining the
-            // ignored set.
-            match self.perform_rename() {
-                Ok(())
-                | Err(
-                    RenameError::NotApplicable
-                    | RenameError::Migration(_)
-                    | RenameError::ManifestWrite(_),
-                ) => {}
-            }
+            // The `NotApplicable` case the old comment here reasoned about is now
+            // handled one layer out, by `rename_applicable`: if the gate would
+            // refuse, no dialog is raised at all and the press is a silent no-op
+            // — the same outcome as before, minus a modal that asks a question
+            // with no answer that does anything.
+            self.request_rename();
         } else {
             self.save_module();
         }
@@ -2727,7 +2775,8 @@ impl GuiApp {
     /// 1. compute `from` = current on-disk identity, `to` = new identity, and the
     ///    `old→new` var renames from the changed existing fields;
     /// 2. **scope sweep FIRST** — [`migrate_renamed_module`] moves stored config
-    ///    across every scope; on error, abort **without** touching the manifest;
+    ///    across every scope; on error, abort **without** touching the manifest.
+    ///    *Skipped entirely when `migrate == false`* — see below;
     /// 3. build the new manifest from the **on-disk body** (`ModuleDraft::baseline`)
     ///    with the new Author/Name applied and in-module `{var}`/`Requires`
     ///    references + field `Variable`s rewritten via [`apply_var_renames`];
@@ -2737,6 +2786,26 @@ impl GuiApp {
     /// Because the sweep is idempotent and the manifest is written last, a crash
     /// between steps 2 and 4 leaves the manifest on the OLD identity, so
     /// re-pressing Rename re-runs cleanly (already-moved scopes no-op).
+    ///
+    /// # `migrate` (2026-07-19, issue #19)
+    ///
+    /// `true` is the historical — and default — behaviour: run the sweep. `false`
+    /// **skips steps 2 and 2b outright** and renames the manifest alone, leaving
+    /// stored values filed under the old Author+Name / old variable names.
+    /// [`ConfirmAction::RenameMigrate`] is the only thing that chooses between
+    /// them, and its doc explains why the choice is one-shot.
+    ///
+    /// *Ordering under `migrate == false`:* the crash window the ordering above
+    /// exists to close **does not exist** on this path — there is no step 2 to be
+    /// half-done, so the whole operation is the single `write_atomic` of step 4,
+    /// which is atomic by construction. Either the old manifest or the new one is
+    /// on disk, never an intermediate. The property is preserved by having
+    /// nothing to preserve it against, not by a second mechanism.
+    ///
+    /// *Error contract:* unchanged and still total. [`RenameError::Migration`] is
+    /// simply unreachable when `migrate == false` — the only call that can
+    /// produce it is the one being skipped — so no variant changes meaning and
+    /// none is added.
     ///
     /// **Rename writes the identity and nothing else** (2026-07-19, user's
     /// decision). It used to build the manifest from `snapshot()` — the whole
@@ -2778,7 +2847,7 @@ impl GuiApp {
     /// nothing was attempted, nothing was touched) from "tried and broke" (the
     /// other two) — a distinction a caller may reasonably want and could not
     /// previously make at all.
-    fn perform_rename(&mut self) -> Result<(), RenameError> {
+    fn perform_rename(&mut self, migrate: bool) -> Result<(), RenameError> {
         // Snapshot everything we need out of the draft so the immutable borrow is
         // released before we touch `self.paths` / reload.
         let Some((mut ext, manifest, old_author, old_name, new_author, new_name, var_rename)) = self
@@ -2814,8 +2883,13 @@ impl GuiApp {
         let from = (old_author.as_str(), old_name.as_str());
         let to = (new_author.as_str(), new_name.as_str());
 
-        // Step 2: scope sweep FIRST. On error, abort before the manifest is touched.
-        let report =
+        // Steps 2 and 2b, both gated on `migrate` (issue #19). Declining the
+        // migration is declining *the sweep*, disk and preview together: they are
+        // two halves of one operation and a half-swept state — new identity on
+        // disk, old identity in the preview column, or the reverse — would be a
+        // bug in either direction.
+        let report = if migrate {
+            // Step 2: scope sweep FIRST. On error, abort before the manifest is touched.
             match core_config::migrate_renamed_module(&self.paths, from, to, &var_rename) {
                 Ok(r) => r,
                 Err(e) => {
@@ -2826,7 +2900,14 @@ impl GuiApp {
                     self.carryover_report = Some(format!("Rename aborted: {msg}"));
                     return Err(RenameError::Migration(msg));
                 }
-            };
+            }
+        } else {
+            // Nothing moved, so nothing was dropped in the moving: the empty
+            // report is the truthful one, not a placeholder. `set_carryover_report`
+            // renders nothing for it, which is right — the user was just told, in
+            // the dialog, exactly what staying behind means.
+            Vec::new()
+        };
 
         // Step 2b: the IDE preview's scratch layer lives only in memory, so the
         // disk sweep never reaches it — pre-S4a its values silently orphaned under
@@ -2835,14 +2916,16 @@ impl GuiApp {
         // form. Same remap, same `remove_source: true`; run here, immediately
         // after the sweep, so the in-memory layer and the on-disk ones can never
         // be left describing different identities.
-        core_config::remap_one_scope(
-            &mut self.preview_config.config.modules.authors,
-            from,
-            to,
-            &var_rename,
-            &std::collections::HashSet::new(),
-            true,
-        );
+        if migrate {
+            core_config::remap_one_scope(
+                &mut self.preview_config.config.modules.authors,
+                from,
+                to,
+                &var_rename,
+                &std::collections::HashSet::new(),
+                true,
+            );
+        }
 
         // Step 3: build the new manifest — the ON-DISK body (`ext` came from
         // `baseline`) with the new identity and the reference rewrite applied.
@@ -3680,6 +3763,70 @@ impl GuiApp {
         }
     }
 
+    /// The body text of the [`ConfirmAction::RenameMigrate`] dialog, built
+    /// **live** off the focused draft (issue #19).
+    ///
+    /// *Why the text names what is changing:* the issue was written about
+    /// variable renames, but stored config keys on **Author + Name + variable**,
+    /// so an Author/Name edit relocates settings just as thoroughly — and the two
+    /// have completely different-looking consequences to a reader. The lead
+    /// sentence therefore states which of the three cases this is (identity,
+    /// variables, or both) rather than offering one vague sentence that fits all
+    /// three and describes none.
+    ///
+    /// *Why the "Rename Only" sentence promises exactly what it promises:* the
+    /// stranded values are **inert, not deleted** — nothing on the rename path
+    /// removes them, and renaming back restores the link, because the keys are
+    /// plain strings and `remap_all_scopes` is symmetric. But `config_cleanup`
+    /// (the Config Cleanup button) reaps anything no loaded module declares, and
+    /// after the rename no module declares those keys — so it *will* delete them.
+    /// The text says both. Promising recoverability without that caveat would be
+    /// a promise this code cannot keep.
+    fn rename_migrate_prompt(&self) -> String {
+        let Some(d) = self.draft() else {
+            return String::new();
+        };
+        let (old_pair, new_pair) = (
+            format!("{}::{}", d.ext.meta.author, d.ext.meta.name),
+            format!("{}::{}", d.identity.staged_author(), d.identity.staged_name()),
+        );
+        let vars = d.changed_var_renames();
+        let var_list = vars
+            .iter()
+            .map(|(old, new)| format!("{old} \u{2192} {new}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let lead = match (old_pair != new_pair, vars.is_empty()) {
+            (true, true) => format!("You are renaming \"{old_pair}\" to \"{new_pair}\"."),
+            (false, false) => format!("You are renaming these variables: {var_list}."),
+            (true, false) => format!(
+                "You are renaming \"{old_pair}\" to \"{new_pair}\", \
+                 and these variables: {var_list}."
+            ),
+            // Unreachable: `request_rename` gates on `has_pending_identity`,
+            // which is exactly "one of these two is non-empty". Still written as
+            // a sentence rather than left blank, so a future caller getting the
+            // gate wrong shows a wrong dialog rather than an empty one.
+            (false, true) => "You are renaming this module.".to_string(),
+        };
+
+        format!(
+            "{lead}\n\n\
+             Your stored settings are filed under the old names \u{2014} in the \
+             global config, in every profile, and in every game. This is the only \
+             moment they can be moved: once the rename lands, nothing anywhere \
+             records the old names, so the link to them is gone and this choice \
+             cannot be revisited.\n\n\
+             \u{2022} Migrate Settings \u{2014} move them onto the new names now.\n\
+             \u{2022} Rename Only \u{2014} leave them on disk under the old names, \
+             unreachable from this module. Renaming back exactly would reach them \
+             again, but Config Cleanup deletes them, since no module declares \
+             those names any more.\n\
+             \u{2022} Cancel \u{2014} rename nothing; everything stays as it is."
+        )
+    }
+
     /// Render the pending-confirmation modal, if any. Returns true if a
     /// destructive action was carried out.
     fn render_confirm_dialog(&mut self, ctx: &egui::Context) -> bool {
@@ -3694,6 +3841,13 @@ impl GuiApp {
         // (neither "Apply Rename" nor "Save Changes" destroys anything).
         let mut confirm_label = "Confirm";
         let mut destructive = true;
+        // The optional **third** button, between the affirmative and Cancel
+        // (issue #19). `None` for every arm but `RenameMigrate`, which is the one
+        // action with two legitimate ways to say yes. *Why a third button and not
+        // a checkbox* (the shape `DeleteModule`'s purge option uses): a checkbox
+        // defaults silently, and the whole point here is that the default cannot
+        // be corrected afterwards. Two labelled verbs force the reading.
+        let mut alt_label: Option<&str> = None;
         let (title, msg) = match &action {
             ConfirmAction::DeleteGame(_) => (
                 "Delete Game",
@@ -3804,6 +3958,15 @@ impl GuiApp {
                     }
                 }
             }
+            ConfirmAction::RenameMigrate => {
+                confirm_label = "Migrate Settings";
+                alt_label = Some("Rename Only");
+                // Neither button destroys anything on press: Migrate moves values,
+                // Rename Only leaves them exactly where they are. The red danger
+                // styling would misdescribe both.
+                destructive = false;
+                ("Migrate Stored Settings?", self.rename_migrate_prompt())
+            }
         };
 
         // Modal backdrop: dim everything and swallow clicks meant for the panels
@@ -3819,6 +3982,7 @@ impl GuiApp {
             });
 
         let mut confirmed = false;
+        let mut alt_chosen = false;
         let mut cancelled = false;
         egui::Window::new(title)
             .order(egui::Order::Foreground)
@@ -3847,13 +4011,27 @@ impl GuiApp {
                     if ui.add(btn).clicked() {
                         confirmed = true;
                     }
+                    // Secondary styling, between the affirmative and Cancel: it
+                    // is a real choice, not the recommended one.
+                    if let Some(label) = alt_label {
+                        if ui.add(theme::secondary_button(label)).clicked() {
+                            alt_chosen = true;
+                        }
+                    }
                     if ui.add(theme::secondary_button("Cancel")).clicked() {
                         cancelled = true;
                     }
                 });
             });
 
-        if confirmed {
+        if confirmed || alt_chosen {
+            // Cleared **before** the dispatch, not after (2026-07-19, issue #19):
+            // an arm may raise a *successor* dialog — `SaveWithPendingRename`'s
+            // affirmative hands off to `ConfirmAction::RenameMigrate` — and
+            // clearing afterwards would wipe it the instant it was set, dropping
+            // the second question silently. Clearing first also means at most one
+            // modal is ever live, so the two can never stack.
+            self.confirm = None;
             match action {
                 ConfirmAction::DeleteGame(appid) => self.delete_game(&appid),
                 ConfirmAction::DeleteProfile(name) => self.delete_profile(&name),
@@ -3869,8 +4047,21 @@ impl GuiApp {
                 }
                 ConfirmAction::DiscardEdits { then } => self.apply_discard_edits(then),
                 ConfirmAction::SaveWithPendingRename => self.apply_save_with_pending_rename(),
+                // `confirmed` *is* the migrate decision: the affirmative migrates,
+                // the alternative ("Rename Only") does not. Outcomes are ignored
+                // for the reasons `perform_rename`'s doc gives — every one of them
+                // already reports through the banner or the diagnostics band, and
+                // a dialog dispatcher has no second action to take. Matched rather
+                // than `let _ =`'d so a future variant is a compile error here.
+                ConfirmAction::RenameMigrate => match self.perform_rename(confirmed) {
+                    Ok(())
+                    | Err(
+                        RenameError::NotApplicable
+                        | RenameError::Migration(_)
+                        | RenameError::ManifestWrite(_),
+                    ) => {}
+                },
             }
-            self.confirm = None;
             return true;
         }
         if cancelled {
@@ -4443,16 +4634,7 @@ impl GuiApp {
                 }
             }
             TopAction::Fork => self.open_fork_dialog(id),
-            TopAction::Rename => {
-                // The interactive Rename button. Ignored deliberately (issue
-                // #30): this is the path the banner and the diagnostics band
-                // were built for, so every outcome is already on screen —
-                // `NotApplicable` is unreachable from here in practice (the
-                // button is only offered for an editable draft with a valid
-                // staged identity), and both failures self-report. There is no
-                // second action a button dispatcher could take.
-                let _: Result<(), RenameError> = self.perform_rename();
-            }
+            TopAction::Rename => self.request_rename(),
             TopAction::Delete => {
                 if let Some(d) = self.draft() {
                     let label = format!("{}::{}", d.ext.meta.author, d.ext.meta.name);
@@ -13086,15 +13268,42 @@ mod tests {
     /// Verified to bite: making the arm run a rename-then-save combo (the deleted
     /// `rename_and_save`, the coupling the user rejected) writes
     /// `"Description": "body edit"` and fails the absence assert.
+    ///
+    /// **Also pins the full Save → Rename → migrate-offer sequence** (2026-07-19,
+    /// issue #19). Since the migrate decision is one-shot, the Save notice's
+    /// affirmative must *not* rename on the spot — it hands off to the migrate
+    /// dialog, which is the only place that decision is made. The two must
+    /// **replace** each other, never stack: `render_confirm_dialog` clears
+    /// `self.confirm` before dispatching, and this asserts the successor survives
+    /// that clear.
     #[test]
     fn confirming_the_rename_prompt_applies_the_rename_and_not_the_body() {
         let (mut app, base, manifest) = app_with_pending_body_and_rename("prompt-confirm", "New");
         app.request_save_module();
         assert!(matches!(app.confirm, Some(ConfirmAction::SaveWithPendingRename)));
 
-        // Exactly what the dialog's Confirm arm runs.
+        // Exactly what the dialog's Confirm arm runs, in the order it runs it:
+        // clear first (so an arm may raise a successor), then dispatch.
         app.confirm = None;
         app.apply_save_with_pending_rename();
+
+        // Step two of the sequence: nothing has been renamed yet — the Save
+        // notice handed off, and the migrate question is now the live modal.
+        assert!(
+            matches!(app.confirm, Some(ConfirmAction::RenameMigrate)),
+            "Apply Rename must raise the one-shot migrate offer, not rename \
+             silently; got {:?}",
+            app.confirm
+        );
+        assert_eq!(
+            manifest_json(&manifest)["Extension"]["Name"],
+            "Old",
+            "and must not have written anything while the question is open"
+        );
+
+        // The migrate dialog's affirmative, which is what finally renames.
+        app.confirm = None;
+        assert_eq!(app.perform_rename(true), Ok(()));
 
         let after = manifest_json(&manifest);
         assert_eq!(after["Extension"]["Name"], "New", "the rename must land");
@@ -13379,7 +13588,7 @@ mod tests {
         // Asserted, not discarded (issue #30): the return value is now the
         // contract, so a rename that silently refused would fail here rather
         // than only in the manifest assertions below.
-        assert_eq!(app.perform_rename(), Ok(()));
+        assert_eq!(app.perform_rename(true), Ok(()));
 
         let after = manifest_json(&manifest);
         assert_eq!(after["Extension"]["Name"], "New", "the staged rename must land");
@@ -13418,6 +13627,301 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    // ── The one-shot migrate offer (2026-07-19, issue #19) ──────────────────
+    //
+    // Pressing Rename must *ask* whether to move stored config onto the new
+    // names, because stored config keys on Author + Name + variable and the
+    // rename destroys the only record of the old ones. These cover: the offer is
+    // raised for either kind of identity change, each of the three answers, and
+    // what "Rename Only" actually leaves on disk.
+
+    /// A scratch app focused on the `Ritze::Old` manifest with **nothing** staged
+    /// — the neutral starting point each migrate test stages its own edit onto.
+    /// (`app_with_pending_body_and_rename` always stages a Name edit *and* a body
+    /// edit, which would prejudge the very thing two of these tests distinguish.)
+    fn app_focused_on_scratch(tag: &str) -> (GuiApp, PathBuf, PathBuf) {
+        let (base, manifest) = scratch_base(tag);
+        let mut app = test_app();
+        app.paths = Paths { base: base.clone() };
+        app.reload_extensions();
+        let id = app.all_specs.iter().find(|s| s.meta.name == "Old").unwrap().id();
+        app.focused_module = Some(id.clone());
+        app.ensure_draft(&id);
+        (app, base, manifest)
+    }
+
+    /// Store one value for `author::name::var` in **all three** scope kinds that
+    /// `remap_all_scopes` walks: `global.json`, a profile, and a game.
+    fn seed_stored_value(paths: &Paths, author: &str, name: &str, var: &str, value: Value) {
+        let mut global = paths.load_global_config().unwrap();
+        global.set_value(author, name, var, value.clone());
+        paths.save_global_config(&global).unwrap();
+
+        let mut preset: Preset = serde_json::from_value(json!({"Name": "FPS"})).unwrap();
+        preset.set_value(author, name, var, value.clone());
+        paths.save_preset(&preset).unwrap();
+
+        let mut game = GameConfig::new("42", "Test Game");
+        game.set_value(author, name, var, value);
+        paths.save_game(&game).unwrap();
+    }
+
+    /// What `author::name::var` reads back as in each of those three scopes.
+    fn stored_in_each_scope(
+        paths: &Paths,
+        author: &str,
+        name: &str,
+        var: &str,
+    ) -> [Option<Value>; 3] {
+        [
+            paths.load_global_config().unwrap().get_value(author, name, var).cloned(),
+            paths
+                .load_preset("FPS")
+                .unwrap()
+                .unwrap()
+                .get_value(author, name, var)
+                .cloned(),
+            paths
+                .load_game("42")
+                .unwrap()
+                .unwrap()
+                .get_value(author, name, var)
+                .cloned(),
+        ]
+    }
+
+    /// **The point the issue understates.** It was filed about *variable* renames,
+    /// but stored config keys on **Author + Name** too (`name_collides`: "compares
+    /// Author+Name only, since config keys on those two"), so an identity-pair
+    /// edit relocates settings just as completely. The offer must fire for it.
+    ///
+    /// Genuinely fails before the fix: `TopAction::Rename` called `perform_rename`
+    /// straight out, so `confirm` stayed `None` and the manifest already said
+    /// "New" by this line.
+    #[test]
+    fn renaming_the_author_name_pair_asks_before_migrating() {
+        let (mut app, base, manifest) = app_focused_on_scratch("migrate-ask-identity");
+        app.drafts.get_mut(&manifest).unwrap().identity.name = "New".to_string();
+        app.refresh_identity_state();
+        assert!(app.draft().unwrap().changed_var_renames().is_empty(), "premise: no var renames");
+
+        app.dispatch_top_action(TopAction::Rename, &app.focused_module.clone().unwrap(), true, true);
+
+        assert!(
+            matches!(app.confirm, Some(ConfirmAction::RenameMigrate)),
+            "an Author/Name change must raise the offer; got {:?}",
+            app.confirm
+        );
+        assert_eq!(
+            manifest_json(&manifest)["Extension"]["Name"],
+            "Old",
+            "and must not have renamed anything while the question is open"
+        );
+
+        // The text must say which kind of change this is, and that the choice is
+        // final — the user's verbatim criterion ("tell me, that this cant be done
+        // later").
+        let msg = app.rename_migrate_prompt();
+        assert!(msg.contains("\"Ritze::Old\" to \"Ritze::New\""), "must name both: {msg}");
+        assert!(msg.contains("cannot be revisited"), "must say the choice is final: {msg}");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The kind the issue *was* about. Same offer, and the text names the
+    /// variables instead of an identity pair.
+    ///
+    /// Genuinely fails before the fix, for the same reason as the test above.
+    #[test]
+    fn renaming_only_a_variable_asks_before_migrating() {
+        let (mut app, base, manifest) = app_focused_on_scratch("migrate-ask-var");
+        {
+            let d = app.drafts.get_mut(&manifest).unwrap();
+            d.identity.var_edits.insert("enabled".to_string(), "on".to_string());
+        }
+        app.refresh_identity_state();
+        {
+            let d = app.draft().unwrap();
+            assert_eq!(d.identity.staged_name(), "Old", "premise: the identity pair is untouched");
+            assert_eq!(d.changed_var_renames().len(), 1, "premise: exactly one var rename");
+        }
+
+        app.dispatch_top_action(TopAction::Rename, &app.focused_module.clone().unwrap(), true, true);
+
+        assert!(
+            matches!(app.confirm, Some(ConfirmAction::RenameMigrate)),
+            "a variable-only rename must raise the offer too; got {:?}",
+            app.confirm
+        );
+        let msg = app.rename_migrate_prompt();
+        assert!(msg.contains("enabled \u{2192} on"), "must name the variable rename: {msg}");
+        assert!(
+            !msg.contains(" to \"Ritze::Old\""),
+            "and must not claim an identity change that is not happening: {msg}"
+        );
+        assert!(msg.contains("cannot be revisited"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The affirmative: stored values move onto the new keys in **every** scope —
+    /// global, profile and game — and nothing is left behind under the old ones.
+    ///
+    /// This one **pins existing behaviour through the new path** rather than
+    /// failing before the fix: the sweep itself already worked, and `migrate ==
+    /// true` is the historical branch. Its job is to prove the added parameter
+    /// did not quietly disconnect it.
+    #[test]
+    fn migrating_moves_stored_values_across_global_profile_and_game() {
+        let (mut app, base, manifest) = app_focused_on_scratch("migrate-yes");
+        seed_stored_value(&app.paths, "Ritze", "Old", "enabled", json!(true));
+        {
+            let d = app.drafts.get_mut(&manifest).unwrap();
+            d.identity.name = "New".to_string();
+            d.identity.var_edits.insert("enabled".to_string(), "on".to_string());
+        }
+        app.refresh_identity_state();
+
+        app.request_rename();
+        assert!(matches!(app.confirm, Some(ConfirmAction::RenameMigrate)));
+        app.confirm = None; // the dialog clears before dispatching
+        assert_eq!(app.perform_rename(true), Ok(()));
+
+        assert_eq!(
+            stored_in_each_scope(&app.paths, "Ritze", "New", "on"),
+            [Some(json!(true)), Some(json!(true)), Some(json!(true))],
+            "the value must land on the new keys in all three scopes"
+        );
+        assert_eq!(
+            stored_in_each_scope(&app.paths, "Ritze", "Old", "enabled"),
+            [None, None, None],
+            "and the source must be pruned, not copied"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The alternative. The manifest is renamed **anyway** — declining the
+    /// migration is not declining the rename — and the stored values stay exactly
+    /// where they were, under keys the renamed module can no longer reach.
+    ///
+    /// Also pins the two honesty claims the dialog text makes about them:
+    /// they are **inert, not deleted** (so renaming back reaches them again), but
+    /// `config_cleanup` **does** reap them, because after the rename no loaded
+    /// module declares `Ritze::Old::enabled`. The text promises exactly this and
+    /// no more.
+    ///
+    /// Genuinely fails before the fix: there was no way not to migrate, so the
+    /// old keys were empty and the new ones populated — every assert here is
+    /// inverted.
+    #[test]
+    fn renaming_without_migrating_leaves_the_values_under_the_old_keys() {
+        let (mut app, base, manifest) = app_focused_on_scratch("migrate-no");
+        seed_stored_value(&app.paths, "Ritze", "Old", "enabled", json!(true));
+        {
+            let d = app.drafts.get_mut(&manifest).unwrap();
+            d.identity.name = "New".to_string();
+        }
+        app.refresh_identity_state();
+
+        app.request_rename();
+        app.confirm = None;
+        // `false` — exactly what the dialog's "Rename Only" button dispatches.
+        assert_eq!(app.perform_rename(false), Ok(()));
+
+        assert_eq!(
+            manifest_json(&manifest)["Extension"]["Name"],
+            "New",
+            "the rename itself must still land"
+        );
+        assert_eq!(
+            stored_in_each_scope(&app.paths, "Ritze", "Old", "enabled"),
+            [Some(json!(true)), Some(json!(true)), Some(json!(true))],
+            "the values must be left untouched under the OLD keys"
+        );
+        assert_eq!(
+            stored_in_each_scope(&app.paths, "Ritze", "New", "enabled"),
+            [None, None, None],
+            "and nothing may have been written under the new ones"
+        );
+        assert!(app.carryover_report.is_none(), "nothing moved, so there is nothing to report");
+
+        // Claim 1: inert. Renaming straight back reaches them again — the keys
+        // are plain strings and the sweep is symmetric, so a return trip finds
+        // exactly what the first trip declined to move.
+        {
+            let d = app.drafts.get_mut(&manifest).unwrap();
+            d.identity.name = "Old".to_string();
+        }
+        app.refresh_identity_state();
+        assert_eq!(app.perform_rename(true), Ok(()));
+        assert_eq!(
+            stored_in_each_scope(&app.paths, "Ritze", "Old", "enabled"),
+            [Some(json!(true)), Some(json!(true)), Some(json!(true))],
+            "renaming back must reach the stranded values again"
+        );
+
+        // Claim 2: but Config Cleanup reaps them. Rename away once more and run
+        // it — no loaded module declares `Ritze::Old::enabled` any more, so the
+        // sweep that removes undeclared variables removes these.
+        {
+            let d = app.drafts.get_mut(&manifest).unwrap();
+            d.identity.name = "New".to_string();
+        }
+        app.refresh_identity_state();
+        assert_eq!(app.perform_rename(false), Ok(()));
+        app.config_cleanup();
+        assert_eq!(
+            stored_in_each_scope(&app.paths, "Ritze", "Old", "enabled"),
+            [None, None, None],
+            "Config Cleanup must reap them \u{2014} which is why the dialog says so"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Cancel. Everything stays staged and untouched — the manifest, the stored
+    /// config, and the draft's pending identity — so the user can press Rename
+    /// again and get the same question.
+    ///
+    /// Genuinely fails before the fix: pressing Rename applied the rename
+    /// immediately, so there was no staged state left to preserve.
+    #[test]
+    fn cancelling_the_migrate_offer_leaves_the_rename_staged() {
+        let (mut app, base, manifest) = app_focused_on_scratch("migrate-cancel");
+        seed_stored_value(&app.paths, "Ritze", "Old", "enabled", json!(true));
+        {
+            let d = app.drafts.get_mut(&manifest).unwrap();
+            d.identity.name = "New".to_string();
+            d.ext.meta.description = Some("body edit".to_string());
+        }
+        app.refresh_identity_state();
+        app.refresh_unsaved_drafts();
+
+        app.request_rename();
+        assert!(matches!(app.confirm, Some(ConfirmAction::RenameMigrate)));
+        app.confirm = None; // what the dialog's Cancel button does, in full
+
+        let after = manifest_json(&manifest);
+        assert_eq!(after["Extension"]["Name"], "Old", "Cancel must not rename");
+        assert!(after["Extension"].get("Description").is_none(), "nor write the body");
+        assert_eq!(
+            stored_in_each_scope(&app.paths, "Ritze", "Old", "enabled"),
+            [Some(json!(true)), Some(json!(true)), Some(json!(true))],
+            "nor move a single stored value"
+        );
+        let d = app.draft().expect("Cancel must not drop the draft");
+        assert_eq!(d.identity.staged_name(), "New", "the rename is still staged");
+        assert!(d.has_pending_identity());
+        assert!(d.dirty(), "and the body edit is still pending beside it");
+
+        // And pressing Rename again asks the same question, unchanged.
+        app.request_rename();
+        assert!(matches!(app.confirm, Some(ConfirmAction::RenameMigrate)));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// The removed gate. `perform_rename` used to also be gated on
     /// `!dirty() || save_enabled()`, because it wrote the body and so could
     /// commit edits that `extension::validate` would reject. It no longer writes
@@ -13441,7 +13945,7 @@ mod tests {
         assert!(!app.draft().unwrap().save_enabled(), "premise: the body cannot be saved");
 
         assert_eq!(
-            app.perform_rename(),
+            app.perform_rename(true),
             Ok(()),
             "an unsaveable body must not make the rename itself fail"
         );
@@ -13482,7 +13986,7 @@ mod tests {
         // exactly the fragile inference that issue was about: it could not tell
         // a refused rename from one that ran and failed to change anything.
         assert_eq!(
-            app.perform_rename(),
+            app.perform_rename(true),
             Err(RenameError::NotApplicable),
             "an invalid staged identity must be refused by the gate, not attempted"
         );
@@ -14086,7 +14590,7 @@ mod tests {
         app.draft_mut().unwrap().identity.name = "Zzz".to_string();
         app.refresh_identity_state();
 
-        assert_eq!(app.perform_rename(), Ok(()));
+        assert_eq!(app.perform_rename(true), Ok(()));
 
         assert_eq!(app.focused_module.as_deref(), Some("Ritze::Zzz::1.0"), "premise");
         assert_eq!(selected_name(&app), "Zzz", "the selection follows the rename");

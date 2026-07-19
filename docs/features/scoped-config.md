@@ -48,6 +48,12 @@ Because stored config keys on `Author → Name → var` only (Version is dropped
 - `remap_all_scopes(..)` — sweeps `global.json` + every `profiles/*.json` + every `games/*.json` (the latter needs `Paths::list_games`, the games mirror of `list_presets`). With `remove_source=true` it prunes the moved-out source vars after copying (turning copy into move); clobber-skipped source vars are **kept** so a move can't silently lose data. Only files whose map actually changed are rewritten, via `write_atomic`.
 - Two named wrappers are the only shapes the GUI calls: `snapshot_config_to_fork` (parent kept, `remove_source=false`) and `migrate_renamed_module` (source pruned, `remove_source=true`).
 
+**The rename migration is offered once and cannot be deferred** (2026-07-19, issue #19). Because stored config keys on **Author + Name + variable** and on nothing else, a rename of *either* kind — the identity pair or a variable — relocates stored settings. `crate::gui::GuiApp::perform_rename` therefore takes a `migrate: bool`, chosen by a modal (`ConfirmAction::RenameMigrate`) raised the moment Rename is pressed.
+
+*Why it must be asked then and never later:* the instant the manifest is rewritten, the old Author / Name / variable strings exist nowhere — the manifest carries only the new ones, and the `old → new` mapping lived only in the staged `PendingIdentity`, which the rename consumes. Nothing records the old names, so `migrate_renamed_module`'s `from` argument becomes unrecoverable. A later "migrate now?" command could not be expressed, never mind executed. The dialog says so.
+
+*What declining leaves:* the values stay under the old keys in every scope file, unreachable from the renamed module but **not deleted** — nothing on the rename path removes them, and renaming back exactly reaches them again, since the keys are plain strings and `remap_all_scopes` is symmetric. **`crate::gui::GuiApp::config_cleanup` does reap them**, however: it removes every `(author, name, variable)` no loaded module declares, and post-rename no module declares those. Both facts are in the dialog text; see `docs/features/settings-gui.md` for the wording and the reasoning behind it.
+
 *Why a per-var safe prune instead of dropping the whole source entry:* an in-place field rename is `from == to` with only `rename` set — nuking the source entry would delete the just-written destination, so the prune removes only the renamed-away old names and never the clobber-skipped ones.
 
 ### Renaming or deleting a profile sweeps every reference to it

@@ -1384,7 +1384,78 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   about which of their two pending edits this button commits.
 
   The `confirm_label` / `destructive` overrides in `render_confirm_dialog` exist for this
-  arm: it is the one variant whose button is neither "Confirm" nor red.
+  arm and for the migrate offer below: they are the variants whose button is neither
+  "Confirm" nor red.
+
+  **Its affirmative hands off, it does not rename** (2026-07-19, issue #19) — the
+  committable arm calls `GuiApp::request_rename`, which raises
+  `ConfirmAction::RenameMigrate` (below). *Why:* the migrate decision is one-shot, so a
+  path that reached `perform_rename` directly would spend the user's only chance to answer
+  it without asking. The full sequence is **Save → "Rename Pending" → Apply Rename →
+  "Migrate Stored Settings?" → Migrate / Rename Only / Cancel**, and the two modals
+  **replace** each other rather than stacking: `render_confirm_dialog` clears
+  `self.confirm` *before* dispatching the confirmed arm, precisely so an arm may raise a
+  successor (clearing afterwards would wipe it the instant it was set). At most one modal
+  is ever live. Regression: `confirming_the_rename_prompt_applies_the_rename_and_not_the_body`.
+
+- **The one-shot migrate offer** (`ConfirmAction::RenameMigrate`, 2026-07-19, issue #19) —
+  pressing **Rename** with a committable identity change staged no longer renames on the
+  spot. It raises a three-way modal: **Migrate Settings** (the affirmative, and the
+  historical behaviour), **Rename Only**, **Cancel**. `GuiApp::request_rename` is the only
+  entry point, and it is gated on `GuiApp::rename_applicable` so a press that
+  `perform_rename` would refuse raises no dialog at all rather than one whose every answer
+  does nothing.
+
+  The user's acceptance criterion, verbatim: *"As soon as i rename something, you can offer
+  to migrate my configs now and tell me, that this cant be done later (dialog box, like we
+  have for discard)"*.
+
+  ***Why the decision genuinely cannot be deferred* — the load-bearing rationale.** Stored
+  config keys on **Author + Name + variable** and on nothing else (`name_collides`:
+  "compares Author+Name only, since config keys on those two"; `migrate_renamed_module`
+  takes the identity pair *and* the var map). The moment the manifest is rewritten, the old
+  Author / Name / variable strings exist **nowhere** — not in the manifest, not in a lineage
+  field, not in a sidecar. The `old → new` mapping lives only in the staged
+  `PendingIdentity`, which the rename consumes. So there is no later point at which a
+  "migrate now?" command could even be *expressed*, let alone executed. That is why the
+  dialog states it, and why the offer is attached to the rename rather than being a menu
+  item somewhere.
+
+  **It fires for either kind of change, and says which.** The issue was filed about
+  variable renames, but an Author/Name edit relocates stored settings just as completely.
+  `GuiApp::rename_migrate_prompt` builds the lead sentence live off the draft in three
+  shapes — identity pair only (`You are renaming "Ritze::Old" to "Ritze::New".`), variables
+  only (`You are renaming these variables: enabled → on.`), or both — rather than one vague
+  sentence that fits all three and describes none. The body then states that the values are
+  filed under the old names across the global config, every profile and every game, that
+  this is the only moment they can be moved, and that the choice **cannot be revisited**.
+
+  **What "Rename Only" leaves behind, stated honestly.** The stored values stay exactly
+  where they are, under the old keys, unreachable from the renamed module. They are
+  **inert — nothing on the rename path deletes them** — and renaming back exactly reaches
+  them again, because the keys are plain strings and `remap_all_scopes` is symmetric.
+  **But `GuiApp::config_cleanup` (the Config Cleanup button) does reap them:** it removes
+  every stored `(author, name, variable)` no loaded module declares, and after the rename
+  no module declares those. The dialog text says both halves, deliberately — promising
+  recoverability without the caveat would be a promise the code cannot keep. Both claims
+  are asserted end-to-end in
+  `renaming_without_migrating_leaves_the_values_under_the_old_keys`.
+
+  **No payload on the variant.** The on-disk identity, the staged one and
+  `changed_var_renames()` are read **live** at render *and* confirm time — same reasoning as
+  `SaveWithPendingRename`, and the backdrop makes a change in between impossible.
+
+  **Three buttons, not a checkbox.** *Why not the shape `DeleteModule`'s purge option uses:*
+  a checkbox defaults silently, and the whole point is that the default cannot be corrected
+  afterwards. Two labelled verbs force the reading. `render_confirm_dialog` grew an optional
+  `alt_label` third button between the affirmative and Cancel; `confirmed` *is* the migrate
+  boolean handed to `perform_rename`.
+
+  Regressions: `renaming_the_author_name_pair_asks_before_migrating`,
+  `renaming_only_a_variable_asks_before_migrating`,
+  `migrating_moves_stored_values_across_global_profile_and_game` (global + profile + game),
+  `renaming_without_migrating_leaves_the_values_under_the_old_keys`,
+  `cancelling_the_migrate_offer_leaves_the_rename_staged`.
 - **Rename / identity migration** (Phase 3 stage 2b, `GuiApp::perform_rename`) — a **Rename**
   header button, enabled only when `has_pending_identity() && identity_error.is_none()`.
   `identity_error` rejects an empty/colliding (Author, Name) (`name_collides`, Version-blind,
@@ -1404,6 +1475,22 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   manifest is written last, so a crash between (2) and (4) leaves the manifest on the OLD
   identity — re-pressing Rename re-runs cleanly (already-moved scopes no-op). No WAL/journal.
   Dropped vars reuse the `carryover_report` banner; the editor stays open on the new `id`.
+
+  **`perform_rename(migrate: bool)`** (2026-07-19, issue #19) — `true` is the historical
+  path described above and is unchanged, ordering included. `false` (the "Rename Only"
+  answer to the migrate offer) **skips steps 2 and 2b outright** and renames the manifest
+  alone. *The crash-safety property survives because on that path there is nothing for it to
+  protect:* with no step 2 to be half-done, the whole operation is step 4's single
+  `write_atomic`, which is atomic by construction — either the old manifest or the new one is
+  on disk, never an intermediate. Steps 2 and 2b are gated **together**: declining the
+  migration declines the disk sweep and the in-memory IDE-preview remap as one, because a
+  half-swept state (new identity on disk, old identity in the preview column, or the
+  reverse) would be a bug in either direction. The error contract is unchanged and still
+  total — `RenameError::Migration` is simply unreachable when `migrate == false`, since the
+  only call that produces it is the one being skipped, so no variant changes meaning and
+  none is added. With nothing moved there is nothing dropped in the moving, so the report is
+  empty and the banner shows nothing — correct, because the user was just told in the dialog
+  exactly what staying behind means.
   **`perform_rename` returns `Result<(), RenameError>`** (2026-07-19, issue #30), with one
   variant per failure mode: `NotApplicable` (the gate refused — nothing was attempted, and
   nothing on disk or in memory was touched), `Migration(String)` (step 2 failed; the
