@@ -3300,12 +3300,37 @@ impl GuiApp {
         let resolution = self.resolve_specs_for_editing(ide_specs);
         let spec = ide_specs.iter().find(|s| s.id() == id).cloned();
         let touch = self.general_config.touch_mode;
-        // Favour the editor: ~45% of everything right of the fixed 280px nav.
-        let default_w = ((ctx.screen_rect().width() - 280.0) * 0.45).clamp(400.0, 900.0);
+        // ── Column split ────────────────────────────────────────────────────
+        // Editor and preview each get HALF of everything right of the fixed
+        // 280px nav column. The splitter — not a constant — is the user's width
+        // control, so the only hard limits are the two columns' usability
+        // floors:
+        //   * preview 400px — `render_field` reserves a fixed 260px for the
+        //     label/checkbox column before the control even starts.
+        //   * editor  340px — `body_max_width`'s `.max(300.0)` floor plus the
+        //     column's own margins.
+        // *Why the old `.clamp(400.0, 900.0)` was wrong:* the 900px **maximum**
+        // binds on any wide display, so the editor kept everything past 900px
+        // and the split skewed to roughly a third / two thirds. The max is now
+        // derived from the window instead of hard-coded.
+        const PREVIEW_MIN_W: f32 = 400.0;
+        const EDITOR_MIN_W: f32 = 340.0;
+        let avail = (ctx.screen_rect().width() - 280.0).max(0.0);
+        // `.max(PREVIEW_MIN_W)` keeps the range non-empty on a narrow window,
+        // where `avail - EDITOR_MIN_W` can fall below the preview's own floor.
+        let max_w = (avail - EDITOR_MIN_W).max(PREVIEW_MIN_W);
+        let default_w = (avail * 0.5).clamp(PREVIEW_MIN_W, max_w);
 
-        egui::SidePanel::right("ide_preview")
+        // Id deliberately bumped from "ide_preview" to "ide_preview_split".
+        // *Why:* `default_width` only applies the first time a panel id is seen,
+        // and eframe persists egui memory by default — so anyone who ran the
+        // previous build has the old capped width stored and would keep seeing
+        // the skewed split no matter what this code computes. A new id retires
+        // that stale entry exactly once. (The `push_id("ide_preview")` widget
+        // namespace below is unrelated and intentionally left alone.)
+        egui::SidePanel::right("ide_preview_split")
             .resizable(true)
-            .width_range(400.0..=900.0)
+            .width_range(PREVIEW_MIN_W..=max_w)
             .default_width(default_w)
             .frame(egui::Frame::none().fill(theme::PANEL))
             .show(ctx, |ui| {
@@ -4721,6 +4746,15 @@ impl GuiApp {
                     .show(ui, |ui| {
                         ui.add_space(4.0);
                         match mode {
+                            // General Settings owns the whole nav body: the list
+                            // below the GENERAL box is EMPTY. *Why:* the tree
+                            // lists config *scopes* (Global Profile / Profiles /
+                            // Games) and General Settings is not one — it edits
+                            // app-wide preferences. Drawing the scope tree under
+                            // it would offer a selection that the panel on the
+                            // right isn't showing.
+                            Mode::Config
+                                if matches!(self.nav_sel, NavSel::GeneralSettings) => {}
                             Mode::Config => {
                                 // The left nav retargets the editor's live preview, so it
                                 // stays usable with a *clean* draft. Once the draft is
@@ -4760,9 +4794,14 @@ impl GuiApp {
         let mut action = None;
         // Selection is a function of BOTH axes: `mode` picks IDE vs. the two config
         // destinations, `nav_sel` disambiguates those two.
+        // Both flags are derived from live state every frame, never cached — so
+        // ANY code path that moves `mode`/`nav_sel` (Close, Ctrl+E, the exit
+        // interlock in `ui()`) is followed by the box automatically. There is no
+        // second copy of "which category is selected" that could drift.
         let is_ide = self.mode == Mode::Ide;
         let is_general = !is_ide && matches!(self.nav_sel, NavSel::GeneralSettings);
         let is_games = !is_ide && !is_general;
+        let mono = self.general_config.mono_ui;
         egui::Frame::none()
             .fill(theme::PANEL2)
             .stroke(egui::Stroke::new(1.0, theme::BORDER))
@@ -4770,15 +4809,20 @@ impl GuiApp {
             .inner_margin(egui::Margin::symmetric(8.0, 8.0))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.label(theme::header_label("General"));
+                // `section_label` (uppercase ACCENT 12px), not `header_label`
+                // (uppercase FAINT 11px): this is an emphasized section heading,
+                // the same role the settings-page section headers use, and the
+                // FAINT gray is exactly why the box "drowned" in the panel.
+                ui.label(theme::section_label("General"));
                 ui.add_space(4.0);
-                if full_selectable(ui, is_general, "General Settings").clicked() {
+                // Cog reused verbatim from the old General Settings tree row.
+                if nav_category_row(ui, is_general, "\u{f013}", "General Settings", mono).clicked() {
                     action = Some(NavCategory::GeneralSettings);
                 }
-                if full_selectable(ui, is_ide, "IDE Mode").clicked() {
+                if nav_category_row(ui, is_ide, "\u{eef4}", "IDE Mode", mono).clicked() {
                     action = Some(NavCategory::Ide);
                 }
-                if full_selectable(ui, is_games, "Games / Profiles").clicked() {
+                if nav_category_row(ui, is_games, "\u{f4ff}", "Games / Profiles", mono).clicked() {
                     action = Some(NavCategory::GamesProfiles);
                 }
             });
@@ -4802,6 +4846,16 @@ impl GuiApp {
                 // IDE mode discards it; S4 adds the combined "unsaved changes" notice.
                 if matches!(self.nav_sel, NavSel::ModuleEditor(_)) {
                     self.exit_module_editor();
+                }
+                // Coming back from General Settings, `nav_sel` is still
+                // `GeneralSettings` — which is the box's *other* category. Left
+                // alone, the box would snap straight back to "General Settings"
+                // (`is_general` is derived from `nav_sel`) and the tree would
+                // stay empty, making the click look dead. Land on the ambient
+                // game, the same destination `editor_exit_target` defaults to.
+                if matches!(self.nav_sel, NavSel::GeneralSettings) {
+                    self.nav_sel = NavSel::Game(self.appid.clone());
+                    self.nav_name_buf = self.game_config.game.name.clone();
                 }
             }
             NavCategory::Ide => {
@@ -4884,7 +4938,6 @@ impl GuiApp {
     fn render_nav_tree(&mut self, ui: &mut egui::Ui) {
         // Collect any nav action to apply after rendering (avoids borrow conflicts).
         enum NavAction {
-            SelectGeneral,
             SelectGlobal,
             SelectProfile(String),
             SelectGame(String, String), // appid, name
@@ -4895,10 +4948,13 @@ impl GuiApp {
 
         let sep = icon_sep(self.general_config.mono_ui);
         let gap = if self.general_config.mono_ui { 8.0 } else { 7.0 };
-        let is_general = self.nav_sel == NavSel::GeneralSettings;
-        if full_selectable(ui, is_general, egui::RichText::new(format!("\u{f013}{sep}General Settings")).color(theme::FAINT)).clicked() {
-            action = Some(NavAction::SelectGeneral);
-        }
+        // No General Settings row here any more — it lives *only* in the GENERAL
+        // category box above the tree (`render_nav_category_box`).
+        // *Why removed:* with the box present the row was a second, competing
+        // control for the same destination — selecting it left the box showing
+        // "Games / Profiles" while the panel showed General Settings, and picking
+        // any profile/game from the tree silently flipped the box's category. One
+        // destination, one control.
         let is_global = self.nav_sel == NavSel::GlobalSettings;
         if full_selectable(ui, is_global, egui::RichText::new(format!("\u{f0ac}{sep}Global Profile")).color(COL_GLOBAL)).clicked() {
             action = Some(NavAction::SelectGlobal);
@@ -5057,13 +5113,6 @@ impl GuiApp {
         // Apply action
         match action {
             None => {}
-            Some(NavAction::SelectGeneral) => {
-                self.nav_sel = NavSel::GeneralSettings;
-                self.creating_profile = false;
-                self.duplicating_preset = None;
-                self.creating_game = false;
-                self.text_buffers.clear();
-            }
             Some(NavAction::SelectGlobal) => {
                 self.nav_sel = NavSel::GlobalSettings;
                 self.creating_profile = false;
@@ -5838,6 +5887,49 @@ fn full_selectable(
         ui.selectable_label(selected, text)
     })
     .inner
+}
+
+/// One row of the nav's GENERAL category box: `glyph` + `label`, full-width
+/// selectable.
+///
+/// Built on [`full_selectable`] — the very same call the nav tree's rows use —
+/// so the row shape, hit area and selection fill are literally the tree's, and
+/// the box reads as the tree's header rather than as a competing widget. Only
+/// the *ink* differs, which is what carries the category/scope distinction:
+///
+/// - **selected** — glyph in `ACCENT`, label in full-brightness `TEXT`, over
+///   `full_selectable`'s accent-tinted fill. *Why color and not a bold weight:*
+///   the bold family (`FontFamily::Name("bold")`) is reserved for the logo
+///   wordmark, and a per-row weight switch would reflow the row's width.
+/// - **unselected** — glyph in `FAINT`, label in `DIM`. Legible but clearly
+///   receded, so exactly one row reads as "live".
+///
+/// *Why every color is explicit (no `PLACEHOLDER`):* a *selected*
+/// `selectable_label` resolves the placeholder color to the selection stroke,
+/// which would tint the label blue — the same trap documented in [`leaf`].
+///
+/// Icons go through a plain [`LayoutJob`], **not** [`IconCenterCache`]: that
+/// cache exists to center glyph *ink* inside a square `icon_button`, and these
+/// are left-aligned label rows, identical in construction to `leaf`'s.
+fn nav_category_row(
+    ui: &mut egui::Ui,
+    selected: bool,
+    glyph: &str,
+    label: &str,
+    mono: bool,
+) -> egui::Response {
+    // Same font-independent icon→text gap the tree leaves use.
+    let gap = if mono { 8.0 } else { 7.0 };
+    let (icon_col, text_col) = if selected {
+        (theme::ACCENT, theme::TEXT)
+    } else {
+        (theme::FAINT, theme::DIM)
+    };
+    let font_id = ui.style().text_styles[&egui::TextStyle::Body].clone();
+    let mut job = LayoutJob::default();
+    job.append(glyph, 0.0, TextFormat { font_id: font_id.clone(), color: icon_col, ..Default::default() });
+    job.append(label, gap, TextFormat { font_id, color: text_col, ..Default::default() });
+    full_selectable(ui, selected, job)
 }
 
 /// A single selectable extension leaf.
