@@ -350,6 +350,56 @@ renames in the scratch preview."
 
 ## Applied
 
+### 2026-07-19 — S4a: multi-draft (`drafts: IndexMap<PathBuf, ModuleDraft>`)
+
+Unsaved manifest edits now survive switching modules. Behaviour, symbols and full
+rationale live in [`../features/settings-gui.md`](../features/settings-gui.md), section
+"Multi-draft — `GuiApp::drafts`"; only what this changes about *the plan* is recorded here.
+
+**Claims in the S4 entry above that turned out to be wrong:**
+
+- **"Re-keying drafts on rename/fork/delete … a missed re-key silently orphans a draft" —
+  the correctness-critical risk that made S4 "the riskiest stage" — does not exist.** It was
+  premised on keying the map by `Extension::id()`. Keying by **manifest `PathBuf`** removes
+  it outright: `perform_rename` rewrites the manifest *in place* (the file is never renamed;
+  `id()` comes from the JSON meta), so the key is stable across exactly the operation the
+  risk was about. Re-keying is a non-event. What a rename *does* need is a **re-seed** from
+  disk, because the entry's `id`/`baseline`/`baseline_vars`/`identity` go stale.
+- **The `icon_cache` label-poisoning trap does not exist.** The plan warns that a dirty
+  glyph must never be appended to the label string because it would poison
+  `IconCenterCache`. `IconCenterCache` keys on the *leading char of the icon string* plus
+  font size and family — the label never reaches it. (Prepending into `icon_lists` is still
+  the right call, for the unrelated reason that a baked-in glyph loses its independent
+  colour and changes what the row's text *is*.)
+- **The `ModuleEditor(_)` arm in `set_scoped`/`unset_scoped`/`persist` is inert**, so
+  removing it is not part of the state-model work. In IDE mode the manifest editor mutates
+  the draft directly via `render_editor_body` and never calls `set_scoped`; the only callers
+  are `set_current`/`unset_current` (reached solely from `render_module_settings_body`, which
+  in IDE mode runs exclusively inside `with_preview_writes` → `WriteTarget::Preview` and
+  returns before the `nav_sel` match) and `poll_detect` (which restores `d.target`). Left in
+  place.
+- **The tree-lock interlock was already vacuous in IDE mode.** The plan's "dead end flagged
+  and resolved" note treats "the tree never locks in IDE mode" as an S4 deliverable; the IDE
+  tree never had an `add_enabled_ui` gate to begin with (see `render_ide_module_tree`'s doc
+  comment). Only the *Config-mode* trees lock, and they are unreachable with a draft open.
+- **The Config-mode editor path was already dead** before S4a started:
+  `render_module_editor(.., header_inline = true)`, `editor_return` and `editor_exit_target`
+  are unreachable because both Config-mode entry points (Ctrl+E and the detail-header Edit
+  button) were removed earlier. `NavSel::ModuleEditor` is reachable **only** under
+  `Mode::Ide`.
+
+**Deliberately deferred to S4b (a separate, behaviour-free commit):**
+`NavSel::ModuleEditor` itself, `editor_return` / `editor_exit_target` and the interlock
+symbols stay — dead, but their removal is a mechanical deletion that should not share a
+commit with a state-model rewrite. S4a added `GuiApp::focused_module()` as the single reader
+of `nav_sel`'s editor variant, so S4b has one place to change rather than a dozen. The
+header-button rearrangement is likewise still pending.
+
+**Also landed here (pre-existing bugs, fixed in passing):** `perform_rename` was not gated
+on `save_enabled()` despite writing `snapshot()` to disk, and never remapped
+`preview_config`. `config::remap_one_scope` is now `pub` for the latter — note the plan
+calls this symbol `remap_module_config` in one place, which is a *different* function.
+
 ### 2026-07-19 — diagnostics band opened (partial, ahead of the full panel)
 
 `ide_editor_band` is no longer empty. The env-overwrite lint moved into it from

@@ -776,18 +776,18 @@ an index that only exists because the Config-mode `ext_list` column exists (see
 keybinding may be revisited once IDE Mode has its own notion of a selected module.
 
 - **Entering / leaving** — `GuiApp::open_module_editor(id)` remembers the prior `nav_sel`
-  in `editor_return` (unless already in an editor) so Close can restore it.
-  If the selection moves off the editor by *any* route while a draft is still open
-  (a left-nav click, the IDE tree, …), an early guard in `GuiApp::ui` (after keybind
-  handling, before anything reads the draft) drops `module_draft` as an implicit
-  Close/discard, so a dirty draft can never keep the config-autosave interlock engaged and
-  strand later config writes — the frame-end `flush_config_writes_if_clean` then releases
-  the interlock. `GuiApp::exit_module_editor` drops `module_draft` and restores
+  in `editor_return` (unless already in an editor) so Close can restore it. Which module
+  the editor is *focused* on is read through the single accessor
+  `GuiApp::focused_module() -> Option<&str>`; drafts themselves are keyed independently
+  (see **Multi-draft** below), so leaving the editor no longer destroys anything but the
+  focused draft. `GuiApp::exit_module_editor` removes that one entry and restores
   `editor_return` via the pure `editor_exit_target` (falls back to the ambient `Game(appid)` when the stored view
   is missing or itself an editor, so no dangling editor selection remains). The header's
-  always-present **✕ Close** button (`TopAction::Close`) exits even with nothing to save; it
-  doubles as Discard — with a *dirty* editable draft it opens the `ConfirmAction::DiscardEdits`
-  modal first and only `discard_module()`s on confirm. **Save** also exits on success so the
+  always-present close button (labelled **Discard** in IDE mode, **✕ Close** in Config mode;
+  both `TopAction::Close`) acts on the *focused* draft only — with a dirty editable draft it
+  opens the `ConfirmAction::DiscardEdits` modal first and only `discard_module()`s on
+  confirm, which in IDE mode re-seeds that draft from disk and stays on the same module.
+  **Save** also exits on success so the
   user lands back on the real module. *Why no separate Discard button:* Close already means
   "leave without saving"; two buttons for one outcome, with the warning attached to only one
   of them, was the confusing part.
@@ -999,16 +999,93 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   (`save_gate`: `dirty && valid && all Requires parse && !name_error`, and `editable`).
   It serializes `snapshot()` and writes via `config::write_atomic`, then reloads
   extensions so the draft resets clean **and calls `exit_module_editor`** so the user
-  returns to the normal view showing the saved module. **No manifest autosave.**
-  `GuiApp::discard_module` drops the draft and also exits (via `exit_module_editor`).
-- **Config-autosave interlock** — while a module draft is dirty (`config_autosave_held`),
-  the normal config write at the end of `ui()` is held (`pending_config_write`); the
-  in-memory config still updates, and the held write is flushed by
-  `flush_config_writes_if_clean` once the draft is saved, discarded, or hand-reverted.
-  *Why:* a config value could reference a field that only exists in the unsaved draft.
+  returns to the normal view showing the saved module. **No manifest autosave.** Saving
+  one module removes only its own draft entry; every other open draft survives.
+- **Config-autosave interlock** — while **any** module draft is dirty
+  (`config_autosave_held`), the normal config write at the end of `ui()` is held
+  (`pending_config_write`); the in-memory config still updates, and the held write is
+  flushed by `flush_config_writes_if_clean` once every draft is clean (saved, discarded, or
+  hand-reverted). *Why any and not just the focused one:* a config value could reference a
+  field that only exists in some unsaved draft, focused or not.
 
-The **live preview** (below) splices the in-memory draft over the module's on-disk entry
-before resolving, so the launch command reflects unsaved edits.
+### Multi-draft — `GuiApp::drafts` (S4a, 2026-07-19)
+
+Unsaved manifest edits survive switching modules. `GuiApp::drafts` is an
+`IndexMap<PathBuf, ModuleDraft>` — one entry per module the user has opened — replacing
+the single `Option<ModuleDraft>` slot that every module switch used to overwrite.
+
+- **Keyed by manifest path, not `Extension::id()`.** *Why:* `GuiApp::perform_rename`
+  rewrites the manifest **in place** (the file is never renamed; `id()` is derived from the
+  JSON meta), so the path is stable across a rename while the id is not. Keying on the path
+  makes re-keying a non-event and removes the whole class of "a missed re-key silently
+  orphans a draft" bugs the plan flagged as this stage's main risk. The id rides along as a
+  plain `ModuleDraft::id` field.
+- **Accessors.** `focused_module()` reads `nav_sel`; `draft_key(id)` maps an id to its
+  manifest path (via `module_editability`, falling back to a scan of `drafts` so orphans
+  stay reachable); `draft()` / `draft_mut()` resolve the focused entry.
+- **`ensure_draft` is insert-if-absent and never clears another entry.** It also no longer
+  drops a draft whose spec has left `all_specs` — with a map that would be a *silent* loss
+  of unsaved work.
+- **Orphaned drafts are retained and surfaced.** A draft whose module was deleted outside
+  the app, or whose manifest stopped validating across a Ctrl+R, is kept (losing unsaved
+  work is the worse failure) and listed by `GuiApp::orphan_draft_names` in a warning banner
+  above the IDE module tree (`render_orphan_draft_banner`). *Why a banner:* the tree renders
+  `all_specs`, which by definition can no longer give the orphan a row. Saving it recreates
+  the manifest at its remembered path.
+- **Per-frame dirty set.** `ModuleDraft::dirty()` clones the draft, rebuilds an `IndexMap`
+  and serializes it, so it is far too expensive to ask per query — it already ran ~4–6× per
+  frame with one draft, and per-row dirty markers would make that N× per frame.
+  `GuiApp::refresh_dirty_drafts` computes `GuiApp::dirty_drafts: HashSet<PathBuf>` **once**
+  at the top of `ui()` (and again at the frame tail, so the interlock sees edits the frame
+  just made); the tree, the exit gate, the preview splice and `dirty_module_names` all read
+  the cached set.
+- **Dirty markers in the tree.** `theme::ICON_DIRTY` (a filled dot, `theme::ACCENT`) is
+  prepended into the existing `icon_lists` glyph column in `render_ext_tree`, which already
+  lays coloured glyphs into the row's `LayoutJob` with correct gaps. *Never appended to the
+  label string* — the label is the module's name, and a baked-in glyph would flow as
+  ordinary text with no independent colour. `render_ext_tree` takes a `dirty_flags: &[bool]`
+  index-aligned with `specs`; Config mode passes `&[]` (its tree renders `cur_specs`, which
+  has no manifest alignment, and locks while any draft exists).
+- **Cross-draft identity collisions.** `name_collides` compares against **disk** only, so
+  two dirty drafts could both stage `(Author, Name)` and neither would see the other — the
+  second Save would silently clobber the first module's config namespace.
+  `GuiApp::draft_identity_collides(author, name, exclude)` scans the other drafts' *pending*
+  identities (excluded by manifest path) and is OR-ed into all three gates:
+  `refresh_draft_name_error`, `refresh_identity_state`, and the Fork/Create dialog (which
+  passes no exclusion, since a new module excludes nothing).
+- **Lifecycle.** `perform_fork` sources the **focused draft's** `snapshot()` when one is
+  open, falling back to disk — pre-S4a it always read disk, so forking a module you had just
+  edited silently produced a fork of the *saved* version. The original draft keeps its edits
+  (multi-draft makes carrying them into the fork *and* keeping them free).
+  `perform_create` no longer clears drafts. `delete_module` removes only that manifest's
+  entry. `perform_rename` re-seeds its entry from disk after `reload_extensions`, since the
+  draft's `id`, `baseline`, `baseline_vars` and staged `identity` all describe the
+  pre-rename manifest.
+- **Exit confirmation.** `nav_category_drops_draft(cat, any_dirty)` now returns `false` for
+  the **IDE** tab unconditionally (switching modules inside IDE mode costs nothing, so a
+  prompt on the mode's primary gesture would be pure noise) and `any_dirty` for the two
+  config destinations, which clear the whole map on confirm
+  (`apply_discard_edits(Some(cat))`). The dialog wording, already plural, is unchanged.
+
+**Two pre-existing bugs fixed alongside** (2026-07-19):
+
+- `perform_rename` was gated on `editable && has_pending_identity && identity_error.is_none()`
+  but **not** on `save_enabled()`, while writing `snapshot()` — the whole in-memory body — to
+  disk. Rename therefore committed unsaved body edits behind the user's back, including ones
+  that fail `extension::validate` and so could never have gone out via Save. It is now also
+  gated on `!dirty() || save_enabled()` (renaming a clean draft stays allowed).
+- `perform_rename` never remapped `GuiApp::preview_config`, the IDE preview's in-memory
+  scratch layer. `config::remap_all_scopes` walks *files*, so it could not reach it, and the
+  scratch values silently orphaned under the old identity. `config::remap_one_scope` is now
+  `pub` and is called on `preview_config` immediately after the disk sweep, so the in-memory
+  and on-disk layers can never describe different identities.
+
+The **live preview** (below) splices every *dirty* draft over its on-disk entry in
+`ide_specs` before resolving, so the launch command reflects unsaved edits to any open
+module. Only the **focused** draft may be *appended* when it is absent from that list
+entirely: appending a non-focused draft would inject a module that could never run for the
+game, and `push` puts it at the **end** of the fold order, silently changing
+`lossy_env_overwrites` attribution and wrapper `Priority` ordering.
 
 ## Launch-command preview footer
 
@@ -1230,10 +1307,11 @@ already holds `&mut self`.
   in hand — inert while the only consumers used `cur_specs`, but it silently blanks badges
   and whole preview bodies for any module outside it. `render_ext_tree` now resolves
   against its own `specs` parameter for the same reason.
-- **No "Previewing against: {game}" line** inside the band, unlike the Config-mode footer:
-  the nav footer's selector both shows *and* chooses the binding, so a second,
-  non-interactive statement of the same fact three columns away would only be a thing that
-  can go stale.
+- **No "Previewing against: {game}" line** inside the band: the nav footer's selector both
+  shows *and* chooses the binding, so a second, non-interactive statement of the same fact
+  three columns away would only be a thing that can go stale. The Config-mode footer's copy
+  of that line was deleted in S4a (2026-07-19) — it named the *ambient* game while the
+  preview resolves against the scratch layer, so it contradicted a settled decision.
 
 ### Widget ids
 

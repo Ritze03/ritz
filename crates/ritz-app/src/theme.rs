@@ -96,6 +96,14 @@ pub const CHECK_OUTLINE: Color32 = Color32::from_rgb(0xE1, 0xE3, 0xE6);
 pub const ICON_INHERIT: &str = "\u{f432}";
 /// Edit pencil (value set at the current scope).
 pub const ICON_EDIT: &str = "\u{f044}";
+/// Unsaved-manifest-edits dot, shown ahead of a module's name in the IDE tree.
+///
+/// *Why a filled circle and not the pencil above:* the pencil already means
+/// "there is a stored value at this scope" in the Config-mode tree, and reusing
+/// it for "this manifest has unsaved edits" would give one glyph two unrelated
+/// meanings in two trees. The dot is the conventional editor mark for a modified
+/// buffer and is unused elsewhere in this app.
+pub const ICON_DIRTY: &str = "\u{25cf}";
 
 /// The scope color a resolved value should display in.
 pub fn scope_color(p: Provenance) -> Color32 {

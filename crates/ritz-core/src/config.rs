@@ -511,7 +511,12 @@ pub fn remap_module_config(
 /// be silent data loss, since they never reached the destination); intentional
 /// `drop`s are removed; for an in-place rename (`from == to`) the kept-name vars
 /// stay put and only the renamed old names are removed.
-fn remap_one_scope(
+///
+/// `pub` since 2026-07-19: the GUI's IDE preview keeps a scratch `GameConfig`
+/// that lives only in memory, so [`remap_all_scopes`] (which walks *files*) can
+/// never reach it. `perform_rename` calls this directly on that in-memory map to
+/// keep it in step with the disk sweep.
+pub fn remap_one_scope(
     authors: &mut AuthorsMap,
     from: (&str, &str),
     to: (&str, &str),

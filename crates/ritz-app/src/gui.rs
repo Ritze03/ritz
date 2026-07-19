@@ -25,7 +25,7 @@ use serde_json::{json, Value};
 use crate::context::{self, chain_would_have_cycle, collect_parent_chain, collect_parent_presets, merge_modules, AppContext};
 use crate::icon_center::IconCenterCache;
 
-use crate::theme::{self, COL_GAME, COL_GLOBAL, COL_PROFILE, ICON_EDIT, ICON_INHERIT};
+use crate::theme::{self, COL_GAME, COL_GLOBAL, COL_PROFILE, ICON_DIRTY, ICON_EDIT, ICON_INHERIT};
 
 /// Width of the left navigator column, in points.
 ///
@@ -419,10 +419,40 @@ pub struct GuiApp {
     confirm: Option<ConfirmAction>,
     /// App logo texture (loaded once the egui context exists).
     logo: Option<egui::TextureHandle>,
-    /// In-memory draft for the module currently open in the editor, if any. Held
-    /// independent of `nav_sel` so a dirty draft keeps the config-autosave
-    /// interlock engaged even after the user navigates elsewhere.
-    module_draft: Option<ModuleDraft>,
+    /// Every in-memory module draft, keyed by **manifest path**.
+    ///
+    /// *Why a map and not a single `Option<ModuleDraft>` (S4a, 2026-07-19):* the
+    /// user's requirement is to edit several modules and browse others without
+    /// losing unsaved work. One slot means every module switch silently destroyed
+    /// the draft (the old frame-start drop guard did it without a word).
+    ///
+    /// *Why keyed by manifest `PathBuf` and not by `Extension::id()`:*
+    /// [`GuiApp::perform_rename`] rewrites the manifest **in place** — the file is
+    /// never renamed, and `id()` is derived from the JSON meta — so the path is
+    /// stable across a rename while the id is not. Keying on the path makes
+    /// re-keying a non-event; the id is carried as a plain field on the draft for
+    /// display and lookup.
+    ///
+    /// A draft whose module has vanished from `all_specs` (deleted outside the
+    /// app, or a manifest that stopped validating across a Ctrl+R) is **kept**,
+    /// never dropped — losing unsaved work is the worse failure. Such orphans are
+    /// surfaced by [`GuiApp::orphan_draft_names`].
+    drafts: IndexMap<PathBuf, ModuleDraft>,
+    /// Manifest paths of the drafts that are dirty **this frame**, recomputed once
+    /// per frame by [`GuiApp::refresh_dirty_drafts`].
+    ///
+    /// *Why cached and not asked per call:* [`ModuleDraft::dirty`] clones the
+    /// whole draft, rebuilds an `IndexMap` and serializes it. It was already
+    /// running ~4–6× per frame for a single draft; per-row dirty markers in the
+    /// module tree would make that N× per frame with N drafts open. Computing the
+    /// set once at the top of the frame and reading it everywhere else is cheaper
+    /// than today even for one draft.
+    ///
+    /// **Frame-scoped.** Written in exactly one place (the top of [`GuiApp::ui`],
+    /// right after `ensure_draft`) and read by everything downstream in the same
+    /// frame. Anything that mutates a draft outside the render path must call
+    /// `refresh_dirty_drafts` itself.
+    dirty_drafts: std::collections::HashSet<PathBuf>,
     /// True when an in-memory config edit was withheld from disk because a module
     /// editor draft was dirty; flushed once the draft becomes clean.
     pending_config_write: bool,
@@ -638,31 +668,26 @@ fn editor_exit_target(return_to: Option<NavSel>, appid: &str) -> NavSel {
 }
 
 /// Pure predicate (factored out for testing): would applying this category-tab
-/// click take the open module draft away from the user?
+/// click take unsaved module edits away from the user?
 ///
-/// Only meaningful while a draft exists — and a draft can only exist while
-/// `nav_sel` is `ModuleEditor(_)` (the frame-start guard in [`GuiApp::ui`]
-/// enforces that). `ide_target` is the id the IDE tree's current selection would
-/// reopen (`all_specs[ide_selected]`), or `None` when there is no module to open.
+/// `any_dirty` is `!dirty_drafts.is_empty()` — whether *any* open draft differs
+/// from disk.
 ///
-/// *Why the IDE arm is not simply `false`:* clicking IDE Mode re-opens the
-/// *tree's* selection, which need not be the module currently under edit — from a
-/// Config-mode editor it usually isn't, and `ensure_draft` would then silently
-/// swap the draft out. Clicking IDE Mode while that same module is already open
-/// is a genuine no-op, though, and must not prompt.
-fn nav_category_drops_draft(
-    cat: NavCategory,
-    nav_sel: &NavSel,
-    ide_target: Option<&str>,
-) -> bool {
+/// *Why the IDE arm is now unconditionally `false` (S4a):* it used to compare the
+/// tree's selection against the module under edit, because switching modules
+/// replaced the single draft slot and so destroyed the edits. With a keyed map,
+/// switching modules destroys nothing — the previous draft simply stops being
+/// focused and keeps its edits. There is nothing left to warn about, and a prompt
+/// on every module switch would be pure noise on the mode's primary gesture.
+///
+/// The two config destinations still prompt, because `apply_discard_edits` clears
+/// the whole map on confirm — that is a real, user-approved loss.
+fn nav_category_drops_draft(cat: NavCategory, any_dirty: bool) -> bool {
     match cat {
-        // Both land on a config scope, so whatever editor is open is left behind.
-        NavCategory::GamesProfiles | NavCategory::GeneralSettings => true,
-        NavCategory::Ide => match nav_sel {
-            NavSel::ModuleEditor(open) => ide_target != Some(open.as_str()),
-            // No editor open ⇒ no draft to drop (unreachable while `dirty`).
-            _ => false,
-        },
+        // Both land on a config scope and drop every draft.
+        NavCategory::GamesProfiles | NavCategory::GeneralSettings => any_dirty,
+        // Staying inside IDE mode never costs a draft any more.
+        NavCategory::Ide => false,
     }
 }
 
@@ -902,7 +927,8 @@ impl GuiApp {
             focus_nav_name: false,
             confirm: None,
             logo: None,
-            module_draft: None,
+            drafts: IndexMap::new(),
+            dirty_drafts: std::collections::HashSet::new(),
             pending_config_write: false,
             module_dialog: None,
             delete_module_purge: false,
@@ -1337,6 +1363,83 @@ impl GuiApp {
         Some((self.all_manifests[idx].clone(), !bundled))
     }
 
+    /// The module the editor currently has **focus** on, or `None` when the
+    /// selection isn't an editor view.
+    ///
+    /// *Why an accessor and not a dozen inline `if let NavSel::ModuleEditor(id)`
+    /// matches (S4a):* "which module is focused" is now distinct from "which
+    /// modules have drafts" — the second is the whole `drafts` map. One reader
+    /// means the eventual removal of `NavSel::ModuleEditor` (S4b) has one place
+    /// to change rather than a dozen, and no site can quietly re-derive focus a
+    /// different way in the meantime.
+    fn focused_module(&self) -> Option<&str> {
+        match &self.nav_sel {
+            NavSel::ModuleEditor(id) => Some(id.as_str()),
+            _ => None,
+        }
+    }
+
+    /// The `drafts` key for module `id`: its manifest path.
+    ///
+    /// Normally that comes straight from [`Self::module_editability`]. The
+    /// fallback scan exists for **orphans** — a draft whose module is no longer in
+    /// `all_specs` has no `module_editability` answer, but its draft still knows
+    /// the path it was loaded from, and that draft must stay reachable or the
+    /// editor would render "no longer available" over work the user can still see
+    /// listed as unsaved.
+    fn draft_key(&self, id: &str) -> Option<PathBuf> {
+        if let Some((manifest, _)) = self.module_editability(id) {
+            return Some(manifest);
+        }
+        self.drafts
+            .iter()
+            .find(|(_, d)| d.id == id)
+            .map(|(k, _)| k.clone())
+    }
+
+    /// The `drafts` key of the focused module, if any.
+    fn focused_key(&self) -> Option<PathBuf> {
+        let id = self.focused_module()?;
+        self.draft_key(id)
+    }
+
+    /// The focused module's draft, if one is loaded.
+    fn draft(&self) -> Option<&ModuleDraft> {
+        let key = self.focused_key()?;
+        self.drafts.get(&key)
+    }
+
+    /// Mutable twin of [`Self::draft`].
+    fn draft_mut(&mut self) -> Option<&mut ModuleDraft> {
+        let key = self.focused_key()?;
+        self.drafts.get_mut(&key)
+    }
+
+    /// Recompute [`Self::dirty_drafts`] for this frame. See that field's doc for
+    /// why the set is cached rather than recomputed per query.
+    fn refresh_dirty_drafts(&mut self) {
+        self.dirty_drafts = self
+            .drafts
+            .iter()
+            .filter(|(_, d)| d.dirty())
+            .map(|(k, _)| k.clone())
+            .collect();
+    }
+
+    /// `Author::Name` of every draft whose module is no longer loadable from disk.
+    ///
+    /// These are retained (see the `drafts` field doc) but would otherwise be
+    /// invisible: the module tree renders `all_specs`, which by definition no
+    /// longer contains them. Surfaced as a banner above the IDE tree so the user
+    /// can find the work and Save it back out.
+    fn orphan_draft_names(&self) -> Vec<String> {
+        self.drafts
+            .values()
+            .filter(|d| !self.all_specs.iter().any(|s| s.id() == d.id))
+            .map(|d| format!("{}::{}", d.ext.meta.author, d.ext.meta.name))
+            .collect()
+    }
+
     /// Open the module editor for `id`, remembering the current view so Close can
     /// restore it. No-op if already editing that module.
     fn open_module_editor(&mut self, id: String) {
@@ -1353,24 +1456,40 @@ impl GuiApp {
     /// in-memory draft. Releasing the interlock flushes any held config writes.
     fn exit_module_editor(&mut self) {
         let target = editor_exit_target(self.editor_return.take(), &self.appid);
-        self.module_draft = None;
+        // Only the focused draft leaves with the editor. The other entries belong
+        // to modules the user is still working on and are not this action's to
+        // destroy (S4a) — the whole-map clear lives in `apply_discard_edits`,
+        // behind the confirmation.
+        if let Some(key) = self.focused_key() {
+            self.drafts.shift_remove(&key);
+        }
         self.nav_sel = target;
+        self.refresh_dirty_drafts();
         self.flush_config_writes_if_clean();
     }
 
-    /// Load a fresh draft for `id` unless one is already open for it (keeping any
-    /// in-progress edits). Opening a *different* module replaces the draft.
+    /// Load a draft for `id` unless one already exists for it (keeping any
+    /// in-progress edits).
+    ///
+    /// **Insert-if-absent, never clear.** Pre-S4a this replaced the single draft
+    /// slot on every module switch — which is exactly the data loss S4a exists to
+    /// remove. It also dropped the draft outright when the module vanished from
+    /// `all_specs`; with a map that would be a *silent* loss of unsaved work, so
+    /// an absent spec now leaves the existing (orphaned) draft alone and simply
+    /// declines to build a new one. See [`Self::orphan_draft_names`].
     fn ensure_draft(&mut self, id: &str) {
-        if self.module_draft.as_ref().map(|d| d.id.as_str()) == Some(id) {
+        if self.draft_key(id).is_some_and(|k| self.drafts.contains_key(&k)) {
             return;
         }
-        let Some(spec) = self.all_specs.iter().find(|s| s.id() == id).cloned() else {
-            self.module_draft = None;
+        // `module_editability` and the spec lookup share one `all_specs` position
+        // search, so either both succeed or the module is gone. Bail without
+        // touching the map in the latter case.
+        let Some((manifest, editable)) = self.module_editability(id) else {
             return;
         };
-        let (manifest, editable) = self
-            .module_editability(id)
-            .unwrap_or_else(|| (PathBuf::new(), false));
+        let Some(spec) = self.all_specs.iter().find(|s| s.id() == id).cloned() else {
+            return;
+        };
         let baseline = serde_json::to_value(&spec).unwrap_or(Value::Null);
         let baseline_vars: std::collections::HashSet<String> = spec
             .ui
@@ -1393,7 +1512,7 @@ impl GuiApp {
                 .map(|v: &String| (v.clone(), v.clone()))
                 .collect(),
         };
-        self.module_draft = Some(ModuleDraft {
+        self.drafts.insert(manifest.clone(), ModuleDraft {
             id: id.to_string(),
             manifest,
             editable,
@@ -1411,7 +1530,7 @@ impl GuiApp {
     /// reload extensions so `cur_specs`/dirty reset (draft == disk). Refuses to
     /// write unless the Save gate is satisfied.
     fn save_module(&mut self) {
-        let Some(draft) = self.module_draft.as_ref() else {
+        let Some(draft) = self.draft() else {
             return;
         };
         if !draft.save_enabled() {
@@ -1429,17 +1548,39 @@ impl GuiApp {
             eprintln!("ritz: failed to save module: {e:#}");
             return;
         }
-        // Drop the draft and reload from disk, then leave the editor so the user
-        // sees the saved ("real") module in the normal view.
-        self.module_draft = None;
+        // Drop **this** draft and reload from disk, then leave the editor so the
+        // user sees the saved ("real") module in the normal view. Other drafts are
+        // untouched — saving one module says nothing about the others.
+        self.drafts.shift_remove(&manifest);
         self.reload_extensions();
         self.exit_module_editor();
     }
 
-    /// Discard the in-memory draft (Revert) and leave the editor. `exit_module_editor`
-    /// clears the draft and releasing the interlock flushes any held config writes.
+    /// Discard the **focused** draft only.
+    ///
+    /// *Why only the focused one (S4a decision):* Discard is a per-module button
+    /// sitting in a per-module header. Wiping every open draft from there would be
+    /// a destructive action nobody asked for. The whole-map clear is reserved for
+    /// the confirmed exit path (`apply_discard_edits(Some(cat))`).
+    ///
+    /// In IDE mode this **re-seeds from disk and stays put**: the `Mode::Ide`
+    /// invariant reopens the same module next frame anyway, so leaving the editor
+    /// would be theatre. In Config mode it keeps its old meaning (leave for the
+    /// remembered view) — that path is currently unreachable, but Config-mode
+    /// behaviour is not this stage's to change.
     fn discard_module(&mut self) {
-        self.exit_module_editor();
+        if self.mode != Mode::Ide {
+            self.exit_module_editor();
+            return;
+        }
+        if let Some(key) = self.focused_key() {
+            self.drafts.shift_remove(&key);
+        }
+        if let Some(id) = self.focused_module().map(str::to_string) {
+            self.ensure_draft(&id);
+        }
+        self.refresh_dirty_drafts();
+        self.flush_config_writes_if_clean();
     }
 
     /// Carry out a confirmed [`ConfirmAction::DiscardEdits`].
@@ -1454,16 +1595,14 @@ impl GuiApp {
         match pending_nav {
             // Close acting as Discard: leave for the remembered view.
             None => self.discard_module(),
-            // A category tab was clicked. Drop the draft *explicitly* before
-            // completing the switch — `select_nav_category` may land somewhere the
-            // frame-start draft-drop guard in `ui()` never fires for
-            // (`NavCategory::Ide` keeps `nav_sel` on `ModuleEditor(_)`, just a
-            // different module), so relying on that guard would leave the discard
-            // to `ensure_draft`'s replacement instead of doing it here, where the
-            // user approved it. Flushing releases the config-autosave interlock the
-            // dirty draft was holding.
+            // A category tab was clicked and the user approved the discard. Drop
+            // **every** draft: the prompt named them all ("These modules have
+            // unsaved changes: …"), so keeping any back would contradict what the
+            // user just agreed to. Flushing releases the config-autosave interlock
+            // the dirty drafts were holding.
             Some(cat) => {
-                self.module_draft = None;
+                self.drafts.clear();
+                self.refresh_dirty_drafts();
                 self.flush_config_writes_if_clean();
                 self.select_nav_category(cat);
             }
@@ -1472,56 +1611,95 @@ impl GuiApp {
 
     /// `Author::Name` of every module that currently has unsaved edits.
     ///
-    /// *Why a `Vec` when S3b only ever holds one draft:* the discard prompt names
-    /// the modules at risk, and the wording the user asked for is already plural
-    /// ("These modules have unsaved changes: …"). Returning a list means
-    /// multi-draft (S4) only has to make this function look at more drafts —
-    /// neither the dialog text nor its callers need rewording then.
+    /// *Why a `Vec`:* the discard prompt names the modules at risk, and the
+    /// wording the user asked for is already plural ("These modules have unsaved
+    /// changes: …"). S4a made it list several drafts; neither the dialog text nor
+    /// its callers needed rewording.
+    ///
+    /// Reads the frame's cached [`Self::dirty_drafts`] rather than calling
+    /// `dirty()` again — see that field's doc. Callers outside the render loop
+    /// (tests included) must `refresh_dirty_drafts` first.
     ///
     /// Names come from `ext.meta` (the on-disk identity), not from the staged
     /// `identity` buffers: a half-typed rename is not what the user recognises
     /// the module by.
     fn dirty_module_names(&self) -> Vec<String> {
-        self.module_draft
+        self.drafts
             .iter()
-            .filter(|d| d.dirty())
-            .map(|d| format!("{}::{}", d.ext.meta.author, d.ext.meta.name))
+            .filter(|(k, _)| self.dirty_drafts.contains(*k))
+            .map(|(_, d)| format!("{}::{}", d.ext.meta.author, d.ext.meta.name))
             .collect()
     }
 
-    /// Recompute the open draft's live name-collision flag (Version-blind, excluding
-    /// itself by manifest path). For an existing editable module Author/Name are
-    /// locked, so this stays `None`; the field is wired now for stage 2b's rename.
+    /// True when some **other open draft** has staged the identity `(author,
+    /// name)`, excluding the draft at `exclude` (matched by manifest path).
+    ///
+    /// *Why this is needed on top of [`name_collides`] (S4a):* `name_collides`
+    /// compares against **disk** only. With one draft that was complete — nothing
+    /// else could be staging an identity. With several, two dirty drafts can both
+    /// stage `(Ritze, Alpha)` and neither sees the other, so both Save gates open
+    /// and the second Save silently clobbers the first module's namespace. The
+    /// failure is invisible until the user notices a module missing.
+    ///
+    /// The *pending* identity is what's compared, because that is what Rename
+    /// would write. For a draft with no pending change the pending identity equals
+    /// the on-disk one, so including it here is a harmless superset of what
+    /// `name_collides` already reports.
+    fn draft_identity_collides(
+        &self,
+        author: &str,
+        name: &str,
+        exclude: Option<&Path>,
+    ) -> bool {
+        let (author, name) = (author.trim(), name.trim());
+        self.drafts.iter().any(|(path, d)| {
+            exclude != Some(path.as_path())
+                && d.identity.author.trim() == author
+                && d.identity.name.trim() == name
+        })
+    }
+
+    /// Recompute the focused draft's live name-collision flag (Version-blind,
+    /// excluding itself by manifest path), against **disk and every other open
+    /// draft's staged identity** — see [`Self::draft_identity_collides`].
     fn refresh_draft_name_error(&mut self) {
-        let flag = self.module_draft.as_ref().map(|d| {
+        let flag = self.draft().map(|d| {
             name_collides(
                 &self.all_specs,
                 &self.all_manifests,
                 &d.ext.meta.author,
                 &d.ext.meta.name,
                 Some(d.manifest.as_path()),
+            ) || self.draft_identity_collides(
+                &d.ext.meta.author,
+                &d.ext.meta.name,
+                Some(d.manifest.as_path()),
             )
         });
-        if let (Some(collides), Some(draft)) = (flag, self.module_draft.as_mut()) {
+        if let (Some(collides), Some(draft)) = (flag, self.draft_mut()) {
             draft.name_error = collides.then(|| "Author + Name already in use".to_string());
         }
     }
 
-    /// Recompute the open draft's pending-identity validity. The (Author, Name)
+    /// Recompute the focused draft's pending-identity validity. The (Author, Name)
     /// collision check is Version-blind and excludes the module itself by manifest
-    /// path — same rule as [`refresh_draft_name_error`], but run against the
+    /// path — same rule as [`Self::refresh_draft_name_error`], but run against the
     /// *pending* (edited) Author/Name rather than the on-disk pair.
     fn refresh_identity_state(&mut self) {
-        let collides = self.module_draft.as_ref().map(|d| {
+        let collides = self.draft().map(|d| {
             name_collides(
                 &self.all_specs,
                 &self.all_manifests,
                 d.identity.author.trim(),
                 d.identity.name.trim(),
                 Some(d.manifest.as_path()),
+            ) || self.draft_identity_collides(
+                &d.identity.author,
+                &d.identity.name,
+                Some(d.manifest.as_path()),
             )
         });
-        if let (Some(collides), Some(draft)) = (collides, self.module_draft.as_mut()) {
+        if let (Some(collides), Some(draft)) = (collides, self.draft_mut()) {
             draft.identity_error = draft.compute_identity_error(collides);
         }
     }
@@ -1562,7 +1740,20 @@ impl GuiApp {
     /// and open the fork in the editor.
     fn perform_fork(&mut self, parent_id: &str, author: String, name: String, copy_settings: bool) {
         self.carryover_report = None;
-        let Some(parent) = self.all_specs.iter().find(|s| s.id() == parent_id).cloned() else {
+        // Source the **draft** when one is open for the parent, falling back to
+        // disk. Pre-S4a this read `all_specs` unconditionally, so forking a module
+        // you had just edited produced a fork of the *saved* version and silently
+        // dropped every unsaved change (issue #20). Multi-draft makes the right
+        // behaviour free: the fork carries the edits AND the original draft keeps
+        // them, because nothing has to be evicted to make room.
+        let from_draft = self
+            .drafts
+            .values()
+            .find(|d| d.id == parent_id)
+            .map(|d| d.snapshot());
+        let Some(parent) = from_draft
+            .or_else(|| self.all_specs.iter().find(|s| s.id() == parent_id).cloned())
+        else {
             return;
         };
         let parent_author = parent.meta.author.clone();
@@ -1596,8 +1787,10 @@ impl GuiApp {
             }
         }
 
+        // The parent's draft (if any) is deliberately **left in place** — forking
+        // is not a decision to abandon the original's edits. Focus moves to the
+        // fork; `ensure_draft` builds its draft next frame.
         let new_id = ext.id();
-        self.module_draft = None;
         self.reload_extensions();
         self.reload_configs();
         self.nav_sel = NavSel::ModuleEditor(new_id);
@@ -1623,9 +1816,15 @@ impl GuiApp {
         // Snapshot everything we need out of the draft so the immutable borrow is
         // released before we touch `self.paths` / reload.
         let Some((mut ext, manifest, old_author, old_name, new_author, new_name, var_rename)) = self
-            .module_draft
-            .as_ref()
+            .draft()
             .filter(|d| d.editable && d.has_pending_identity() && d.identity_error.is_none())
+            // `!dirty() || save_enabled()` — pre-existing bug fixed in S4a: Rename
+            // writes `snapshot()`, i.e. the whole in-memory body, to disk. Gated
+            // only on the *identity* being valid it therefore committed unsaved
+            // body edits behind the user's back, including ones that fail
+            // `core_extension::validate` and so could never have gone out via
+            // Save. Renaming a clean draft stays allowed (nothing to gate).
+            .filter(|d| !d.dirty() || d.save_enabled())
             .map(|d| {
                 (
                     d.snapshot(),
@@ -1656,6 +1855,22 @@ impl GuiApp {
                 }
             };
 
+        // Step 2b: the IDE preview's scratch layer lives only in memory, so the
+        // disk sweep never reaches it — pre-S4a its values silently orphaned under
+        // the old identity the moment a rename landed, and the preview column
+        // started showing defaults for settings the user could still see in the
+        // form. Same remap, same `remove_source: true`; run here, immediately
+        // after the sweep, so the in-memory layer and the on-disk ones can never
+        // be left describing different identities.
+        core_config::remap_one_scope(
+            &mut self.preview_config.config.modules.authors,
+            from,
+            to,
+            &var_rename,
+            &std::collections::HashSet::new(),
+            true,
+        );
+
         // Step 3: build the new manifest (identity + reference rewrite).
         ext.meta.author = new_author;
         ext.meta.name = new_name;
@@ -1677,10 +1892,17 @@ impl GuiApp {
         // Step 5: report dropped vars, reload, keep the editor open on the new id.
         let new_id = ext.id();
         self.set_carryover_report(report);
-        self.module_draft = None;
         self.reload_extensions();
         self.reload_configs();
-        self.nav_sel = NavSel::ModuleEditor(new_id);
+        self.nav_sel = NavSel::ModuleEditor(new_id.clone());
+        // Manifest-path keying means the entry does NOT need re-keying (the file
+        // was rewritten in place, never renamed). It DOES need re-seeding: its
+        // `id`, `baseline`, `baseline_vars` and staged `identity` all describe the
+        // pre-rename manifest and are now stale — a draft left as-is would read
+        // back as permanently dirty against a baseline that no longer exists.
+        self.drafts.shift_remove(&manifest);
+        self.ensure_draft(&new_id);
+        self.refresh_dirty_drafts();
     }
 
     /// Write a minimal valid template module (meta + one empty UI section) to the
@@ -1714,8 +1936,10 @@ impl GuiApp {
             eprintln!("ritz: failed to write template module: {e:#}");
             return;
         }
+        // Existing drafts are left alone: creating a module says nothing about the
+        // ones already open. Focus moves to the new module; `ensure_draft` builds
+        // its draft next frame.
         let new_id = ext.id();
-        self.module_draft = None;
         self.reload_extensions();
         self.nav_sel = NavSel::ModuleEditor(new_id);
     }
@@ -1728,7 +1952,10 @@ impl GuiApp {
             eprintln!("ritz: failed to delete module: {e:#}");
             return;
         }
-        self.module_draft = None;
+        // Only the deleted module's draft goes: the map is keyed by manifest path,
+        // which is exactly what was just unlinked. Every other draft survives.
+        self.drafts.shift_remove(manifest);
+        self.refresh_dirty_drafts();
         self.reload_extensions();
         if purge {
             // The deleted module's vars are now undeclared, so cleanup removes
@@ -1764,7 +1991,10 @@ impl GuiApp {
         if !self.pending_config_write {
             return;
         }
-        if self.module_draft.as_ref().map_or(false, |d| d.dirty()) {
+        // ANY dirty draft holds the interlock, not just the focused one — a config
+        // write flushed while some other module still has unsaved edits would
+        // reintroduce exactly the ordering hazard the interlock exists to prevent.
+        if !self.dirty_drafts.is_empty() {
             return;
         }
         let _ = self.paths.save_global_config(&self.global_config);
@@ -1808,17 +2038,14 @@ impl GuiApp {
             self.reload_configs();
         }
 
-        // A draft may only exist while the editor view is active. If the selection
-        // moved off the editor by ANY route (a left-nav click, the IDE tree, …)
-        // while a draft is still open, treat it as an implicit Close/discard — drop
-        // the draft so a dirty draft can't keep the config-autosave interlock
-        // engaged and strand later config writes. The frame-end
-        // `flush_config_writes_if_clean` then releases the interlock.
-        if !matches!(self.nav_sel, NavSel::ModuleEditor(_)) && self.module_draft.is_some() {
-            self.module_draft = None;
-            self.editor_return = None;
-            self.flush_config_writes_if_clean();
-        }
+        // *Why there is no longer a frame-start draft-drop guard here (S4a):* it
+        // used to destroy the open draft the instant `nav_sel` moved off the
+        // editor by ANY route, without a word — which is precisely the data loss
+        // this stage removes. Drafts now outlive navigation; the only routes that
+        // destroy one are Save, the per-module Discard, Delete, and the confirmed
+        // whole-map clear behind `ConfirmAction::DiscardEdits`. The interlock the
+        // guard was protecting is handled instead by `flush_config_writes_if_clean`
+        // consulting `dirty_drafts` (every draft, not just the focused one).
 
         // IDE-mode invariant: a module is ALWAYS open. `nav_sel` is IDE mode's
         // "which module" carrier, so anything that clears it (the editor's Close
@@ -1827,7 +2054,7 @@ impl GuiApp {
         // tree's current selection instead, which makes Close read as
         // "discard and reload" — the right meaning when there is nowhere to close to.
         // Runs AFTER the draft-drop guard above so Close's discard still happens.
-        if self.mode == Mode::Ide && !matches!(self.nav_sel, NavSel::ModuleEditor(_)) {
+        if self.mode == Mode::Ide && self.focused_module().is_none() {
             if let Some(spec) = self.all_specs.get(self.ide_selected) {
                 let id = spec.id();
                 self.open_module_editor(id);
@@ -1846,17 +2073,23 @@ impl GuiApp {
             self.rebuild_cur_specs();
         }
 
-        // Keep the module-editor draft in sync with the selected module.
-        if let NavSel::ModuleEditor(id) = self.nav_sel.clone() {
+        // Make sure the focused module has a draft (insert-if-absent; never
+        // touches the other entries), then recompute this frame's dirty set —
+        // ONCE, here, for every consumer downstream. See `dirty_drafts`.
+        if let Some(id) = self.focused_module().map(str::to_string) {
             self.ensure_draft(&id);
             self.refresh_draft_name_error();
             self.refresh_identity_state();
+        }
+        self.refresh_dirty_drafts();
+        if self.focused_module().is_some() {
             // Ctrl+S: Save when the editor is open and the Save gate is satisfied
             // (same condition as the button); a no-op otherwise. Save exits the
             // editor on success.
-            let save_ok = self.module_draft.as_ref().map_or(false, |d| d.save_enabled());
+            let save_ok = self.draft().is_some_and(|d| d.save_enabled());
             if save_ok && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
                 self.save_module();
+                self.refresh_dirty_drafts();
             }
         }
 
@@ -1930,7 +2163,7 @@ impl GuiApp {
                             // module editor is open, so a stray click can't swap
                             // the module out from under an in-progress edit. Exit
                             // is via Close / Save (or Ctrl+S) only.
-                            let tree_live = self.module_draft.is_none();
+                            let tree_live = self.drafts.is_empty();
                             ui.add_enabled_ui(tree_live, |ui| {
                                 // `render_ext_tree` now takes its data source as
                                 // parameters (S3a) so S3b can reuse it against
@@ -1951,6 +2184,12 @@ impl GuiApp {
                                     &tree_is_folder_ext,
                                     &mut tree_selected,
                                     show_inheritance,
+                                    // No dirty markers in Config mode: this tree
+                                    // renders `cur_specs`, which has no
+                                    // manifest-path alignment to key the set on,
+                                    // and the column locks whenever a draft
+                                    // exists anyway. Config mode is unchanged.
+                                    &[],
                                 );
                                 self.selected_ext = tree_selected;
                             });
@@ -1988,11 +2227,32 @@ impl GuiApp {
                     .collect(),
                 None => game_specs.clone(),
             };
-            if let NavSel::ModuleEditor(id) = self.nav_sel.clone() {
+            // Splice (replace in place) every **dirty** draft that is already in
+            // this list, so the launch string reflects unsaved edits to any open
+            // module — not just the focused one.
+            //
+            // *Why splice-only for the non-focused ones (S4a):* appending a
+            // non-focused draft would inject a module that could never run for
+            // this game, and `push` puts it at the END of the fold order, which
+            // silently changes `lossy_env_overwrites` attribution and wrapper
+            // `Priority` ordering. Replacement in place preserves both.
+            for (path, d) in &self.drafts {
+                if !self.dirty_drafts.contains(path) {
+                    continue;
+                }
+                if let Some(pos) = specs.iter().position(|s| s.id() == d.id) {
+                    specs[pos] = d.snapshot();
+                }
+            }
+            // Only the FOCUSED module may be appended when it isn't in the list at
+            // all: the IDE tree browses the unfiltered `all_specs`, so without this
+            // opening a module that doesn't apply to this game would show a preview
+            // that silently ignores everything you type.
+            if let Some(id) = self.focused_module() {
                 let snap = self
-                    .module_draft
-                    .as_ref()
-                    .filter(|d| d.id == id)
+                    .drafts
+                    .values()
+                    .find(|d| d.id == id)
                     .map(|d| d.snapshot())
                     .or_else(|| self.all_specs.iter().find(|s| s.id() == id).cloned());
                 if let Some(snap) = snap {
@@ -2023,8 +2283,8 @@ impl GuiApp {
                 .unwrap_or_else(|e| format!("<error: {e}>"));
             let coll = lossy_env_overwrites(&ide_specs, &res);
             (text, coll)
-        } else if matches!(self.nav_sel, NavSel::ModuleEditor(_)) {
-                match &self.module_draft {
+        } else if self.focused_module().is_some() {
+                match self.draft() {
                     Some(draft) => {
                         let mut preview_specs = game_specs.clone();
                         if let Some(pos) =
@@ -2083,7 +2343,7 @@ impl GuiApp {
             // the module name on anything under ~1300pt wide. Spanning the full
             // width right of the nav roughly halves that floor and decouples the
             // editor column's width from the button row entirely.
-            if let NavSel::ModuleEditor(id) = self.nav_sel.clone() {
+            if let Some(id) = self.focused_module().map(str::to_string) {
                 ide_header = self.editor_header_info(&id);
                 let cache = &mut self.icon_cache;
                 let info = ide_header.as_ref();
@@ -2178,16 +2438,9 @@ impl GuiApp {
                     return;
                 }
                 ui.label(theme::header_label("Launch command preview"));
-                if matches!(self.nav_sel, NavSel::ModuleEditor(_)) {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "Previewing against: {}",
-                            self.game_config.game.name
-                        ))
-                        .color(theme::FAINT)
-                        .small(),
-                    );
-                }
+                // The "Previewing against: {game}" line that used to sit here is
+                // gone (S4a): the preview resolves against the scratch layer, so
+                // naming the ambient game contradicted a settled decision.
                 // Config mode keeps its lint here, in the launch band. *Why not
                 // moved like IDE mode's* (2026-07-19): there is no editor band in
                 // Config mode to move it *to* — `ide_editor_band` is declared only
@@ -2232,7 +2485,7 @@ impl GuiApp {
                 return;
             }
 
-            if let NavSel::ModuleEditor(id) = self.nav_sel.clone() {
+            if let Some(id) = self.focused_module().map(str::to_string) {
                 // IDE mode drew the header row in its own full-width band above
                 // and dispatches that click itself, below.
                 let header_inline = self.mode == Mode::Config;
@@ -2285,8 +2538,11 @@ impl GuiApp {
         // `render_module_editor`, one closure up), so `ensure_draft`, the draft-drop
         // guard, the IDE reopen invariant and the autosave interlock below all keep
         // their existing order.
-        if let (Some(info), NavSel::ModuleEditor(id)) = (ide_header.as_ref(), self.nav_sel.clone()) {
-            self.dispatch_top_action(ide_action, &id, info.dirty, info.editable);
+        if let (Some(info), Some(id)) =
+            (ide_header.as_ref(), self.focused_module().map(str::to_string))
+        {
+            let (dirty, editable) = (info.dirty, info.editable);
+            self.dispatch_top_action(ide_action, &id, dirty, editable);
         }
 
         if self.render_confirm_dialog(ctx) {
@@ -2299,19 +2555,24 @@ impl GuiApp {
             changed = true;
         }
 
+        // Re-derive the dirty set at the frame tail: the body that just rendered
+        // may have made a draft dirty (or hand-reverted one back to disk), and
+        // both the interlock below and `flush_config_writes_if_clean` must see
+        // that, not the state from the top of the frame.
+        self.refresh_dirty_drafts();
         if changed {
-            // Interlock: hold the config write to disk while a module editor draft
-            // is dirty (the in-memory config already reflects the edit). The held
-            // write is flushed once the draft becomes clean (Save / Discard / manual
-            // revert), so no config change is lost.
-            let editor_dirty = self.module_draft.as_ref().map_or(false, |d| d.dirty());
+            // Interlock: hold the config write to disk while ANY module editor
+            // draft is dirty (the in-memory config already reflects the edit). The
+            // held write is flushed once every draft is clean (Save / Discard /
+            // manual revert), so no config change is lost.
+            let editor_dirty = !self.dirty_drafts.is_empty();
             if config_autosave_held(editor_dirty) {
                 self.pending_config_write = true;
             } else {
                 self.persist();
             }
         }
-        // Release the interlock if the draft became clean without a Save/Discard
+        // Release the interlock if the drafts became clean without a Save/Discard
         // click (e.g. the user hand-reverted the edit back to disk).
         self.flush_config_writes_if_clean();
     }
@@ -2545,7 +2806,7 @@ impl GuiApp {
 ///
 /// *Why a snapshot struct and not a `&ModuleDraft`:* in IDE mode the header row
 /// and the editor body render inside **different panel closures**, and the body
-/// holds `&mut self.module_draft` for its whole scope. Passing owned, plain data
+/// holds a `&mut` borrow of the focused draft for its whole scope. Passing owned, plain data
 /// to the header means neither closure has to borrow the draft while the other
 /// runs, which is what lets the header move to its own full-width panel at all.
 /// Every field is cheap (a few `String`s + `bool`s); the two `Option<String>`
@@ -2852,7 +3113,7 @@ impl GuiApp {
     /// `None` means "nothing to head": either no draft, or a draft for a
     /// different module (`ensure_draft` has not caught up yet this frame).
     fn editor_header_info(&self, id: &str) -> Option<EditorHeaderInfo> {
-        let d = self.module_draft.as_ref().filter(|d| d.id == id)?;
+        let d = self.draft().filter(|d| d.id == id)?;
         let snap = d.snapshot();
         Some(EditorHeaderInfo {
             name: d.ext.meta.name.clone(),
@@ -2889,13 +3150,18 @@ impl GuiApp {
                     // remembered view `discard_module` already restores.
                     self.confirm = Some(ConfirmAction::DiscardEdits { pending_nav: None });
                 } else {
-                    self.exit_module_editor();
+                    // `discard_module`, not `exit_module_editor`: S4a makes Discard
+                    // a per-module action that re-seeds the focused draft from disk
+                    // and stays put. Exiting would bounce through the `Mode::Ide`
+                    // reopen invariant and could land on a *different* module (the
+                    // tree's selection), which is not what the button says.
+                    self.discard_module();
                 }
             }
             TopAction::Fork => self.open_fork_dialog(id),
             TopAction::Rename => self.perform_rename(),
             TopAction::Delete => {
-                if let Some(d) = &self.module_draft {
+                if let Some(d) = self.draft() {
                     let label = format!("{}::{}", d.ext.meta.author, d.ext.meta.name);
                     let manifest = d.manifest.clone();
                     self.delete_module_purge = false;
@@ -2925,7 +3191,7 @@ impl GuiApp {
         let full_width = self.general_config.full_width || self.mode == Mode::Ide;
         let mut action = TopAction::None;
 
-        // The editor body holds a `&mut` borrow of `self.module_draft` for its
+        // The editor body holds a `&mut` borrow of the focused draft for its
         // whole scope, so a second `&mut self.icon_cache` can't be taken
         // alongside it. Move the (map-only, cheap) cache out for the duration and
         // put it back afterwards; the measurements survive across frames.
@@ -2959,7 +3225,7 @@ impl GuiApp {
             // Two distinct "nothing to draw" cases, kept apart because they read
             // very differently to the user: the draft is gone for good, or
             // `ensure_draft` simply hasn't caught up with a fresh selection yet.
-            let msg = if self.module_draft.is_none() {
+            let msg = if self.draft().is_none() {
                 "This module is no longer available."
             } else {
                 "Loading\u{2026}"
@@ -2985,7 +3251,7 @@ impl GuiApp {
             // established that a draft for `id` exists, so this cannot fail — but
             // handle it rather than unwrap, since a panic here would take the app
             // down mid-frame.
-            let Some(draft) = self.module_draft.as_mut() else {
+            let Some(draft) = self.draft_mut() else {
                 self.icon_cache = cache;
                 return;
             };
@@ -3028,7 +3294,7 @@ impl GuiApp {
 /// was copy-pasted three times before this extraction.
 ///
 /// Free function, not a `&self` method: `render_module_editor` computes this
-/// while `self.module_draft` is borrowed mutably (as `draft`) for the whole
+/// while the focused draft is borrowed mutably (as `draft`) for the whole
 /// surrounding block, so a `&self` call there would conflict with that
 /// borrow. Taking `full_width` as a plain `bool` sidesteps it everywhere,
 /// not just at that one call site.
@@ -4319,12 +4585,12 @@ impl GuiApp {
     /// because it went blank.
     fn title_chip_text(&self) -> String {
         match self.mode {
-            Mode::Ide => match &self.nav_sel {
-                NavSel::ModuleEditor(id) => self
+            Mode::Ide => match self.focused_module() {
+                Some(id) => self
                     .editor_header_info(id)
                     .map(|info| info.name)
                     .unwrap_or_else(|| "IDE Mode".to_string()),
-                _ => "IDE Mode".to_string(),
+                None => "IDE Mode".to_string(),
             },
             Mode::Config if matches!(self.nav_sel, NavSel::GeneralSettings) => {
                 "Settings".to_string()
@@ -4441,7 +4707,7 @@ impl GuiApp {
         preview: &str,
         dynamic_preview: bool,
     ) {
-        let NavSel::ModuleEditor(id) = self.nav_sel.clone() else {
+        let Some(id) = self.focused_module().map(str::to_string) else {
             return;
         };
         // Resolve over the SAME spliced list the launch band assembled from, so the
@@ -6020,8 +6286,7 @@ impl GuiApp {
                                 // stays usable with a *clean* draft. Once the draft is
                                 // dirty it locks: navigating away drops the draft, and a
                                 // stray click must not silently discard unsaved edits.
-                                let nav_live =
-                                    !self.module_draft.as_ref().map_or(false, |d| d.dirty());
+                                let nav_live = self.dirty_drafts.is_empty();
                                 ui.add_enabled_ui(nav_live, |ui| {
                                     self.render_nav_tree(ui);
                                 });
@@ -6040,12 +6305,10 @@ impl GuiApp {
             // without a word). Prompt instead, carrying the destination so Confirm
             // completes the click and Cancel leaves the editor exactly as it was.
             //
-            // Gated on `dirty()`, not on "a draft exists": a clean draft is
-            // byte-identical to disk, so dropping it loses nothing and a prompt on
-            // every tab click would be pure noise.
-            let dirty = self.module_draft.as_ref().is_some_and(|d| d.dirty());
-            let ide_target = self.all_specs.get(self.ide_selected).map(|s| s.id());
-            if dirty && nav_category_drops_draft(cat, &self.nav_sel, ide_target.as_deref()) {
+            // Gated on the frame's dirty set, not on "a draft exists": a clean
+            // draft is byte-identical to disk, so dropping it loses nothing and a
+            // prompt on every tab click would be pure noise.
+            if nav_category_drops_draft(cat, !self.dirty_drafts.is_empty()) {
                 self.confirm = Some(ConfirmAction::DiscardEdits { pending_nav: Some(cat) });
             } else {
                 self.select_nav_category(cat);
@@ -6204,17 +6467,27 @@ impl GuiApp {
         // it in an *authoring* mode would be the worst outcome of this restructure:
         // you'd write broken JSON and get silence.
         self.render_ext_errors_banner(ui);
+        self.render_orphan_draft_banner(ui);
 
         // Clone out of `self` first — `render_ext_tree` takes `&mut self`, so it
         // can't also borrow `self.all_specs` / `&mut self.ide_selected`.
         let specs = self.all_specs.clone();
         let dirs = self.all_dirs.clone();
         let is_folder_ext = self.all_is_folder_ext.clone();
+        // Per-row unsaved-edit flags, index-aligned with `specs`. `all_manifests`
+        // is index-aligned with `all_specs` by construction (`reload_extensions`
+        // builds all four vectors from one `load_extensions` result), which is
+        // what makes the manifest-keyed dirty set usable here at all.
+        let dirty_flags: Vec<bool> = self
+            .all_manifests
+            .iter()
+            .map(|m| self.dirty_drafts.contains(m))
+            .collect();
         let before = self.ide_selected.min(specs.len().saturating_sub(1));
         let mut selected = before;
         // `show_inheritance = false`: IDE mode edits manifests, not config scopes,
         // so inheritance/edit badges have no scope to describe.
-        self.render_ext_tree(ui, &specs, &dirs, &is_folder_ext, &mut selected, false);
+        self.render_ext_tree(ui, &specs, &dirs, &is_folder_ext, &mut selected, false, &dirty_flags);
         self.ide_selected = selected;
         // `leaf` writes `selected` directly and never calls `open_module_editor`, so
         // the tree click has to be turned into an editor open here, after the render.
@@ -6942,6 +7215,46 @@ impl GuiApp {
         ui.add_space(6.0);
     }
 
+    /// Banner listing drafts whose module is no longer on disk (S4a).
+    ///
+    /// *Why retained-and-surfaced rather than dropped:* `ensure_draft` used to
+    /// delete a draft the moment its spec left `all_specs` — an external `rm`, or
+    /// a Ctrl+R after the manifest stopped validating. With one draft that was
+    /// merely rude; with a map it would be a *silent* loss of unsaved work, since
+    /// nothing on screen said the draft had existed. The draft therefore survives,
+    /// stays editable (Save writes it back to its remembered manifest path,
+    /// recreating the file), and is named here — the module tree renders
+    /// `all_specs`, which by definition can no longer show it a row.
+    fn render_orphan_draft_banner(&self, ui: &mut egui::Ui) {
+        let names = self.orphan_draft_names();
+        if names.is_empty() {
+            return;
+        }
+        let header = egui::RichText::new(format!(
+            "\u{26A0} {} unsaved draft(s) with no module on disk",
+            names.len()
+        ))
+        .color(theme::COL_GLOBAL)
+        .strong();
+        egui::CollapsingHeader::new(header)
+            .id_salt("orphan_drafts")
+            .default_open(true)
+            .show(ui, |ui| {
+                for n in &names {
+                    ui.label(egui::RichText::new(n).color(theme::DIM).small());
+                }
+                ui.label(
+                    egui::RichText::new(
+                        "Their manifests were deleted or stopped loading. \
+                         Open one and Save to write it back.",
+                    )
+                    .color(theme::FAINT)
+                    .small(),
+                );
+            });
+        ui.add_space(6.0);
+    }
+
     /// Render the left-panel module tree. In folder mode it mirrors the nested
     /// `extensions/` layout; in author mode it groups by extension Author. In
     /// both modes the built-in (backend) modules are collected under a single
@@ -6960,6 +7273,17 @@ impl GuiApp {
     /// `selected_ext` into locals first (the same "clone the spec" pattern already
     /// used elsewhere in this file for the same reason), passes those in, then
     /// writes `selected_ext` back after the call.
+    /// `dirty_flags` is index-aligned with `specs`: `true` marks a module with
+    /// unsaved manifest edits (S4a). Config mode passes `&[]` — its tree has no
+    /// manifest alignment to key the set on and locks while any draft exists.
+    ///
+    /// *Why `allow(too_many_arguments)`:* all eight are the tree's data source,
+    /// already index-aligned by contract with each other. Bundling them into a
+    /// struct would move the alignment invariant from "the call site builds these
+    /// together" to "somebody remembered to fill the struct consistently", which
+    /// is the weaker guarantee — and both call sites build every vector in one
+    /// place already.
+    #[allow(clippy::too_many_arguments)]
     fn render_ext_tree(
         &mut self,
         ui: &mut egui::Ui,
@@ -6968,6 +7292,7 @@ impl GuiApp {
         is_folder_ext: &[bool],
         selected: &mut usize,
         show_inheritance: bool,
+        dirty_flags: &[bool],
     ) {
         // Build per-extension icon lists: each entry is (icon_glyph, color).
         // Inheritance from a lower layer → ICON_INHERIT; edit at current scope → ICON_EDIT.
@@ -7001,7 +7326,7 @@ impl GuiApp {
         } else { Vec::new() };
 
         let display_mode = self.general_config.inheritance_display;
-        let icon_lists: Vec<Vec<(&'static str, Color32)>> = if !show_inheritance {
+        let mut icon_lists: Vec<Vec<(&'static str, Color32)>> = if !show_inheritance {
             vec![Vec::new(); specs.len()]
         } else { specs.iter().map(|spec| {
             // Variables the module still declares — a stored value for a removed
@@ -7070,6 +7395,27 @@ impl GuiApp {
             }
             icons
         }).collect() };
+
+        // Unsaved-edit marker (S4a). Prepended into the SAME `icon_lists` the
+        // inheritance badges use, so it goes through `leaf`'s `LayoutJob` path
+        // with the correct inter-glyph gaps and the name still rendered in
+        // `theme::TEXT`.
+        //
+        // *Why not appended to the label string:* a glyph baked into the label
+        // would change what the row's text IS — it would flow through
+        // `full_selectable`'s layout as ordinary text (no independent colour), and
+        // the label is what the user reads as the module's name. The glyph column
+        // already exists for exactly this kind of per-row status mark.
+        //
+        // `icon_lists` is empty in IDE mode (`show_inheritance = false` there), so
+        // in practice this is the only glyph on the row; the prepend order is
+        // still explicit so a future IDE badge can't push the dirty mark out of
+        // the leading position.
+        for (i, list) in icon_lists.iter_mut().enumerate() {
+            if dirty_flags.get(i).copied().unwrap_or(false) {
+                list.insert(0, (ICON_DIRTY, theme::ACCENT));
+            }
+        }
 
         let mut builtins: Vec<usize> = Vec::new();
         let mut others: Vec<usize> = Vec::new();
@@ -8274,7 +8620,8 @@ mod tests {
             focus_nav_name: false,
             confirm: None,
             logo: None,
-            module_draft: None,
+            drafts: IndexMap::new(),
+            dirty_drafts: std::collections::HashSet::new(),
             pending_config_write: false,
             module_dialog: None,
             delete_module_purge: false,
@@ -8463,48 +8810,241 @@ mod tests {
     // nav tree and MODULES tree, while a draft is open) or prompts.
 
     /// The gate that decides whether a tab click needs a prompt at all. The two
-    /// config destinations always leave the editor; IDE Mode only does when the
-    /// tree's selection is a *different* module than the one under edit — clicking
-    /// IDE Mode while already on that module must stay a silent no-op.
+    /// config destinations clear every draft on confirm, so they prompt whenever
+    /// anything is dirty; IDE Mode never costs a draft since S4a made module
+    /// switching non-destructive.
     #[test]
     fn nav_category_gate_prompts_only_when_the_draft_would_be_dropped() {
-        let editing = NavSel::ModuleEditor("Ritze::Sample::1.0".to_string());
-        // Both config destinations abandon the editor, whatever the tree shows.
         for cat in [NavCategory::GamesProfiles, NavCategory::GeneralSettings] {
-            assert!(nav_category_drops_draft(cat, &editing, Some("Ritze::Sample::1.0")));
-            assert!(nav_category_drops_draft(cat, &editing, None));
+            assert!(nav_category_drops_draft(cat, true));
+            // Nothing dirty ⇒ nothing to lose ⇒ no prompt.
+            assert!(!nav_category_drops_draft(cat, false));
         }
-        // IDE Mode re-opening the very module under edit changes nothing.
-        assert!(!nav_category_drops_draft(
-            NavCategory::Ide,
-            &editing,
-            Some("Ritze::Sample::1.0")
-        ));
-        // …but re-opening a different one replaces the draft.
-        assert!(nav_category_drops_draft(NavCategory::Ide, &editing, Some("Other::Mod::1.0")));
-        // No editor open ⇒ nothing to drop (unreachable in practice: a draft can
-        // only exist while `nav_sel` is `ModuleEditor(_)`).
-        assert!(!nav_category_drops_draft(
-            NavCategory::Ide,
-            &NavSel::Game("42".to_string()),
-            Some("Other::Mod::1.0")
-        ));
+        // Staying in IDE mode keeps every draft, dirty or not.
+        assert!(!nav_category_drops_draft(NavCategory::Ide, true));
+        assert!(!nav_category_drops_draft(NavCategory::Ide, false));
     }
 
-    /// The prompt names the modules at risk, in the plural form multi-draft (S4)
-    /// will grow into without rewording the dialog.
+    /// The prompt names the modules at risk, in the plural form S4a grew into
+    /// without rewording the dialog.
     #[test]
     fn discard_prompt_names_only_dirty_modules() {
         let mut app = test_app();
         // A clean draft is byte-identical to disk: nothing at risk, nothing named.
-        app.module_draft = Some(draft_from(sample_manifest(), true));
+        let clean = draft_from(sample_manifest(), true);
+        app.drafts.insert(clean.manifest.clone(), clean);
+        app.refresh_dirty_drafts();
         assert_eq!(app.dirty_module_names(), Vec::<String>::new());
         // Any edit makes it dirty and puts it in the prompt, by on-disk identity.
         let mut draft = draft_from(sample_manifest(), true);
         draft.ext.meta.version = "9.9".to_string();
         assert!(draft.dirty());
-        app.module_draft = Some(draft);
+        app.drafts.insert(draft.manifest.clone(), draft);
+        app.refresh_dirty_drafts();
         assert_eq!(app.dirty_module_names(), vec!["Ritze::Sample".to_string()]);
+    }
+
+    // ── S4a: several drafts at once (2026-07-19) ────────────────────────────
+
+    /// A manifest for `author::name`, so a test can build two distinct modules.
+    fn named_manifest(author: &str, name: &str) -> Value {
+        json!({
+            "Extension": {"Name": name, "Author": author, "Version": "1.0"},
+            "UI": {"Main": [{"Type": "toggle", "Variable": "enabled"}]}
+        })
+    }
+
+    /// Build a draft for `author::name` keyed at `path`, and register it.
+    fn insert_draft(app: &mut GuiApp, author: &str, name: &str, path: &str) -> String {
+        let mut d = draft_from(named_manifest(author, name), true);
+        d.manifest = PathBuf::from(path);
+        let id = d.id.clone();
+        app.drafts.insert(d.manifest.clone(), d);
+        id
+    }
+
+    /// **The silent one.** `name_collides` compares against *disk* only, so two
+    /// dirty drafts can both stage `(Ritze, Alpha)` and neither sees the other —
+    /// both Save gates open and the second Save clobbers the first module's
+    /// config namespace, with no symptom until a module goes missing.
+    ///
+    /// Verified to bite: making `draft_identity_collides` return `false`
+    /// unconditionally makes this assert fire.
+    #[test]
+    fn a_second_draft_staging_another_drafts_identity_collides() {
+        let mut app = test_app();
+        insert_draft(&mut app, "Ritze", "Alpha", "/x/alpha.json");
+        let beta_id = insert_draft(&mut app, "Ritze", "Beta", "/x/beta.json");
+
+        // Beta stages a rename onto Alpha's identity. Nothing on disk changed, so
+        // `name_collides` alone cannot see this.
+        app.drafts
+            .get_mut(&PathBuf::from("/x/beta.json"))
+            .unwrap()
+            .identity
+            .name = "Alpha".to_string();
+
+        app.nav_sel = NavSel::ModuleEditor(beta_id);
+        app.refresh_identity_state();
+
+        assert_eq!(
+            app.draft().unwrap().identity_error.as_deref(),
+            Some("Author + Name already in use"),
+            "a pending identity that duplicates another open draft's must be rejected"
+        );
+    }
+
+    /// The converse: a pending identity nobody else is staging is fine, and a
+    /// draft must never collide with *itself* (it is excluded by manifest path —
+    /// the key point of path-keying).
+    #[test]
+    fn a_unique_pending_identity_and_a_drafts_own_identity_do_not_collide() {
+        let mut app = test_app();
+        insert_draft(&mut app, "Ritze", "Alpha", "/x/alpha.json");
+        let beta_id = insert_draft(&mut app, "Ritze", "Beta", "/x/beta.json");
+        app.nav_sel = NavSel::ModuleEditor(beta_id);
+
+        // No pending change at all: the draft's own identity must not flag.
+        app.refresh_identity_state();
+        assert_eq!(app.draft().unwrap().identity_error, None);
+        app.refresh_draft_name_error();
+        assert_eq!(app.draft().unwrap().name_error, None);
+
+        // A genuinely free name is accepted.
+        app.drafts
+            .get_mut(&PathBuf::from("/x/beta.json"))
+            .unwrap()
+            .identity
+            .name = "Gamma".to_string();
+        app.refresh_identity_state();
+        assert_eq!(app.draft().unwrap().identity_error, None);
+    }
+
+    /// The requirement S4a exists for: edits to one module survive switching
+    /// focus to another and back. Pre-S4a `ensure_draft` replaced the single slot
+    /// on every switch, so this lost the edit outright.
+    #[test]
+    fn a_dirty_draft_survives_switching_to_another_module() {
+        let mut app = test_app();
+        let alpha_id = insert_draft(&mut app, "Ritze", "Alpha", "/x/alpha.json");
+        let beta_id = insert_draft(&mut app, "Ritze", "Beta", "/x/beta.json");
+        app.drafts
+            .get_mut(&PathBuf::from("/x/alpha.json"))
+            .unwrap()
+            .ext
+            .meta
+            .description = Some("unsaved work".to_string());
+
+        // Focus Beta. `ensure_draft` for Beta must not disturb Alpha's entry.
+        app.nav_sel = NavSel::ModuleEditor(beta_id);
+        let focused = app.focused_module().unwrap().to_owned();
+        app.ensure_draft(&focused);
+        assert_eq!(app.drafts.len(), 2, "switching focus must not evict a draft");
+
+        // Focus back: the edit is still there.
+        app.nav_sel = NavSel::ModuleEditor(alpha_id);
+        assert_eq!(
+            app.draft().unwrap().ext.meta.description.as_deref(),
+            Some("unsaved work")
+        );
+        app.refresh_dirty_drafts();
+        assert_eq!(app.dirty_module_names(), vec!["Ritze::Alpha".to_string()]);
+    }
+
+    /// A draft whose module has left `all_specs` (external delete, or a manifest
+    /// that stopped validating across a Ctrl+R) is **retained**, stays reachable
+    /// through the focused-draft accessors, and is surfaced by
+    /// `orphan_draft_names` — the tree renders `all_specs` and can no longer show
+    /// it a row. Pre-S4a `ensure_draft` deleted it on sight.
+    #[test]
+    fn an_orphaned_draft_is_retained_and_surfaced() {
+        let mut app = test_app();
+        let alpha_id = insert_draft(&mut app, "Ritze", "Alpha", "/x/alpha.json");
+        app.drafts
+            .get_mut(&PathBuf::from("/x/alpha.json"))
+            .unwrap()
+            .ext
+            .meta
+            .description = Some("unsaved work".to_string());
+        // `all_specs` is empty in `test_app`, so Alpha is an orphan by construction.
+        app.nav_sel = NavSel::ModuleEditor(alpha_id.clone());
+
+        app.ensure_draft(&alpha_id);
+        assert_eq!(app.drafts.len(), 1, "an orphaned draft must never be dropped");
+        assert_eq!(
+            app.draft().unwrap().ext.meta.description.as_deref(),
+            Some("unsaved work"),
+            "the orphan must stay reachable through the focused-draft accessor"
+        );
+        assert_eq!(app.orphan_draft_names(), vec!["Ritze::Alpha".to_string()]);
+
+        // A module that IS on disk is not an orphan.
+        app.all_specs = vec![serde_json::from_value(named_manifest("Ritze", "Alpha")).unwrap()];
+        assert_eq!(app.orphan_draft_names(), Vec::<String>::new());
+    }
+
+    /// Forking from a dirty draft carries the edits into the fork **and** leaves
+    /// the original draft's edits in place. Pre-S4a `perform_fork` sourced
+    /// `all_specs` (i.e. disk), silently forking the *saved* version.
+    ///
+    /// Exercises the sourcing decision directly rather than driving `perform_fork`
+    /// — that method writes files and reloads extensions, neither of which exists
+    /// under a `/nonexistent` `Paths`.
+    #[test]
+    fn a_fork_sources_the_open_draft_not_disk() {
+        let mut app = test_app();
+        let alpha_id = insert_draft(&mut app, "Ritze", "Alpha", "/x/alpha.json");
+        // Disk still has the un-edited module…
+        app.all_specs = vec![serde_json::from_value(named_manifest("Ritze", "Alpha")).unwrap()];
+        // …while the draft carries an unsaved edit.
+        app.drafts
+            .get_mut(&PathBuf::from("/x/alpha.json"))
+            .unwrap()
+            .ext
+            .meta
+            .description = Some("unsaved work".to_string());
+
+        // The exact expression `perform_fork` uses to pick its source.
+        let sourced = app
+            .drafts
+            .values()
+            .find(|d| d.id == alpha_id)
+            .map(|d| d.snapshot())
+            .or_else(|| app.all_specs.iter().find(|s| s.id() == alpha_id).cloned())
+            .unwrap();
+        assert_eq!(
+            sourced.meta.description.as_deref(),
+            Some("unsaved work"),
+            "the fork must carry the draft's unsaved edits, not the on-disk version"
+        );
+        // …and the original draft still has them.
+        assert_eq!(app.drafts.len(), 1);
+        app.refresh_dirty_drafts();
+        assert_eq!(app.dirty_module_names(), vec!["Ritze::Alpha".to_string()]);
+    }
+
+    /// Discard is per-module (S4a decision): it drops the focused draft and
+    /// leaves every other one alone. The whole-map clear belongs to the confirmed
+    /// tab-switch path only.
+    #[test]
+    fn discard_drops_only_the_focused_draft() {
+        let mut app = test_app();
+        app.mode = Mode::Ide;
+        insert_draft(&mut app, "Ritze", "Alpha", "/x/alpha.json");
+        let beta_id = insert_draft(&mut app, "Ritze", "Beta", "/x/beta.json");
+        for p in ["/x/alpha.json", "/x/beta.json"] {
+            app.drafts.get_mut(&PathBuf::from(p)).unwrap().ext.meta.version =
+                "9.9".to_string();
+        }
+        app.nav_sel = NavSel::ModuleEditor(beta_id);
+
+        app.apply_discard_edits(None);
+
+        assert_eq!(app.drafts.len(), 1, "only the focused draft may be discarded");
+        assert!(app.drafts.contains_key(&PathBuf::from("/x/alpha.json")));
+        // Beta is not re-seeded here: `all_specs` is empty, so there is nothing on
+        // disk to re-seed FROM — the point is that Alpha survived.
+        assert_eq!(app.dirty_module_names(), vec!["Ritze::Alpha".to_string()]);
     }
 
     /// Confirm on a tab-click prompt must do BOTH halves: drop the draft *and*
@@ -8515,14 +9055,14 @@ mod tests {
         let mut app = test_app();
         let mut draft = draft_from(sample_manifest(), true);
         draft.ext.meta.version = "9.9".to_string();
-        app.module_draft = Some(draft);
+        app.drafts.insert(draft.manifest.clone(), draft);
         app.nav_sel = NavSel::ModuleEditor("Ritze::Sample::1.0".to_string());
         // Opened from the Global Profile screen, so that is where Close would land.
         app.editor_return = Some(NavSel::GlobalSettings);
 
         app.apply_discard_edits(Some(NavCategory::GeneralSettings));
 
-        assert!(app.module_draft.is_none(), "the confirmed discard must drop the draft");
+        assert!(app.drafts.is_empty(), "the confirmed discard must drop every draft");
         assert_eq!(app.nav_sel, NavSel::GeneralSettings, "the click must still be applied");
     }
 
@@ -8533,13 +9073,13 @@ mod tests {
         let mut app = test_app();
         let mut draft = draft_from(sample_manifest(), true);
         draft.ext.meta.version = "9.9".to_string();
-        app.module_draft = Some(draft);
+        app.drafts.insert(draft.manifest.clone(), draft);
         app.nav_sel = NavSel::ModuleEditor("Ritze::Sample::1.0".to_string());
         app.editor_return = Some(NavSel::Profile("Handhelds".to_string()));
 
         app.apply_discard_edits(None);
 
-        assert!(app.module_draft.is_none());
+        assert!(app.drafts.is_empty());
         assert_eq!(app.nav_sel, NavSel::Profile("Handhelds".to_string()));
     }
 
