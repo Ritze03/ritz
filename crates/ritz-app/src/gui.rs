@@ -27,13 +27,18 @@ use crate::icon_center::IconCenterCache;
 
 use crate::theme::{self, COL_GAME, COL_GLOBAL, COL_PROFILE, ICON_DIRTY, ICON_EDIT, ICON_INHERIT};
 
-/// Width of the left navigator column, in points.
+/// Width of the app's left column, in points.
 ///
-/// Named because two places have to agree on it: the `SidePanel::left("nav")`
-/// that *is* the column, and IDE Mode's 50/50 split, which sizes itself from
-/// "everything to the right of the nav". A literal in both would let them drift.
-/// (The Config-mode `ext_list` column happens to be the same width today; that's
-/// a separate column with its own reasons, so it keeps its own literal.)
+/// Named because three places have to agree on it: the `SidePanel::left("nav")`
+/// that *is* IDE Mode's column, IDE Mode's 50/50 split (which sizes itself from
+/// "everything to the right of the nav"), and Config Mode's
+/// `SidePanel::left("ext_list")`. A literal in any of them would let them drift.
+///
+/// *Why `ext_list` shares it (issue #15):* an earlier note here called `ext_list`
+/// "a separate column with its own reasons" and left it on its own `280.0`
+/// literal. That was wrong — the two are the same affordance, the left column of
+/// their respective modes, and are meant to stay the same width, so nothing
+/// should let a tweak to one silently desync the other.
 const NAV_W: f32 = 280.0;
 
 /// Height of IDE Mode's module-header band, in points.
@@ -1087,7 +1092,7 @@ fn unique_slug_path(dir: &Path, author: &str, name: &str) -> PathBuf {
 fn all_requires_parse(ext: &Extension) -> bool {
     let ok = |r: &Option<String>| {
         r.as_deref()
-            .map_or(true, |s| condition::parse(s).is_ok())
+            .is_none_or(|s| condition::parse(s).is_ok())
     };
     ext.ui.values().flatten().all(|f| ok(&f.requires))
         && ext
@@ -3106,7 +3111,7 @@ impl GuiApp {
         // (and would eat the width the editor/preview split needs).
         if self.mode == Mode::Config && !matches!(self.nav_sel, NavSel::GeneralSettings) {
         egui::SidePanel::left("ext_list")
-            .exact_width(280.0)
+            .exact_width(NAV_W)
             .resizable(false)
             .frame(egui::Frame::none().fill(theme::PANEL))
             .show(ctx, |ui| {
@@ -4608,7 +4613,7 @@ fn icon_button(
         let w = if label.is_empty() { h } else { pad.x * 2.0 + ICON_CELL + gap + text_w };
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
         if ui.is_rect_visible(rect) {
-            let vis = ui.style().interact(&resp).clone();
+            let vis = *ui.style().interact(&resp);
             let (fill, stroke, fg) = match style {
                 IconBtn::Secondary => (vis.weak_bg_fill, vis.bg_stroke, theme::TEXT),
                 IconBtn::Danger => (
@@ -5110,6 +5115,10 @@ fn render_editor_body(
 /// `var_edits[current-name]`, so `field.variable` itself is untouched (no draft
 /// dirtiness) until the Rename action migrates config and rewrites the manifest.
 /// A newly added field's `Variable` is edited directly (no config to migrate).
+// Allowed, not refactored: the nine are four unrelated concerns (egui plumbing,
+// the field, its position, and the rename-staging pair) with no subset that
+// forms a meaningful type — bundling them would only rename the plumbing.
+#[allow(clippy::too_many_arguments)]
 fn render_field_editor(
     ui: &mut egui::Ui,
     cache: &mut IconCenterCache,
@@ -5550,7 +5559,7 @@ fn unique_string(used: &std::collections::HashSet<String>, base: &str) -> String
     }
 }
 
-fn env_block<'a>(ext: &'a mut Extension, game: bool) -> &'a mut Vec<EnvVarSpec> {
+fn env_block(ext: &mut Extension, game: bool) -> &mut Vec<EnvVarSpec> {
     if game {
         &mut ext.game_env_vars
     } else {
@@ -6954,6 +6963,11 @@ impl GuiApp {
     /// `self.text_buffers` or minting the `("text_edit", key)` `egui::Id`. Re-deriving
     /// `editable` from `read_only` here means a future caller can never reintroduce a
     /// read-only leak by passing a stale `editable: true` alongside `read_only: true`.
+    // Allowed, not refactored: `editable` and `read_only` are the obvious pair to
+    // merge, but the doc comment above explains they are deliberately kept
+    // separate so this fn can re-derive `editable` and defend against a stale
+    // `true`. Collapsing them to satisfy the lint would delete that safeguard.
+    #[allow(clippy::too_many_arguments)]
     fn render_value_editor(
         &mut self,
         ui: &mut egui::Ui,
@@ -8168,6 +8182,21 @@ impl GuiApp {
         open_create
     }
 
+    /// Drop every in-flight nav-transient state — the single definition of what
+    /// "leaving a half-finished nav interaction" means.
+    ///
+    /// *Why one method:* the three `NavAction::Select*` arms each used to repeat
+    /// these four lines, so adding a nav-transient field meant remembering to
+    /// reset it in N places. `SelectGame` looked like it differed (no
+    /// `text_buffers.clear()`) but doesn't: it calls `switch_game`, which clears
+    /// the buffers itself — so folding the clear in here is behaviour-preserving.
+    fn reset_nav_transients(&mut self) {
+        self.creating_profile = false;
+        self.duplicating_preset = None;
+        self.creating_game = false;
+        self.text_buffers.clear();
+    }
+
     fn render_nav_tree(&mut self, ui: &mut egui::Ui) {
         // Collect any nav action to apply after rendering (avoids borrow conflicts).
         enum NavAction {
@@ -8356,29 +8385,26 @@ impl GuiApp {
             None => {}
             Some(NavAction::SelectGlobal) => {
                 self.nav_sel = NavSel::GlobalSettings;
-                self.creating_profile = false;
-                self.duplicating_preset = None;
-                self.creating_game = false;
-                self.text_buffers.clear();
+                self.reset_nav_transients();
             }
             Some(NavAction::SelectProfile(name)) => {
                 self.editing_preset_buf = self.paths.load_preset(&name).ok().flatten();
                 self.nav_name_buf = name.clone();
                 self.nav_sel = NavSel::Profile(name);
-                self.creating_profile = false;
-                self.duplicating_preset = None;
-                self.creating_game = false;
-                self.text_buffers.clear();
+                self.reset_nav_transients();
             }
             Some(NavAction::SelectGame(appid, name)) => {
                 self.switch_game(&appid, &name);
                 self.nav_sel = NavSel::Game(appid);
                 self.nav_name_buf = self.game_config.game.name.clone();
                 self.editing_preset_buf = None;
-                self.creating_profile = false;
-                self.duplicating_preset = None;
-                self.creating_game = false;
+                self.reset_nav_transients();
             }
+            // The two StartCreate* arms deliberately do *not* call
+            // `reset_nav_transients`: they *enter* a nav-transient state rather
+            // than leave one, and `StartCreateProfile` in particular must keep
+            // `duplicating_preset`, which the "Duplicate profile" context-menu
+            // item sets just before raising this same creating_profile flag.
             Some(NavAction::StartCreateProfile) => {
                 self.creating_profile = true;
                 self.creating_game = false;
@@ -8946,7 +8972,7 @@ impl GuiApp {
                     .map(|vars| vars.keys().any(|k| {
                         declared.contains(k.as_str())
                             && field_by_var.get(k.as_str())
-                                .map_or(true, |f| field_visible(f, ext_res))
+                                .is_none_or(|f| field_visible(f, ext_res))
                     }))
                     .unwrap_or(false)
             };
@@ -8986,7 +9012,7 @@ impl GuiApp {
                 NavSel::Profile(_) => {
                     if has_in(global_modules) { icons.push((ICON_INHERIT, COL_GLOBAL)); }
                     push_chain_icons(&mut icons, &profile_parent_chain);
-                    if editing_modules.map(|m| has_in(m)).unwrap_or(false) { icons.push((ICON_EDIT, COL_PROFILE)); }
+                    if editing_modules.map(has_in).unwrap_or(false) { icons.push((ICON_EDIT, COL_PROFILE)); }
                 }
                 NavSel::GlobalSettings => {
                     if has_in(global_modules) { icons.push((ICON_EDIT, COL_GLOBAL)); }
@@ -9053,7 +9079,8 @@ impl GuiApp {
                     .collect();
                 root.insert(&comps, i);
             }
-            render_node(ui, &mut self.icon_cache, &root, specs, is_folder_ext, &icon_lists, selected, mono);
+            let ctx = TreeCtx { specs, is_folder_ext, icon_lists: &icon_lists, mono };
+            render_node(ui, &mut self.icon_cache, &root, &ctx, selected);
         }
 
         if !builtins.is_empty() {
@@ -9068,24 +9095,39 @@ impl GuiApp {
     }
 }
 
+/// The part of [`render_node`]'s input that never changes as it recurses.
+///
+/// *Why a struct:* these four were four separate parameters threaded unchanged
+/// through every recursive call, which is what pushed `render_node` over
+/// clippy's argument limit. Bundling the invariants (rather than silencing the
+/// lint) leaves only what actually varies per node — the node itself and the
+/// selection — in the signature, and makes the recursive call read as
+/// "same context, next node".
+struct TreeCtx<'a> {
+    specs: &'a [Extension],
+    is_folder_ext: &'a [bool],
+    icon_lists: &'a [Vec<(&'static str, Color32)>],
+    mono: bool,
+}
+
 /// Render a tree node: subfolders (sorted) first, then extensions at this level.
 /// A child folder whose single leaf has `is_folder_ext` set is collapsed into
 /// the leaf directly (no CollapsingHeader wrapper).
-fn render_node(ui: &mut egui::Ui, cache: &mut IconCenterCache, node: &TreeNode, specs: &[Extension], is_folder_ext: &[bool], icon_lists: &[Vec<(&'static str, Color32)>], selected: &mut usize, mono: bool) {
+fn render_node(ui: &mut egui::Ui, cache: &mut IconCenterCache, node: &TreeNode, ctx: &TreeCtx, selected: &mut usize) {
     let mut leaves: Vec<usize> = node.leaves.clone();
     for (name, child) in &node.children {
         // ponytail: skip the subfolder header when the folder IS the extension
-        if child.children.is_empty() && child.leaves.len() == 1 && is_folder_ext.get(child.leaves[0]).copied().unwrap_or(false) {
+        if child.children.is_empty() && child.leaves.len() == 1 && ctx.is_folder_ext.get(child.leaves[0]).copied().unwrap_or(false) {
             leaves.push(child.leaves[0]);
         } else {
             egui::CollapsingHeader::new(egui::RichText::new(name).color(theme::ACCENT).strong())
                 .default_open(true)
-                .show(ui, |ui| render_node(ui, cache, child, specs, is_folder_ext, icon_lists, selected, mono));
+                .show(ui, |ui| render_node(ui, cache, child, ctx, selected));
         }
     }
-    leaves.sort_by(|&a, &b| specs[a].meta.name.cmp(&specs[b].meta.name));
+    leaves.sort_by(|&a, &b| ctx.specs[a].meta.name.cmp(&ctx.specs[b].meta.name));
     for &i in &leaves {
-        leaf(ui, cache, i, specs, icon_lists, selected, mono);
+        leaf(ui, cache, i, ctx.specs, ctx.icon_lists, selected, ctx.mono);
     }
 }
 

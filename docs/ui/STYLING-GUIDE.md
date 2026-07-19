@@ -70,6 +70,20 @@ literal.
 red as the Global scope tint. This is intentional (not a bug to "fix" by adding a
 separate danger color): both signal "high blast radius."
 
+That reuse is now *derived*, not retyped (2026-07-19, issue #13): `danger_button`'s
+faint border comes from `theme::danger_border()`, which reads `COL_GLOBAL`'s channels
+and applies `DANGER_BORDER_ALPHA` (82, ~32%). It used to be a second hand-written
+`Color32::from_rgba_unmultiplied(0xE1, 0x55, 0x54, 82)` literal that would have
+silently diverged if the red were ever retuned. The test
+`theme::tests::danger_border_matches_col_global` pins the derived value to the old
+literal, so the refactor is provably a no-op at the pixel level.
+
+*Why not route it through `selection_tint`:* that helper premultiplies by hand
+specifically to reproduce `SEL`/`SELBD`, and its two alphas (~16% / ~42%) aren't this
+border's 32%. Sending the stroke through it would have changed the rendered color —
+egui's `from_rgba_unmultiplied` blends in linear space and lands elsewhere — so
+`danger_border` keeps the original call and only stops duplicating the channels.
+
 *Why `Provenance::Game` is special-cased at call sites:* when editing a value at the
 layer that's currently open, `resolve::Provenance` reports it as `Provenance::Game`
 even if you're actually editing a Profile or Global layer (the layer under edit is

@@ -270,7 +270,7 @@ fn paint_logo_anim(
     // Ping-ponged, eased phase.
     let sweep = t / 1.9;
     let raw = sweep.fract();
-    let tt = if (sweep as u64) % 2 == 0 { raw } else { 1.0 - raw };
+    let tt = if (sweep as u64).is_multiple_of(2) { raw } else { 1.0 - raw };
     let e = tt * tt * (3.0 - 2.0 * tt); // smoothstep ≈ ease-in-out
     let s = 1.0 - (2.0 * e - 1.0).powi(2); // 0 at ends, 1 at the mid-dip
     let lerp = |a: f32, b: f32, p: f32| a + (b - a) * p;

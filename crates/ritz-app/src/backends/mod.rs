@@ -61,8 +61,8 @@ pub trait Backend: Send {
 /// All registered backends. `hypr_monctl` is registered but inert (deferred).
 pub fn registry() -> Vec<Box<dyn Backend>> {
     vec![
-        Box::new(lsfg::LsfgBackend::default()),
-        Box::new(hypr_monctl::HyprMonctlBackend::default()),
+        Box::new(lsfg::LsfgBackend),
+        Box::new(hypr_monctl::HyprMonctlBackend),
     ]
 }
 

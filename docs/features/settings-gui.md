@@ -111,12 +111,21 @@ mode, so this didn't need a click-behavior decision.
 └─────────────────────────────────────────────────────────┘
 ```
 
-Built in `crate::gui::GuiApp::ui`: `egui::SidePanel::left("nav")` (280px, always shown),
-`egui::SidePanel::left("ext_list")` (280px, hidden while `NavSel::GeneralSettings` is
-selected — General Settings has no modules to browse), a bottom
+Built in `crate::gui::GuiApp::ui`: `egui::SidePanel::left("nav")` (`NAV_W`, always
+shown), `egui::SidePanel::left("ext_list")` (also `NAV_W`, hidden while
+`NavSel::GeneralSettings` is selected — General Settings has no modules to browse), a
+bottom
 `egui::TopBottomPanel::bottom("preview")`, and an `egui::CentralPanel` for the field
 editor. *Why hide the module list for General Settings:* that screen edits app-wide
 preferences, not extension variables, so a module tree would have nothing to select.
+
+Both left panels size themselves from the one `NAV_W` constant (280.0) rather than
+their own literals (2026-07-19, issue #15). They are the same affordance — the left
+column of their respective modes — and are meant to stay the same width; `ext_list`
+previously carried a duplicate `280.0`, which would have let a tweak to `NAV_W`
+silently desync the Config-mode column from the IDE-mode one. `NAV_W` also feeds IDE
+Mode's 50/50 split, which sizes itself from "everything right of the nav", so three
+call sites now share the single constant.
 
 ### Layout: `Mode::Ide` — module tree | manifest editor | interactive preview
 
@@ -575,6 +584,14 @@ the band swap on `Mode`.
   slot 1–10, via `crate::gui::GuiApp::assign_pin`) and **Games**. `+ Add profile` /
   `+ Add game` switch the bottom band into a create-name form
   (`GuiApp::creating_profile` / `GuiApp::creating_game`).
+  Selecting anything in the tree drops those half-finished states through the single
+  `GuiApp::reset_nav_transients` helper (2026-07-19, issue #14), which clears
+  `creating_profile`, `duplicating_preset`, `creating_game` and `text_buffers`. *Why one
+  method:* the three `NavAction::Select*` arms each repeated those four lines, so a new
+  nav-transient field had to be remembered in three places. The two `StartCreate*` arms
+  deliberately do **not** call it — they *enter* a transient state rather than leave
+  one, and `StartCreateProfile` must preserve `duplicating_preset`, which the "Duplicate
+  profile" context-menu item sets just before raising the same `creating_profile` flag.
   There is **no General Settings row in the tree** — it is reachable only from the
   category tab bar. *Why removed:* with the bar present the row was a second, competing
   control for the same destination. Selecting it left the bar reading "Profiles"

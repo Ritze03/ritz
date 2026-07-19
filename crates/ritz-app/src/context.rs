@@ -288,7 +288,7 @@ pub fn load_extensions(paths: &Paths) -> Result<(Vec<LoadedExtension>, Vec<Exten
         e.spec
             .requires_desktop
             .as_deref()
-            .map_or(true, desktop_matches)
+            .is_none_or(desktop_matches)
     });
     // Deterministic alphabetical order — `load_all` follows filesystem order,
     // which varies between reads, so the author-mode tree (which shows modules in

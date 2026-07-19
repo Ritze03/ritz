@@ -132,11 +132,31 @@ pub fn primary_button(text: impl Into<String>) -> egui::Button<'static> {
         .stroke(Stroke::new(1.0, ACCENT))
 }
 
+/// Alpha of [`danger_button`]'s border — [`COL_GLOBAL`] at ~32%, faint enough to
+/// read as an outline rather than a second block of red beside the label.
+const DANGER_BORDER_ALPHA: u8 = 82;
+
 /// Destructive / abort: transparent fill, red text + faint red border.
+///
+/// *Why `Color32::from_rgba_unmultiplied` and not [`selection_tint`]:* the tint
+/// helper deliberately premultiplies by hand to match `SEL`/`SELBD`, and its two
+/// alphas (~16% / ~42%) are not this border's. Routing this stroke through it
+/// would change the rendered color — egui's `from_rgba_unmultiplied` blends in
+/// linear space and lands somewhere else — so the fix here is only to stop
+/// re-typing `COL_GLOBAL`'s channels as literals, keeping the same call and
+/// therefore the exact same pixels (pinned by `danger_border_matches_col_global`).
 pub fn danger_button(text: impl Into<String>) -> egui::Button<'static> {
     egui::Button::new(egui::RichText::new(text.into()).color(COL_GLOBAL))
         .fill(Color32::TRANSPARENT)
-        .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(0xE1, 0x55, 0x54, 82)))
+        .stroke(Stroke::new(1.0, danger_border()))
+}
+
+/// [`danger_button`]'s border color, derived from [`COL_GLOBAL`].
+///
+/// Split out of `danger_button` only so the derivation is reachable from a test —
+/// an `egui::Button`'s stroke can't be read back once built.
+pub(crate) fn danger_border() -> Color32 {
+    Color32::from_rgba_unmultiplied(COL_GLOBAL.r(), COL_GLOBAL.g(), COL_GLOBAL.b(), DANGER_BORDER_ALPHA)
 }
 
 /// Secondary: btn fill + button border.
@@ -230,4 +250,26 @@ pub fn apply(ctx: &egui::Context) {
     });
 
     ctx.set_zoom_factor(1.0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `danger_button`'s border must stay exactly the color it was when it was a
+    /// hand-typed literal, while now following [`COL_GLOBAL`] automatically.
+    ///
+    /// *Why pin the literal:* the point of issue #13 was to remove a duplicated
+    /// constant, not to restyle the button. This asserts the refactor was a pure
+    /// no-op at the pixel level; if `COL_GLOBAL` is ever retuned this test is
+    /// *expected* to be updated alongside it — that update is the signal that the
+    /// danger border moved with the palette, which is the behaviour we wanted.
+    #[test]
+    fn danger_border_matches_col_global() {
+        assert_eq!(danger_border(), Color32::from_rgba_unmultiplied(0xE1, 0x55, 0x54, 82));
+        assert_eq!(
+            danger_border(),
+            Color32::from_rgba_unmultiplied(COL_GLOBAL.r(), COL_GLOBAL.g(), COL_GLOBAL.b(), 82)
+        );
+    }
 }
