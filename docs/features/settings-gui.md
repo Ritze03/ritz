@@ -198,10 +198,32 @@ decouples the editor column's width from the button row outright, rather than mo
 the problem somewhere else.
 
 - **`exact_height(IDE_HEADER_H)`**, where
-  `IDE_HEADER_H = 8.0 + IDE_HEADER_ROW_H + 7.0 + IDE_HEADER_DESC_H + 11.0 = 70.0` — top
-  inset, the heading/button row, one `item_spacing.y`, the `IDE_HEADER_DESC_H`
-  description slot, bottom inset. The frame's `inner_margin` is
-  `{ left: 14.0, right: 16.0, top: 8.0, bottom: 11.0 }`. *Where 70 comes from*
+
+  ```
+  IDE_HEADER_H = IDE_HEADER_MARGIN.top (8)   top inset
+               + IDE_HEADER_ROW_H     (27)   heading + button row (button-driven)
+               + 7.0                         item_spacing.y
+               + IDE_HEADER_DESC_H    (17)   one-line description slot
+               + 7.0                         item_spacing.y
+               + IDE_HEADER_STATUS_H  (56)   reserved status slot (4 x 14)
+               + IDE_HEADER_MARGIN.bottom (12)  bottom inset
+               = 134.0
+  ```
+
+  The frame's `inner_margin` is `IDE_HEADER_MARGIN`
+  (`{ left: 14.0, right: 16.0, top: 8.0, bottom: 12.0 }`) — a **shared constant**, not a
+  literal at the panel, because two of its four numbers are terms of the sum that sizes
+  the panel. Written twice, a margin edit that failed to reach the sum would reintroduce
+  the black bar below with no compile error and no test failure (verified: changing only
+  the panel's copy left every test green). The test
+  `ide_header_content_is_exactly_ide_header_h` renders the real three rows headlessly,
+  with the real bundled font and `theme::apply`, and asserts the laid-out content plus
+  those margins equals `IDE_HEADER_H` on the nose.
+
+  *Where 134 comes from* (2026-07-19, issue #26): the band grew from `70.0` to hold the
+  status lines, which moved up into it — see the status-slot bullet below for the
+  reserved-slot design and why the target figure in the request (~110px) was not the
+  number that came out. *Where the original 70 came from*
   (2026-07-19): the first cut was one row (`6 + 23 + 8 = 37`), then two rows at
   `6 + 23 + 7 + 16 + 8 = 60` (top/bottom inset `6`/`8`) — both read as cramped beside
   Config mode's module header. That header (`render_module_detail_header`) is **not**
@@ -250,13 +272,45 @@ the problem somewhere else.
   frames where `GuiApp::editor_header_info` returns `None` (a module switch, before
   `ensure_draft` catches up) an auto-sized band would collapse to nothing and snap back,
   which reads as a flicker. `None` renders an **empty band of the same height** instead.
-- **The status lines did NOT move up with the header.** They stay at the top of the
-  editor `CentralPanel`. *Why:* only the first line ("Unsaved changes" / "All changes
-  saved") is unconditional — the validation, `Requires` and pending-identity lines appear
-  and disappear **as you type**. In the full-width band they would resize it mid-keystroke
-  and shove the editor *and* the preview column down; kept in the editor column, any
-  height change stays confined to where it already was before the header moved. This
-  preserves the focus-stability contract documented under the manifest editor.
+- **The status lines render as a fixed-height third row** (2026-07-19, issue #26).
+  `render_editor_header_status_slot` reserves exactly `IDE_HEADER_STATUS_H` = 56pt —
+  four `Small` rows at `IDE_HEADER_STATUS_LINE_H` = 14pt each — *before* it looks at how
+  many messages there are, and paints each as a galley rather than adding a `Label`
+  (a `Label` sizes its `Ui` from its galley, which is the thing that must not be allowed
+  to). So messages appear and vanish **inside a constant band**.
+
+  *Why a reserved slot and not simply moving them:* only the first line ("Unsaved
+  changes" / "All changes saved") is unconditional — the validation, `Requires` and
+  pending-identity lines appear and disappear **as you type**. In an auto-height band
+  they would resize it mid-keystroke and shove the editor *and* the preview column down,
+  breaking the focus-stability contract documented under the manifest editor. The hazard
+  did not go away when the lines moved up; the fixed slot is what defuses it. Until issue
+  #26 these lines stayed in the editor `CentralPanel` for exactly this reason.
+
+  *Why four lines, and why 134 rather than the ~110 the request named:* four is the true
+  worst case, enumerated in `IDE_HEADER_STATUS_LINES`' doc comment — the state line
+  (unconditional), *one* of "two UI sections share a name" / a `validate` error (they are
+  mutually exclusive branches of one `if`/`else if`), a `Requires` parse failure, and a
+  pending-identity line. All four are live at once on a half-finished edit. ~110px is
+  what a **two**-line slot costs; reserving two would have forced an elide-or-drop policy
+  onto precisely the diagnostics that explain why Save is greyed out, and under-reserving
+  in an `exact_height` band does not clip — it paints over the columns below (the
+  black-bar failure mode, in reverse). 24pt of usually-empty band, filled with the same
+  `theme::PANEL` as everything around it, is the price. The test
+  `status_line_count_never_exceeds_the_reserved_slot` walks every flag combination so a
+  fifth message cannot be added without failing rather than silently overflowing.
+
+  *Why the lines are packed at galley pitch* (14pt) with no `item_spacing.y` between
+  them, unlike the Config-mode body's `ui.label` stack (which egui spaces by 7pt): four
+  lines plus three 7pt gaps would be 77, pushing the band to 155 to buy leading between
+  four short one-line messages already distinguished by size and colour. 14pt on 11pt
+  text is the font's own line height.
+
+  **Config mode is unchanged.** It still renders the same messages inline in the editor
+  body via `render_editor_status_lines`, because its header is natural-sized by design
+  and has no reflow problem a reservation would solve. Both surfaces draw from one list
+  builder, `editor_status_lines`, so the two cannot drift — duplicating the `if` ladder
+  would let them, invisibly, since each surface only ever shows one mode's version.
 - **The description renders as a fixed one-line second row**, full band width, under the
   name and left of nothing — the action cluster owns the right end of row *one*, so a row
   of its own can never collide with it. Painted by the free function
@@ -849,7 +903,9 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   appear on the first keystroke must not knock the focused `TextEdit` out of focus. Two
   mechanisms guarantee this: (1) the "unsaved changes / All changes saved" line is
   **always rendered** (greyed when clean) so the clean→dirty transition never inserts a
-  line above the fields; (2) the body `ScrollArea` carries an explicit `id_salt`
+  line above the fields — and in IDE mode, where the lines now live in the header band,
+  the whole stack sits in a fixed-height slot so *none* of them can shift the body
+  (issue #26); (2) the body `ScrollArea` carries an explicit `id_salt`
   ("module_editor_body") and **every** editor `TextEdit` a stable `.id_salt` keyed on its
   structural path (section/field/block index + role), so a focused box keeps the same egui
   id — and thus focus — even if a banner above it appears and shifts its screen position.
@@ -865,7 +921,13 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
     cluster, and *returns* the click rather than acting on it. `ide_mode` hides
     Save/Close for a bundled module in IDE mode only — see "IDE-mode header band"
     above.
-  - `render_editor_status_lines(ui, info)` draws the dirty/validation/identity lines.
+  - `editor_status_lines(info) -> Vec<(String, Color32)>` builds the
+    dirty/validation/identity messages **once**, and two renderers lay that one list out
+    two ways: `render_editor_status_lines(ui, info)` stacks them as ordinary labels in the
+    Config-mode editor body, `render_editor_header_status_slot(ui, info)` paints them into
+    the IDE band's fixed slot (issue #26). Splitting the list from its layout is what keeps
+    the two surfaces from drifting — each only ever shows one mode's version, so a
+    divergence would be invisible in use.
 
   *Why the snapshot struct rather than passing `&ModuleDraft`:* IDE mode renders the header
   row in a **different panel closure** from the body (see "IDE-mode header band"), while the
@@ -876,9 +938,12 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
 
   `render_module_editor`'s `header_inline: bool` parameter selects between the two layouts:
   Config mode passes `true` (header drawn in the editor column, action dispatched there);
-  IDE mode passes `false` and owns both itself. **The status lines are drawn by
-  `render_module_editor` in both modes** — see the reflow note under "IDE-mode header band"
-  for why they did *not* move with the header.
+  IDE mode passes `false` and owns both itself. **The status lines follow the header row**
+  (2026-07-19, issue #26): `render_module_editor` draws them only on the `header_inline`
+  path, and IDE mode draws them in its band instead — rendering both would put them on
+  screen twice. Gated on `header_inline` rather than `self.mode` because `header_inline` is
+  what actually means "this column owns the header"; the two agree today, and if a third
+  call site ever disagrees, the header and its status lines should still travel together.
 
   `GuiApp::dispatch_top_action(action, id, dirty, editable)` carries out the click and is
   shared by both paths, so Save / Close-as-Discard / Fork / Rename / Delete can never drift
@@ -1344,6 +1409,34 @@ for `WriteTarget::Scope`, for guard #2's reason. Without this, the `window_class
 **Detect** button — which becomes live along with the rest of the preview — would land its
 result in the real game config, bypassing all three guards.
 
+#### Test coverage of the guards (2026-07-19, issue #16)
+
+`set_scoped`/`unset_scoped`'s routing has been pinned since `ec4422b`
+(`preview_write_target_routes_to_preview_config_not_game_config` and its `Scope`
+counterpart). Issue #16 closed the remaining three holes — the tripwire in guard #3 is a
+`debug_assert_eq!`, which **compiles out in release**, so a regression in an untested guard
+would panic for a developer and silently corrupt config for a release user:
+
+- `buffer_scope_tag_namespaces_preview_away_from_every_real_scope` — the preview tag
+  differs from every real scope's, the *composed* key (not just the tag) differs, no two
+  real scopes collide with each other, and the `Preview` early return wins over every
+  `nav_sel` arm below it.
+- `with_preview_writes_restores_the_previous_target_even_on_early_return` — restore holds
+  for a straight-line closure, for a closure that returns **early** (the case the wrapper
+  exists for), when entered from `Preview` already (the case that distinguishes
+  save-and-restore from a hardcoded `= Scope`), and two calls deep.
+- `poll_detect_restores_the_captured_target_and_reports_changed_only_for_scope` — a
+  `Preview` detection lands in the scratch layer under the `"preview"` buffer key, leaves
+  `game_config` untouched, restores `write_target`, and reports `changed = false`; the
+  `Scope` case is asserted in the mirror image.
+
+Each was proved non-vacuous by breaking the guard, watching the test fail, and restoring
+it — including the subtle variants (hardcoding the restore to `Scope`, dropping
+`poll_detect`'s re-establish, returning `changed` unconditionally). *Why that mattered
+here specifically:* these guards are all save/restore pairs, and a test that only ever
+enters from the default state passes with and without the restore — implying coverage that
+does not exist.
+
 ### Buffer-key namespacing (`GuiApp::buffer_scope_tag`)
 
 `text_buffers` keys used to be `"{spec.id()}::{var}"` with **no** scope tag, and both
@@ -1355,7 +1448,9 @@ preview never wrote; making it interactive fires it. Every `text_buffers` / `mul
 key now goes through `buffer_scope_tag()`, which returns `"preview"` when
 `write_target == Preview` and the old value otherwise. Sites: the `String` arm of
 `render_value_editor` (insert *and* `entry`), `render_multi_string_field`,
-`render_env_pair_field`, `poll_detect`, and `unset_current`.
+`render_env_pair_field`, `poll_detect`, and `unset_current`. Pinned by
+`buffer_scope_tag_namespaces_preview_away_from_every_real_scope` (see "Test coverage of
+the guards" above).
 
 The same change also fixes an `egui::Id`: the `String` arm mints
 `egui::Id::new(("text_edit", &key))`, an **absolute** id that `push_id` does not

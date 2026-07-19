@@ -42,13 +42,39 @@ const NAV_W: f32 = 280.0;
 ///
 /// | term   | what it is                                                       |
 /// |--------|------------------------------------------------------------------|
-/// | `8.0`  | the frame's top inner margin; see *Why 8/11 and not 14/10 (unequal on purpose)* |
+/// | `8.0`  | the frame's top inner margin; see *Why 8/12 and not 14/10 (unequal on purpose)* |
 /// | `27.0` | the name/version/author + button row — **button-driven**, not `interact_size.y`; see [`IDE_HEADER_ROW_H`] |
 /// | `7.0`  | `item_spacing.y` (`theme.rs`) — egui's gap between those two rows |
 /// | `17.0` | [`IDE_HEADER_DESC_H`], the one-line description slot             |
-/// | `11.0` | the frame's bottom inner margin; see *Why 8/11 and not 14/10 (unequal on purpose)* |
+/// | `7.0`  | `item_spacing.y` again — the gap before the status slot          |
+/// | `56.0` | [`IDE_HEADER_STATUS_H`], the reserved status-message slot        |
+/// | `12.0` | the frame's bottom inner margin; see *Why 8/12 and not 14/10 (unequal on purpose)* |
 ///
-/// Sum: `8.0 + 27.0 + 7.0 + 17.0 + 11.0 = 70.0` — the same `IDE_HEADER_H` as
+/// Sum: `8 + 27 + 7 + 17 + 7 + 56 + 12 = 134.0`.
+///
+/// *Why 134 and not the ~110 the request named* (2026-07-19, issue #26): the ask
+/// was "make the top bar a little taller so the status messages have space —
+/// copy the module name/description block from the profiles page (~110px)". 110
+/// is what a **two**-line status slot costs (`70 + 7 + 2*14 = 105`), and the
+/// worst case is **four** lines, not two — see [`IDE_HEADER_STATUS_LINES`] for
+/// the enumeration. Reserving for the worst case is what lets the messages
+/// appear and vanish inside a *constant* band, which is the whole point of the
+/// exercise (see *Why `exact_height`* below); reserving for two would have
+/// forced an elide-or-drop policy on exactly the diagnostics that explain why
+/// Save is greyed out. 24pt of usually-empty band, filled with the same
+/// [`theme::PANEL`] as everything around it, is the price.
+///
+/// *Why the status lines live here at all* (2026-07-19, issue #26): they used to
+/// render in the editor **body**, deliberately — only the first line is
+/// unconditional, and an auto-height header would have reflowed the editor *and*
+/// the preview column mid-keystroke. Moving them up did not change that hazard;
+/// it is defused by the fixed slot rather than by the choice of container. The
+/// Config-mode body still renders them inline (there is no band there to hoist
+/// them into) — see [`render_editor_status_lines`] and
+/// [`render_editor_header_status_slot`], which share one message list so the two
+/// surfaces cannot drift.
+///
+/// The pre-issue-#26 sum was `8.0 + 27.0 + 7.0 + 17.0 + 11.0 = 70.0` — the same as
 /// before this fix, so nothing downstream reflows. The old term-by-term sum,
 /// `14 + 23 + 7 + 16 + 10`, also summed to 70 on paper — but the `23` and `16`
 /// terms were merely the *documented* derivation, not what egui actually laid
@@ -79,7 +105,7 @@ const NAV_W: f32 = 280.0;
 /// margin folded the two into one literal, `top: 14.0, left: 14.0`. That literal
 /// is what this same-day fix below corrects — read on.
 ///
-/// *Why 8/11 and not 14/10 (unequal on purpose)* (2026-07-19): real layout
+/// *Why 8/12 and not 14/10 (unequal on purpose)* (2026-07-19): real layout
 /// (`74`, previous paragraph) overran `exact_height` (`70`) by 4pt. egui clips
 /// the frame *fill* to `exact_height` but returns the frame's full, larger rect
 /// and advances the cursor from there — so nothing painted the resulting
@@ -93,17 +119,27 @@ const NAV_W: f32 = 280.0;
 /// editor/preview columns: top `14 → 8` (−6), bottom `10 → 11` (+1), net −5.
 /// Check the arithmetic: `8 + 27 + 7 + 17 + 11 = 70`. ✓
 ///
-/// The margins are **not** made equal (8 ≠ 11) because the visual gap is not the
+/// The margins are **not** made equal (8 ≠ 12) because the visual gap is not the
 /// margin number — it also depends on font ascent/cap-height above the heading
-/// and ascent below the description:
+/// and ascent below the last text row:
 /// `top_ink = top_margin + (row_h − heading_galley)/2 + (ascent₁₉ − cap₁₉)`,
-/// `bottom_ink = bottom_margin + DESC_H − ascent₁₃`. Measured, these come out
-/// equal (within 0.35pt: top 14.61, left 14.72, bottom 14.94) only when
-/// `bottom_margin = top_margin + 2.67`, which `11 = 8 + 3` approximates. **Do
-/// not "simplify" these back to equal numbers** — that reintroduces the
-/// top/bottom asymmetry this fix removed. The bottom margin still lands close to
-/// Config's `add_space(10.0)` gap between its description and separator, which
-/// is the number this term originally tried to reproduce.
+/// `bottom_ink = bottom_margin + (slot_h − ink_bottom_of_last_row)`. Measured,
+/// these come out equal (within 0.4pt: top 14.61, left 14.72, bottom ≈15) only
+/// when the bottom margin runs ~3pt over the top one. **Do not "simplify" these
+/// back to equal numbers** — that reintroduces the top/bottom asymmetry this fix
+/// removed. The bottom margin still lands close to Config's `add_space(10.0)`
+/// gap between its description and separator, which is the number this term
+/// originally tried to reproduce.
+///
+/// *Why the bottom margin went 11 → 12* (2026-07-19, issue #26): the band's last
+/// text row is no longer the 13pt `Body` description but an 11pt `Small` status
+/// line, and the two sit differently inside their slots. Measured headlessly
+/// against the real bundled font (same harness as [`IDE_HEADER_ROW_H`]): a cap
+/// glyph's ink bottom is `13.0` in the description's `17.0` slot (4pt of slack
+/// below it) but `11.0` in a status line's `14.0` slot (3pt). One point closer
+/// to the edge, so the margin gives one point back and the optical distance is
+/// unchanged. This is the *only* margin change issue #26 makes — the top and
+/// left margins, and the whole ink-balance argument above, carry over intact.
 ///
 /// *Why `exact_height` and not auto-sizing:* the band spans the editor **and**
 /// preview columns, so any height change there reflows half the window. Pinning
@@ -111,7 +147,91 @@ const NAV_W: f32 = 280.0;
 /// [`GuiApp::editor_header_info`] returns `None` (a module switch, before
 /// `ensure_draft` catches up) — an auto-sized band would collapse to nothing and
 /// snap back, which reads as a flicker.
-const IDE_HEADER_H: f32 = 8.0 + IDE_HEADER_ROW_H + 7.0 + IDE_HEADER_DESC_H + 11.0;
+const IDE_HEADER_H: f32 = IDE_HEADER_MARGIN.top
+    + IDE_HEADER_ROW_H
+    + 7.0
+    + IDE_HEADER_DESC_H
+    + 7.0
+    + IDE_HEADER_STATUS_H
+    + IDE_HEADER_MARGIN.bottom;
+
+/// The `ide_module_header` panel frame's inner margin.
+///
+/// *Why a shared constant and not a literal at the panel* (2026-07-19, issue
+/// #26): the top and bottom terms are two of the seven that make up
+/// [`IDE_HEADER_H`], and `IDE_HEADER_H` is what an `exact_height` panel is sized
+/// from — so a margin edit that does not reach the sum silently reintroduces the
+/// black bar of `1142dd8`. Written as literals in both places, that is a
+/// one-character mistake with no compile error and no test failure (verified:
+/// changing the panel's `bottom` alone left every test green). Derived from one
+/// constant, the sum cannot fall out of step with the frame it describes, and
+/// `ide_header_content_is_exactly_ide_header_h` measures the real thing rather
+/// than a copy of it.
+///
+/// See [`IDE_HEADER_H`]'s *Why 8/12 and not 14/10 (unequal on purpose)* for why
+/// top and bottom are deliberately different numbers, and why `left` is 14 while
+/// `right` is 16.
+const IDE_HEADER_MARGIN: egui::Margin = egui::Margin {
+    left: 14.0,
+    right: 16.0,
+    top: 8.0,
+    bottom: 12.0,
+};
+
+/// Height of one line in the header band's status slot, in points.
+///
+/// One `Small` (11pt) text row, which is what `RichText::small()` resolves to
+/// (`theme.rs`). Measured, not derived from `11.0 * 1.3`: `Fonts::row_height`
+/// reports `14.3` for that `FontId`, but the **galley** a one-line
+/// `layout_no_wrap` produces measures exactly `14.0`, and the galley is what
+/// gets painted and what a `ui.label` allocates. `14.0` is therefore the pitch
+/// that makes N stacked lines occupy exactly `N * 14.0` with no cumulative
+/// drift. Confirmed 2026-07-19 with the headless `egui::Context` + real bundled
+/// font + `theme::apply` harness described on [`IDE_HEADER_ROW_H`], and pinned
+/// by the `ide_header_status_slot_is_one_small_row_per_line` test.
+const IDE_HEADER_STATUS_LINE_H: f32 = 14.0;
+
+/// How many status lines the header band's slot reserves room for.
+///
+/// **Four, which is the true worst case — not a guess.** Enumerated from
+/// [`editor_status_lines`], which is the single place the message list is built:
+///
+/// 1. the state line (bundled / unsaved / all-saved) — **unconditional**;
+/// 2. *one* of "two UI sections share a name" or a `validate` error — the two
+///    are mutually exclusive branches of one `if`/`else if`;
+/// 3. "A Requires expression does not parse.";
+/// 4. a pending-identity line (either the blocking reason or the ready prompt).
+///
+/// All four can be live at once: a dirty draft whose sections collide, whose
+/// `Requires` does not parse, and which also has a staged rename is not exotic —
+/// it is what a half-finished edit looks like. So the slot holds the whole stack
+/// and no message is ever dropped, elided or scrolled away.
+///
+/// *Why reserve the worst case rather than the common one:* the slot is
+/// fixed-height inside an `exact_height` band (see [`IDE_HEADER_H`]), so
+/// under-reserving does not merely clip — it paints over the columns below, the
+/// exact failure mode that produced the black bar fixed in `1142dd8`. The lines
+/// that would overflow a smaller slot are precisely the ones explaining why Save
+/// is greyed out, so dropping them would hide the most load-bearing text in the
+/// band. [`render_editor_header_status_slot`] still `take`s this many
+/// defensively and debug-asserts the count, so a fifth message added to
+/// [`editor_status_lines`] without growing this constant trips a test rather
+/// than silently painting outside the band.
+const IDE_HEADER_STATUS_LINES: usize = 4;
+
+/// Height of the header band's reserved status-message slot, in points.
+///
+/// `4 * 14.0 = 56.0` — see [`IDE_HEADER_STATUS_LINES`] for why four, and
+/// [`IDE_HEADER_STATUS_LINE_H`] for why 14.
+///
+/// *Why the lines are packed at galley pitch with no `item_spacing.y` between
+/// them,* unlike the Config-mode body's stack of `ui.label`s (which egui spaces
+/// by 7pt): four lines plus three 7pt gaps would be `77`, pushing the band to
+/// `155` — half again the size the request asked for — to buy leading between
+/// four short one-line messages that are already a distinct size and colour from
+/// everything around them. `14.0` pitch on 11pt text is the font's own line
+/// height, i.e. normal single-spaced body leading, not a squeeze.
+const IDE_HEADER_STATUS_H: f32 = IDE_HEADER_STATUS_LINE_H * IDE_HEADER_STATUS_LINES as f32;
 
 /// Height of the header band's first row (name/version/author + action buttons),
 /// in points.
@@ -2484,24 +2604,18 @@ impl GuiApp {
                     // tried, seen, rejected.
                     .frame(egui::Frame::none()
                         .fill(theme::PANEL)
-                        // top 8, left 14, right 16, bottom 11 — top and bottom
-                        // are deliberately unequal (not a typo). See
-                        // [`IDE_HEADER_H`]'s doc comment, *Why 8/11 and not
-                        // 14/10 (unequal on purpose)*, for the derivation: the
-                        // real button-driven row height (27, not the
-                        // `interact_size.y`-assumed 23) and the corrected
-                        // description slot (17, not 16) pushed real content to
-                        // 75pt against this panel's `exact_height(70.0)`, and
-                        // these margins are what absorbed the difference —
-                        // asymmetrically, because measured ink-to-edge distance
-                        // (not the margin number itself) is what needs to match
-                        // across the top/left/bottom edges.
-                        .inner_margin(egui::Margin {
-                            left: 14.0,
-                            right: 16.0,
-                            top: 8.0,
-                            bottom: 11.0,
-                        }))
+                        // top 8, left 14, right 16, bottom 12 — top and bottom
+                        // are deliberately unequal (not a typo), and the numbers
+                        // live in [`IDE_HEADER_MARGIN`] because two of them are
+                        // terms of [`IDE_HEADER_H`], which sizes this panel. See
+                        // that constant's *Why 8/12 and not 14/10 (unequal on
+                        // purpose)*: measured ink-to-edge distance, not the
+                        // margin number, is what has to match across the
+                        // top/left/bottom edges, and the band's last text row is
+                        // now an 11pt `Small` status line whose ink sits 1pt
+                        // closer to its slot's bottom than the 13pt description's
+                        // did — hence 12 where this was 11 before issue #26.
+                        .inner_margin(IDE_HEADER_MARGIN))
                     .show(ctx, |ui| {
                         // `None` renders an empty band rather than skipping the
                         // panel: `exact_height` holds the layout still while
@@ -2517,6 +2631,13 @@ impl GuiApp {
                             // for the same space and re-creates the collision the
                             // band was built to fix. A row of its own cannot collide.
                             render_editor_header_description(ui, info.description.as_deref());
+                            // Third row: the draft's status messages, in a slot
+                            // reserved for the worst case so they appear and
+                            // vanish without moving anything (2026-07-19, issue
+                            // #26). They used to render in the editor body; see
+                            // [`IDE_HEADER_H`]'s *Why the status lines live here
+                            // at all* for why moving them was safe.
+                            render_editor_header_status_slot(ui, info);
                         }
                     });
             }
@@ -3203,87 +3324,158 @@ fn render_editor_header_description(ui: &mut egui::Ui, desc: Option<&str>) {
     }
 }
 
-/// The status lines under the header: dirty state, then any schema / `Requires`
-/// / pending-identity diagnostics.
+/// The status messages for a draft: dirty state, then any schema / `Requires` /
+/// pending-identity diagnostics, in display order, each with its colour.
 ///
-/// *Why these stay with the editor **body** and not with the header row* (which
-/// IDE mode hoists into a full-width panel): only the first line is
-/// unconditional — the validation, `Requires` and identity lines appear and
-/// disappear **as you type**. In a full-width header they would resize the band
-/// mid-keystroke and shove both the editor and the preview column down. Kept
-/// here, any height change stays confined to the editor column, exactly as it
-/// was before the header moved.
-fn render_editor_status_lines(ui: &mut egui::Ui, info: &EditorHeaderInfo) {
-    // Status line under the header. ALWAYS rendered (greyed when clean) so
-    // the clean→dirty transition on the first keystroke never inserts a new
-    // line above the fields — which would reflow the edit area. Combined
-    // with the explicit widget IDs below, typing is never interrupted.
+/// *Why this is a list-builder and not a renderer* (2026-07-19, issue #26): the
+/// same messages now appear on two surfaces with two different layout rules —
+/// Config mode stacks them as ordinary `ui.label`s in the editor body
+/// ([`render_editor_status_lines`]), IDE mode paints them into a fixed-height
+/// slot in the header band ([`render_editor_header_status_slot`]). Duplicating
+/// the `if` ladder would let the two drift, and the drift would be invisible:
+/// each surface only ever shows one mode's version. Building the list once and
+/// laying it out twice makes "which messages" a single decision, and lets
+/// [`IDE_HEADER_STATUS_LINES`] be checked against the *only* place that can grow
+/// the stack.
+///
+/// The first entry is **unconditional** — that is what keeps the clean→dirty
+/// transition on the first keystroke from inserting a new line and reflowing
+/// whatever sits below.
+fn editor_status_lines(info: &EditorHeaderInfo) -> Vec<(String, egui::Color32)> {
+    let mut out: Vec<(String, egui::Color32)> = Vec::new();
+    // State line. ALWAYS present (greyed when clean).
     if !info.editable {
-        ui.label(
-            egui::RichText::new("Bundled module \u{2014} read-only. Fork to edit (coming soon).")
-                .color(theme::COL_GLOBAL)
-                .small(),
-        );
+        out.push((
+            "Bundled module \u{2014} read-only. Fork to edit (coming soon).".to_string(),
+            theme::COL_GLOBAL,
+        ));
     } else if info.dirty {
-        ui.label(
-            egui::RichText::new(
-                "Unsaved changes \u{2014} config autosave paused until you Save or Discard.",
-            )
-            .color(theme::COL_PROFILE)
-            .small(),
-        );
+        out.push((
+            "Unsaved changes \u{2014} config autosave paused until you Save or Discard."
+                .to_string(),
+            theme::COL_PROFILE,
+        ));
     } else {
-        ui.label(
-            egui::RichText::new("All changes saved.")
-                .color(theme::FAINT)
-                .small(),
-        );
+        out.push(("All changes saved.".to_string(), theme::FAINT));
     }
     // Explain *why* Save is greyed for a schema problem. Duplicate section
     // names collapse when folded into the `IndexMap` before `validate` sees
     // them, so that case is caught by `sections_unique` separately.
     if info.editable && !info.sections_unique {
-        ui.label(
-            egui::RichText::new("Cannot save: two UI sections share a name \u{2014} rename one.")
-                .color(theme::COL_GLOBAL)
-                .small(),
-        );
+        out.push((
+            "Cannot save: two UI sections share a name \u{2014} rename one.".to_string(),
+            theme::COL_GLOBAL,
+        ));
     } else if info.editable {
         if let Some(reason) = &info.validate_err {
-            ui.label(
-                egui::RichText::new(format!("Cannot save: {reason}"))
-                    .color(theme::COL_GLOBAL)
-                    .small(),
-            );
+            out.push((format!("Cannot save: {reason}"), theme::COL_GLOBAL));
         }
     }
     if info.editable && !info.req_ok {
-        ui.label(
-            egui::RichText::new("A Requires expression does not parse.")
-                .color(theme::COL_GLOBAL)
-                .small(),
-        );
+        out.push((
+            "A Requires expression does not parse.".to_string(),
+            theme::COL_GLOBAL,
+        ));
     }
     // Pending-identity feedback: why Rename is blocked, or a ready prompt.
     if info.editable && info.has_identity {
         match &info.identity_err {
-            Some(reason) => {
-                ui.label(
-                    egui::RichText::new(format!("Cannot rename: {reason}"))
-                        .color(theme::COL_GLOBAL)
-                        .small(),
-                );
-            }
-            None => {
-                ui.label(
-                    egui::RichText::new(
-                        "Pending identity change \u{2014} press Rename to migrate saved settings and apply it.",
-                    )
-                    .color(theme::COL_PROFILE)
-                    .small(),
-                );
-            }
+            Some(reason) => out.push((format!("Cannot rename: {reason}"), theme::COL_GLOBAL)),
+            None => out.push((
+                "Pending identity change \u{2014} press Rename to migrate saved settings and apply it."
+                    .to_string(),
+                theme::COL_PROFILE,
+            )),
         }
+    }
+    out
+}
+
+/// The status lines as the **Config-mode editor body** renders them: a plain
+/// stack of `ui.label`s, spaced by egui's `item_spacing.y`, growing the column
+/// as messages appear.
+///
+/// *Why the growth is acceptable here and not in IDE mode* (2026-07-19, issue
+/// #26): this stack is inside the editor column's own scroll area, so a line
+/// appearing mid-keystroke shifts only the fields underneath it — the behaviour
+/// Config mode has always had. IDE mode's band spans the editor **and** the
+/// preview column, so the same growth would shove half the window down; that
+/// surface uses [`render_editor_header_status_slot`] instead, which reserves the
+/// worst case up front. Both draw the same messages from
+/// [`editor_status_lines`].
+///
+/// *Why Config was not simply switched to the fixed slot too:* Config's header
+/// is natural-sized by design (`GuiApp::render_module_detail_header`), so a
+/// fixed reservation there would only add dead space to a column that has no
+/// reflow problem to solve. Config mode's behaviour is deliberately byte-for-byte
+/// what it was before issue #26.
+fn render_editor_status_lines(ui: &mut egui::Ui, info: &EditorHeaderInfo) {
+    for (text, color) in editor_status_lines(info) {
+        ui.label(egui::RichText::new(text).color(color).small());
+    }
+}
+
+/// The status lines as the **IDE header band** renders them: painted into a slot
+/// of exactly [`IDE_HEADER_STATUS_H`] points, however many there are.
+///
+/// **Invariant: this occupies [`IDE_HEADER_STATUS_H`] points, unconditionally** —
+/// the same contract [`render_editor_header_description`] holds, for the same
+/// reason and by the same means. The rect is allocated *before* the messages are
+/// consulted, so one message and four cost identical height and the band does
+/// not twitch as the user types. Each line is painted as a galley rather than
+/// added as a `Label`, because a `Label` sizes its `Ui` from its galley and the
+/// galley is exactly the thing that must not be allowed to.
+///
+/// Long messages elide to one line with an ellipsis (a `validate` error carries
+/// an arbitrary-length reason string, so this is a live case, not a theoretical
+/// one) and the full text is available on hover, so nothing is lost. The tooltip
+/// is attached only when something *was* elided — a tooltip repeating what you
+/// can already read is noise.
+///
+/// The `take` and the `debug_assert!` below are a tripwire, not a policy: four is
+/// the worst case [`editor_status_lines`] can produce today
+/// ([`IDE_HEADER_STATUS_LINES`] enumerates it), so the `take` never actually
+/// truncates. If a fifth message is ever added, the assert fires in tests and dev
+/// builds and the `take` keeps a release build painting inside the band instead
+/// of over the columns below it.
+fn render_editor_header_status_slot(ui: &mut egui::Ui, info: &EditorHeaderInfo) {
+    // Reserve the slot FIRST — before the messages are even built — so every
+    // path through this function costs the same height.
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), IDE_HEADER_STATUS_H),
+        egui::Sense::hover(),
+    );
+    let lines = editor_status_lines(info);
+    debug_assert!(
+        lines.len() <= IDE_HEADER_STATUS_LINES,
+        "editor_status_lines produced {} lines but the header slot reserves {} \u{2014} \
+         grow IDE_HEADER_STATUS_LINES (and with it IDE_HEADER_H) or the extra line \
+         paints over the editor/preview columns",
+        lines.len(),
+        IDE_HEADER_STATUS_LINES,
+    );
+    let font = egui::TextStyle::Small.resolve(ui.style());
+    let mut elided: Vec<String> = Vec::new();
+    for (i, (text, color)) in lines.iter().take(IDE_HEADER_STATUS_LINES).enumerate() {
+        let mut job = egui::text::LayoutJob::simple_singleline(text.clone(), font.clone(), *color);
+        job.wrap.max_width = rect.width();
+        job.wrap.max_rows = 1;
+        job.wrap.overflow_character = Some('\u{2026}');
+        let galley = ui.fonts(|f| f.layout_job(job));
+        if galley.elided {
+            elided.push(text.clone());
+        }
+        // Fixed pitch off the slot's top edge — NOT the previous galley's
+        // height. Every line is one `Small` row, but pinning the pitch to the
+        // constant the slot is sized from means N lines land inside N *
+        // IDE_HEADER_STATUS_LINE_H by construction, with no way for a rounding
+        // difference to accumulate into an overrun.
+        let y = rect.top() + i as f32 * IDE_HEADER_STATUS_LINE_H;
+        ui.painter()
+            .galley(egui::pos2(rect.left(), y), galley, *color);
+    }
+    if !elided.is_empty() {
+        resp.on_hover_text(elided.join("\n"));
     }
 }
 
@@ -3369,7 +3561,9 @@ impl GuiApp {
     /// IDE mode passes `false`: it renders the same row via
     /// [`render_editor_header_row`] in a full-width `TopBottomPanel` spanning the
     /// editor *and* preview columns, and dispatches the action itself. The status
-    /// lines stay here in both modes — see [`render_editor_status_lines`].
+    /// lines follow the header row: rendered here in Config mode
+    /// ([`render_editor_status_lines`]), and in the band in IDE mode
+    /// ([`render_editor_header_status_slot`]) as of issue #26.
     fn render_module_editor(&mut self, ui: &mut egui::Ui, id: &str, header_inline: bool) {
         let touch = self.general_config.touch_mode;
         // IDE mode always runs full-width: its editor column is already sized by the
@@ -3430,8 +3624,17 @@ impl GuiApp {
             // `ide_mode: false` — `header_inline` is only ever `true` when
             // `self.mode == Mode::Config` (see this method's doc comment).
             action = render_editor_header_row(ui, &mut cache, &info, false);
+            // Status lines follow the header row, so they render here only on
+            // the path that owns that row. IDE mode draws the same messages in
+            // its header band instead (`render_editor_header_status_slot`);
+            // rendering them here too would put them on screen twice
+            // (2026-07-19, issue #26). Gated on `header_inline` rather than
+            // `self.mode` because `header_inline` is what actually says "this
+            // column owns the header" — the two agree today, and if a third
+            // call site ever disagrees, the header and its status lines should
+            // still travel together.
+            render_editor_status_lines(ui, &info);
         }
-        render_editor_status_lines(ui, &info);
         ui.add_space(10.0);
         ui.separator();
 
@@ -8636,6 +8839,217 @@ mod tests {
         }
     }
 
+    /// An [`EditorHeaderInfo`] with every optional status line switched on.
+    ///
+    /// This is the worst case [`IDE_HEADER_STATUS_LINES`] is sized for: dirty
+    /// (state line) + colliding section names + an unparseable `Requires` + a
+    /// blocked pending rename. `validate_err` is `Some` as well, to prove the
+    /// `sections_unique`/`validate_err` pair really is one line and not two —
+    /// if that `else if` ever became a second `if`, the stack would hit five and
+    /// the assertions below would catch it.
+    fn worst_case_header_info() -> EditorHeaderInfo {
+        EditorHeaderInfo {
+            name: "Gamescope".to_string(),
+            version: "1.2.3".to_string(),
+            author: "Ritze".to_string(),
+            description: Some("Compositing micro-compositor for games.".to_string()),
+            editable: true,
+            dirty: true,
+            save_on: false,
+            has_identity: true,
+            identity_err: Some("a module with that name already exists".to_string()),
+            sections_unique: false,
+            validate_err: Some("some other schema problem".to_string()),
+            req_ok: false,
+        }
+    }
+
+    /// The status stack never exceeds the slot the header band reserves for it.
+    ///
+    /// *Why this is a test and not a comment:* [`IDE_HEADER_STATUS_LINES`] is a
+    /// hand-counted enumeration of [`editor_status_lines`]'s branches, and
+    /// hand-counted enumerations rot the moment someone adds a branch. The band
+    /// is `exact_height`, so the rot is not cosmetic — a fifth line would paint
+    /// over the editor and preview columns (the black-bar failure mode of
+    /// `1142dd8`, in reverse). This walks every combination of the flags that can
+    /// add a line, so a new branch has to either fit or fail here.
+    #[test]
+    fn status_line_count_never_exceeds_the_reserved_slot() {
+        let mut worst = 0usize;
+        for editable in [true, false] {
+            for dirty in [true, false] {
+                for sections_unique in [true, false] {
+                    for validate_err in [true, false] {
+                        for req_ok in [true, false] {
+                            for has_identity in [true, false] {
+                                for identity_err in [true, false] {
+                                    let info = EditorHeaderInfo {
+                                        editable,
+                                        dirty,
+                                        sections_unique,
+                                        validate_err: validate_err
+                                            .then(|| "boom".to_string()),
+                                        req_ok,
+                                        has_identity,
+                                        identity_err: identity_err
+                                            .then(|| "nope".to_string()),
+                                        ..worst_case_header_info()
+                                    };
+                                    let n = editor_status_lines(&info).len();
+                                    // Spelled out rather than `{info:?}`:
+                                    // `EditorHeaderInfo` is production state and
+                                    // does not derive `Debug` just to serve a
+                                    // test's failure message.
+                                    let case = format!(
+                                        "editable={editable} dirty={dirty} \
+                                         sections_unique={sections_unique} \
+                                         validate_err={validate_err} req_ok={req_ok} \
+                                         has_identity={has_identity} \
+                                         identity_err={identity_err}"
+                                    );
+                                    // The state line is unconditional — that is
+                                    // what stops the first keystroke inserting a
+                                    // row and reflowing what sits below.
+                                    assert!(n >= 1, "no state line for {case}");
+                                    assert!(
+                                        n <= IDE_HEADER_STATUS_LINES,
+                                        "{n} status lines for {case}, but the header \
+                                         slot reserves {IDE_HEADER_STATUS_LINES}",
+                                    );
+                                    worst = worst.max(n);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Not just "fits" — the reservation must be *tight*. If the real worst
+        // case ever drops below the constant, the band is carrying dead points
+        // and this says so instead of letting them sit there unnoticed.
+        assert_eq!(
+            worst, IDE_HEADER_STATUS_LINES,
+            "the slot reserves {IDE_HEADER_STATUS_LINES} lines but nothing can \
+             produce more than {worst}",
+        );
+    }
+
+    /// One status line costs exactly [`IDE_HEADER_STATUS_LINE_H`].
+    ///
+    /// Pins the measured `14.0` (see that constant's doc comment for why it is
+    /// not `Fonts::row_height`'s `14.3`, nor `11.0 * 1.3`) against the real
+    /// bundled font in both UI-font settings, since `mono_ui` is a user setting
+    /// and could in principle carry different metrics.
+    #[test]
+    fn ide_header_status_slot_is_one_small_row_per_line() {
+        for mono in [true, false] {
+            let ctx = egui::Context::default();
+            crate::fonts::install(&ctx, mono);
+            crate::theme::apply(&ctx);
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(1200.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let font = egui::TextStyle::Small.resolve(ui.style());
+                    let galley = ui.fonts(|f| {
+                        f.layout_no_wrap("All changes saved.".to_string(), font, theme::FAINT)
+                    });
+                    assert_eq!(
+                        galley.size().y,
+                        IDE_HEADER_STATUS_LINE_H,
+                        "mono={mono}: a Small galley measures {}, not the \
+                         IDE_HEADER_STATUS_LINE_H the slot is sized from",
+                        galley.size().y,
+                    );
+                });
+            });
+        }
+    }
+
+    /// The IDE header band's content lays out to **exactly** [`IDE_HEADER_H`].
+    ///
+    /// *Why this test exists* (2026-07-19, issue #26): `IDE_HEADER_H` is a
+    /// hand-summed derivation feeding an `exact_height` panel, and the two
+    /// failure modes are silent and opposite. Under-count and egui clips the
+    /// frame *fill* to `exact_height` while advancing the cursor from the
+    /// frame's true, larger rect — nothing paints the difference and the
+    /// framebuffer clear colour shows through as a black bar (the `1142dd8`
+    /// bug, caused by exactly this sum being wrong by 4pt). Over-count and the
+    /// band carries dead space nobody notices. Neither shows up in `cargo
+    /// check`, and both are one careless margin edit away.
+    ///
+    /// So this reproduces the real panel's frame — same margins, same three
+    /// rows, real bundled font, real `theme::apply` — and asserts the laid-out
+    /// height equals the constant on the nose. `min_rect` (not the cursor) is
+    /// the measurement, because the cursor sits one `item_spacing.y` *past* the
+    /// last widget and would overcount by 7.
+    ///
+    /// Run with the worst-case status stack: that is the case the slot is sized
+    /// for, and the one that overruns first if a term is wrong.
+    #[test]
+    fn ide_header_content_is_exactly_ide_header_h() {
+        for mono in [true, false] {
+            let ctx = egui::Context::default();
+            crate::fonts::install(&ctx, mono);
+            crate::theme::apply(&ctx);
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(1200.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let info = worst_case_header_info();
+            let mut cache = IconCenterCache::new();
+            let mut measured = f32::NAN;
+            let _ = ctx.run(input, |ctx| {
+                // Literally the same frame margin the `ide_module_header`
+                // panel uses — [`IDE_HEADER_MARGIN`], the constant
+                // `IDE_HEADER_H` itself is derived from. Re-declaring the four
+                // numbers here instead would make this test measure a *copy* of
+                // the band: an edit to the panel's margin alone would then leave
+                // this green while shipping the black bar (tried it — it does).
+                let frame = egui::Frame::none().inner_margin(IDE_HEADER_MARGIN);
+                egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
+                    // Wrapped in a `scope` because the measurement is the
+                    // *content* bounding box: a `CentralPanel`'s own `Ui`
+                    // expands to fill the viewport, so its `min_rect` reports
+                    // the window height (900) and says nothing about the rows.
+                    // A scope's response rect is its child `Ui`'s `min_rect`,
+                    // which is exactly the three rows and the gaps between them
+                    // — and unlike a cursor delta it does not include the
+                    // trailing `item_spacing.y` that follows the last widget.
+                    let content = ui
+                        .scope(|ui| {
+                            // `ide_mode: true` — the band's own call.
+                            let _ = render_editor_header_row(ui, &mut cache, &info, true);
+                            render_editor_header_description(ui, info.description.as_deref());
+                            render_editor_header_status_slot(ui, &info);
+                        })
+                        .response
+                        .rect;
+                    // Content bounding box + the frame's own vertical margins is
+                    // what the panel has to be tall enough to hold.
+                    measured = content.height()
+                        + IDE_HEADER_MARGIN.top
+                        + IDE_HEADER_MARGIN.bottom;
+                });
+            });
+            assert_eq!(
+                measured, IDE_HEADER_H,
+                "mono={mono}: the header band lays out {measured}pt of content but \
+                 IDE_HEADER_H is {IDE_HEADER_H}pt \u{2014} under-counting paints a \
+                 black bar under the separator, over-counting wastes band height. \
+                 Re-derive the sum in IDE_HEADER_H's doc comment.",
+            );
+        }
+    }
+
     #[test]
     fn selection_tint_reproduces_sel_selbd_for_accent() {
         // theme::SEL/SELBD are ACCENT hand-run through the same formula
@@ -9088,6 +9502,263 @@ mod tests {
 
         app.unset_scoped("Ritze", "Core", "kbd_layout");
         assert_eq!(app.game_config.get_value("Ritze", "Core", "kbd_layout"), None);
+    }
+
+    /// **Guard: [`GuiApp::buffer_scope_tag`]'s namespacing.** A preview text edit
+    /// and a Config-mode edit of the *same* module variable must not share a
+    /// `text_buffers` / `multi_edit` key.
+    ///
+    /// *Why the collision matters and why it is not hypothetical* (issue #16):
+    /// before S5a the keys were `"{spec.id()}::{var}"` with no scope tag at all,
+    /// and both `multi_edit` tag sites mapped the old `NavSel::ModuleEditor(_)`
+    /// onto `"game:{appid}"` — so the IDE preview and Config mode's Game view
+    /// computed byte-identical keys for one module/variable while resolving
+    /// against two different bases. That was inert only while the preview was
+    /// read-only; making its fields editable arms it. The same string also mints
+    /// an **absolute** `egui::Id` in the `String` field arm
+    /// (`egui::Id::new(("text_edit", &key))`), which `push_id` does not
+    /// namespace — so a collision is not merely a shared buffer, it is a shared
+    /// widget identity.
+    ///
+    /// Asserting the tags differ is the weak half; the test also composes the
+    /// real key shape (the one `poll_detect` and `render_value_editor` build) and
+    /// asserts *those* differ, because the key is what actually indexes the map.
+    #[test]
+    fn buffer_scope_tag_namespaces_preview_away_from_every_real_scope() {
+        let mut app = test_app();
+
+        // The same module and variable, addressed from the preview and from each
+        // real scope in turn. `nav_sel` is held constant across the first pair on
+        // purpose: `write_target` alone has to be enough to separate them, since
+        // the preview renders under whatever `nav_sel` the user is on.
+        app.write_target = WriteTarget::Preview;
+        let preview_tag = app.buffer_scope_tag();
+        assert_eq!(preview_tag, "preview");
+
+        app.write_target = WriteTarget::Scope;
+        assert_eq!(app.nav_sel, NavSel::Game("42".to_string()));
+        let game_tag = app.buffer_scope_tag();
+        assert_eq!(game_tag, "game:42");
+        assert_ne!(
+            preview_tag, game_tag,
+            "the preview and Config's Game view share a buffer namespace",
+        );
+
+        // The composed key is what indexes `text_buffers` / `multi_edit` and what
+        // seeds the absolute `egui::Id` — the tags differing is only useful if it
+        // survives into the key.
+        let key = |tag: &str| format!("{tag}::Ritze::Core::1.0::kbd_layout");
+        assert_ne!(key(&preview_tag), key(&game_tag));
+
+        // Every other real scope is distinct from the preview too, and from each
+        // other — a tag that collapsed two real scopes would be the same class of
+        // bug one layer down.
+        let mut tags = vec![preview_tag.clone()];
+        for nav in [
+            NavSel::GlobalSettings,
+            NavSel::Profile("Handheld".to_string()),
+            NavSel::Game("42".to_string()),
+            NavSel::GeneralSettings,
+        ] {
+            app.nav_sel = nav;
+            let tag = app.buffer_scope_tag();
+            assert_ne!(tag, preview_tag, "a real scope collided with the preview");
+            tags.push(tag);
+        }
+        let unique: std::collections::HashSet<_> = tags.iter().collect();
+        assert_eq!(unique.len(), tags.len(), "two scopes share a tag: {tags:?}");
+
+        // And the preview tag does not depend on `nav_sel` — the early return has
+        // to win over every arm of the match below it, or the preview's namespace
+        // would drift with whatever screen the user happened to be on.
+        for nav in [
+            NavSel::GlobalSettings,
+            NavSel::Profile("Handheld".to_string()),
+            NavSel::Game("999".to_string()),
+            NavSel::GeneralSettings,
+        ] {
+            app.nav_sel = nav;
+            app.write_target = WriteTarget::Preview;
+            assert_eq!(app.buffer_scope_tag(), "preview");
+        }
+    }
+
+    /// **Guard: [`GuiApp::with_preview_writes`]' restore.** `write_target` returns
+    /// to the value it had on entry — including when the closure returns early,
+    /// and including when that value was already `Preview`.
+    ///
+    /// *Why the early-return case is the point* (issue #16): the restore lives
+    /// after `f(self)` *inside the wrapper*, so a `return` in the caller's
+    /// closure body returns into this function and cannot skip it. That is the
+    /// entire reason this is a closure wrapper rather than a bare
+    /// `self.write_target = …` around the call site —
+    /// `render_module_settings_body` and the `push_id` block that wraps it both
+    /// contain early returns, and a trailing assignment would be bypassed by
+    /// adding one more. A stuck `Preview` is the worst available failure: the
+    /// *next* Config-mode edit would silently land in the scratch layer and be
+    /// thrown away.
+    ///
+    /// *Why the already-`Preview` case is tested* even though no caller nests
+    /// today: it is what distinguishes save-and-restore from a hardcoded reset to
+    /// `Scope`, which the doc comment flags as a landmine for a future nested
+    /// call. The two are indistinguishable on the single call site that exists,
+    /// so only this test can hold the line.
+    #[test]
+    fn with_preview_writes_restores_the_previous_target_even_on_early_return() {
+        let mut app = test_app();
+        assert_eq!(app.write_target, WriteTarget::Scope);
+
+        // 1. Straight-line closure, entered from `Scope`.
+        let seen = app.with_preview_writes(|app| app.write_target);
+        assert_eq!(seen, WriteTarget::Preview, "the closure did not see Preview");
+        assert_eq!(app.write_target, WriteTarget::Scope, "target left flipped");
+
+        // 2. Closure that returns early. The condition is read out of app state
+        // rather than written `if true`, so the compiler cannot fold the branch
+        // away and turn this into case 1 with extra steps.
+        let bail = app.appid == "42";
+        let out = app.with_preview_writes(|app| {
+            app.set_scoped("Ritze", "Core", "kbd_layout", json!("de"));
+            if bail {
+                return "early";
+            }
+            app.set_scoped("Ritze", "Core", "other", json!("x"));
+            "late"
+        });
+        assert_eq!(out, "early", "the early return did not happen");
+        assert_eq!(
+            app.write_target,
+            WriteTarget::Scope,
+            "an early return skipped the restore \u{2014} the next Config-mode edit \
+             would silently land in the scratch layer",
+        );
+        // The write inside the closure went where the flag said, not where the
+        // restore later put it back to.
+        assert_eq!(
+            app.preview_config.get_value("Ritze", "Core", "kbd_layout"),
+            Some(&json!("de"))
+        );
+        assert_eq!(app.game_config.get_value("Ritze", "Core", "kbd_layout"), None);
+
+        // 3. Entered from `Preview` (the nested case). A hardcoded `= Scope`
+        // restore passes cases 1 and 2 and fails only here — which is exactly the
+        // silent regression this test exists to catch.
+        app.write_target = WriteTarget::Preview;
+        app.with_preview_writes(|app| {
+            assert_eq!(app.write_target, WriteTarget::Preview);
+        });
+        assert_eq!(
+            app.write_target,
+            WriteTarget::Preview,
+            "a nested call disarmed the enclosing one's Preview target \u{2014} the \
+             rest of the outer closure's writes would reach the real config",
+        );
+
+        // 4. Nested for real, two deep, from `Scope`: unwinding must walk back
+        // Preview → Preview → Scope, not collapse to Scope at the first return.
+        app.write_target = WriteTarget::Scope;
+        app.with_preview_writes(|app| {
+            app.with_preview_writes(|app| {
+                assert_eq!(app.write_target, WriteTarget::Preview);
+            });
+            assert_eq!(app.write_target, WriteTarget::Preview, "inner return widened");
+        });
+        assert_eq!(app.write_target, WriteTarget::Scope);
+    }
+
+    /// **Guard: [`GuiApp::poll_detect`]'s save/restore.** A detection started in
+    /// the IDE preview must land in the scratch layer under the `"preview"`
+    /// buffer tag, restore `write_target` afterwards, and report `changed =
+    /// false` so no `persist()` fires for it.
+    ///
+    /// *Why this is the guard with the widest blast radius* (issue #16):
+    /// `poll_detect` runs at the **tail** of the frame, long after
+    /// `with_preview_writes` has put `write_target` back to `Scope`. So it is the
+    /// one write path that happens *outside* the render call the other guards
+    /// wrap — and making the preview's fields editable also makes its "Detect
+    /// window class" button live. Without the captured `Detect::target` being
+    /// re-established around the write, a preview detection would go straight to
+    /// the real `games/<appid>.json`, bypassing every other guard in the set.
+    ///
+    /// Three properties, all checked in both directions (`Preview` and `Scope`):
+    /// where the value lands, which buffer key it lands under, and whether
+    /// `changed` is reported. The `changed` half matters on its own: it feeds
+    /// `ui()`'s `changed`, which calls `persist()`. `persist()` has its own
+    /// `Mode::Ide` no-op, but relying on that would make this function's
+    /// correctness depend on a guard in another function — and `Mode::Config`
+    /// with a `Preview` target is reachable state.
+    #[test]
+    fn poll_detect_restores_the_captured_target_and_reports_changed_only_for_scope() {
+        // A finished detection for `var`, started under `target`.
+        fn finished_detect(target: WriteTarget, nav: NavSel, mode: Mode, class: &str) -> Detect {
+            Detect {
+                result: Arc::new(Mutex::new(DetectStatus::Done(Some(class.to_string())))),
+                start: Instant::now(),
+                ext_id: "Ritze::Core::1.0".to_string(),
+                author: "Ritze".to_string(),
+                name: "Core".to_string(),
+                var: "wm_class".to_string(),
+                nav,
+                target,
+                mode,
+            }
+        }
+        // `poll_detect` only ever calls `request_repaint` / `request_repaint_after`
+        // on this, so a bare context is enough — no window, no painter.
+        let ctx = egui::Context::default();
+
+        // ── Preview: scratch layer, "preview" key, no persist ────────────────
+        let mut app = test_app();
+        let nav = app.nav_sel.clone();
+        app.detect = Some(finished_detect(WriteTarget::Preview, nav.clone(), app.mode, "gamescope"));
+        let changed = app.poll_detect(&ctx);
+
+        assert!(
+            !changed,
+            "a preview detection reported changed \u{2014} that feeds persist(), which \
+             would save a scratch value to disk",
+        );
+        assert_eq!(
+            app.preview_config.get_value("Ritze", "Core", "wm_class"),
+            Some(&json!("gamescope")),
+        );
+        assert_eq!(
+            app.game_config.get_value("Ritze", "Core", "wm_class"),
+            None,
+            "a preview detection reached the real game config",
+        );
+        // The text buffer is keyed with the preview tag, not the ambient game's —
+        // written under the wrong tag it would be a value nothing ever reads back.
+        assert_eq!(
+            app.text_buffers.get("preview::Ritze::Core::1.0::wm_class"),
+            Some(&"gamescope".to_string()),
+        );
+        assert!(!app.text_buffers.contains_key("game:42::Ritze::Core::1.0::wm_class"));
+        // Restored, so nothing downstream in the same frame sees a flipped flag.
+        assert_eq!(
+            app.write_target,
+            WriteTarget::Scope,
+            "poll_detect left write_target on Preview",
+        );
+        assert!(app.detect.is_none(), "the finished detection was not cleared");
+
+        // ── Scope: real config, scoped key, persist ──────────────────────────
+        let mut app = test_app();
+        let nav = app.nav_sel.clone();
+        app.detect = Some(finished_detect(WriteTarget::Scope, nav, app.mode, "steam_app_42"));
+        let changed = app.poll_detect(&ctx);
+
+        assert!(changed, "a real detection did not report changed, so it never persists");
+        assert_eq!(
+            app.game_config.get_value("Ritze", "Core", "wm_class"),
+            Some(&json!("steam_app_42")),
+        );
+        assert_eq!(app.preview_config.get_value("Ritze", "Core", "wm_class"), None);
+        assert_eq!(
+            app.text_buffers.get("game:42::Ritze::Core::1.0::wm_class"),
+            Some(&"steam_app_42".to_string()),
+        );
+        assert_eq!(app.write_target, WriteTarget::Scope);
     }
 
     /// Build a one-var module with the given ops, in order.
