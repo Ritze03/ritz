@@ -218,6 +218,66 @@ since `persist` saves *by scope*, the edited scope never received it while the t
 buffer still displayed it (a silent wrong-scope write). Every new writer must go
 through `set_scoped` for the same reason.
 
+**Cancel on navigate**: a pending detection is dropped if the user changes the
+navigation selection before the 3 seconds elapse — `crate::gui::GuiApp::start_detect`
+snapshots `nav_sel` into `Detect::nav`, and
+`crate::gui::GuiApp::cancel_stale_detect` clears `detect` as soon as the live `nav_sel`
+differs. It is called twice per frame: once right after the nav side panel renders (so
+no frame draws a "Detecting… Ns" countdown for a scope the user has left) — this catches
+game/profile create too, since those `nav_sel` assignments live inside
+`crate::gui::GuiApp::render_nav_panel` — and again at the top of `poll_detect` —
+*before* its `Waiting` early-return, or an in-flight detection would not be
+re-examined until it completed — which catches the nav sites outside the nav panel
+(module dialogs, editor entry/exit, game/profile delete).
+*Why cancel rather than apply to the snapshotted scope:* that target may no longer
+exist — `editing_preset_buf` is swapped on a profile switch and `game_config` is
+replaced on a game switch — so "write it where it started" would recreate the very
+wrong-scope bug `set_scoped` exists to prevent. Cancelling also matches user intent:
+they navigated away from the field they were configuring. *Why a snapshot comparison
+rather than `detect = None` at each nav site:* `nav_sel` is assigned in a dozen-odd
+places, so a per-site clear is only as complete as the next author's memory; comparing
+against the snapshot cannot be defeated by a new assignment. The spawned thread still
+runs to completion and writes into its `Arc<Mutex<DetectStatus>>`; nothing reads that
+handle once `detect` is cleared, and it is freed with the dropped `Detect`.
+
+**Who a field write belongs to**: `crate::gui::GuiApp::set_current` /
+`crate::gui::GuiApp::unset_current` (and the `crate::gui::GuiApp::apply_tri` dispatcher
+that forwards to them) take the module as a `&Extension` parameter supplied by the call
+site — `render_field` and the two list-field renderers all already hold the `spec` they
+are drawing. *Why not look it up from `cur_specs[selected_ext]`:* that index is a single
+*global* selection, so it is only ever right while exactly one module's fields exist on
+screen; a frame drawing two modules would funnel every edit into whichever one the index
+happened to point at. Taking identity from the caller makes the writer correct by
+construction instead of by coincidence.
+
+`set_scoped` / `unset_scoped` treat `NavSel::GeneralSettings` as an unreachable no-op
+(`debug_assert`), not as the game scope. *Why a no-op:* General Settings' own controls
+write `general_config`, never module values, so there is no honest scope to pick;
+folding it into the game arm (as it used to be) would silently divert any future module
+write there into `games/<appid>.json`. `persist` still maps `GeneralSettings` to
+`save_game`; that is only a harmless re-save of an unchanged game config, not evidence
+of a module write path.
+
+**Why the arm is genuinely unreachable** — the proof needs *two* legs, and the render
+one alone is not sufficient. `set_scoped`/`unset_scoped` have exactly three callers:
+`set_current`, `unset_current`, and `poll_detect`.
+
+1. *Render path.* `set_current`/`unset_current` are only ever called from `render_field`
+   and the list-field renderers it dispatches to, and no module field renders on the
+   General Settings screen — the central panel returns right after
+   `render_general_settings_panel`, and the module list panel is skipped for that
+   selection entirely.
+2. *Async path.* `poll_detect` is a completion writer decoupled from rendering: it is
+   called from `update()` **outside** both of those gates, so it runs unconditionally
+   every frame for every `NavSel`. It is barred instead by `cancel_stale_detect` (see
+   "Cancel on navigate" above), plus the fact that a detection can only be *started*
+   from `render_field` and therefore never carries `GeneralSettings` as its snapshot.
+
+*Why leg 2 matters:* `NavSel::ModuleEditor` is equally off the render path (its central
+panel also returns early) yet correctly stays on the game arm — precisely because it is
+a real edit scope reachable through this async path. A render-only argument would have
+mis-classified it too.
+
 ### Manifest editor — `render_module_editor` (`NavSel::ModuleEditor`)
 
 Clicking **✎ Edit** on a module (or **Ctrl+E** on the selected module) routes through

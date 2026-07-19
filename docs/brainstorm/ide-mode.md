@@ -276,9 +276,10 @@ renames in the scratch preview."
 
 ### Refuted — recorded so nobody re-derives them
 
-- **`apply_tri` (gui.rs:3543) does NOT contain the `cur_specs[selected_ext]` lookup**; it's a
-  pure dispatcher. The writer-identity fix lands in **two** functions (`set_current`,
-  `unset_current`), not three.
+- **`apply_tri` (gui.rs:3542) does NOT contain the `cur_specs[selected_ext]` lookup**; it's a
+  pure dispatcher. But it forwards to both writers, so it needed a pass-through `spec`
+  parameter of its own: the lookup **deletion** lands in two functions (`set_current`,
+  `unset_current`), but the **signature change** touches three (those two plus `apply_tri`).
 - **The splice does NOT silently no-op for a renamed draft.** `snapshot()` (gui.rs:271-275)
   clones `ext` and folds in `sections`, while identity edits are deliberately held in
   `PendingIdentity` OUTSIDE the snapshot (gui.rs:245-249) — so `snapshot().id() == draft.id`
@@ -317,9 +318,33 @@ renames in the scratch preview."
   commit, per project doc discipline.
 - **LOW** — the "Previewing against: `{game}`" string (gui.rs:1431) contradicts round-1 answer 4
   ("resolves against nothing by default") and must be removed.
-- The interlock-deletion argument (removing `config_autosave_held` etc.) holds only if **no**
-  path in IDE mode writes a real scope — and `poll_detect` currently does. Resolve this during
-  S1, before anything downstream depends on the assumption being true.
+- **RESOLVED (S1).** The interlock-deletion argument (removing `config_autosave_held` etc.)
+  holds only if **no** path in IDE mode writes a real scope — and `poll_detect` used to. This was
+  first marked resolved citing two things: `poll_detect` routed through `set_scoped` (commit
+  `95104df`), and S1 closing the `NavSel::GeneralSettings` arm with a `debug_assert!`-guarded
+  no-op. **The second half of that reasoning was wrong** — a QC review found the `debug_assert!`
+  arm was in fact *reachable*: `poll_detect` runs unconditionally from `update()` every frame for
+  every `NavSel`, using identity snapshotted when the user clicked Detect, and nothing cleared
+  `self.detect` on navigation — so navigating to General Settings mid-detection panicked debug
+  builds (and in release silently dropped the write while still populating `text_buffers`). Note
+  for future agents: the render-path-only proof (assume the writer is only reachable while its
+  triggering UI is on screen) doesn't hold once an async completion writer is in play — polling
+  runs regardless of what's rendered.
+
+  That failure mode has since been **fixed**, and the item is genuinely resolved, but on
+  different, stronger reasoning:
+  - `poll_detect` routes through `set_scoped` (commit `95104df`).
+  - `Detect` now snapshots the `NavSel` it started under (the `nav: NavSel` field, gui.rs:553);
+    `cancel_stale_detect` (gui.rs:3823) clears a pending detection whenever live `nav_sel` no
+    longer matches that snapshot. It is called right after the nav panel renders (gui.rs:1319)
+    and again at the top of `poll_detect` (gui.rs:3833), before its `Waiting` early-return.
+  - `d.nav` is snapshotted inside `start_detect` (gui.rs:3791), whose only caller is
+    `render_value_editor` (gui.rs:3672), which is itself only called from `render_field`
+    (gui.rs:3312) — and the module-editor rendering path that calls `render_field` is gated off
+    under `NavSel::GeneralSettings` (gui.rs:1321). So a surviving detection can never carry
+    `nav == GeneralSettings`.
+  - Therefore every module write in `gui.rs` provably goes through `set_scoped`/`unset_scoped`,
+    and the `GeneralSettings` no-op arm is genuinely unreachable rather than aspirationally so.
 
 ---
 
@@ -327,9 +352,14 @@ renames in the scratch preview."
 
 - **S1 — Writer identity fix.** Remove the `cur_specs[self.selected_ext]` lookup from
   `set_current`/`unset_current`; take the identity as a parameter from the call site, which
-  already has `spec` in scope. Fix the `GeneralSettings`-writes-to-`game_config` arm. Route
-  `poll_detect` through the same writer. Ships alone, zero behaviour change, unblocks everything
-  interactive that follows.
+  already has `spec` in scope. Two more copies of the same lookup, unmentioned above, turned up
+  in the `multi_string` renderers — `render_multi_string_field` (gui.rs:3326) and
+  `render_env_pair_field` (gui.rs:3420) — and were removed the same way. Five functions touched
+  in total: two lookups deleted from the named writers, two more from these renderers, and a
+  pass-through `spec` parameter added to `apply_tri` (gui.rs:3542), the dispatcher both writers
+  sit behind. Fix the `GeneralSettings`-writes-to-`game_config` arm. Route `poll_detect` through
+  the same writer. Ships alone, zero behaviour change, unblocks everything interactive that
+  follows.
 - **S2 — Cosmetic.** "Global Settings" → "Global Profile" (gui.rs:4231, 1489). Extract a
   `body_max_width` helper replacing the three 743px literals.
 - **S3 — IDE shell, read-only preview.** Add `Mode { Config, Ide }` and the boxed three-button
@@ -348,9 +378,11 @@ renames in the scratch preview."
   here and nowhere earlier.**
 - **S5 — Interactive preview.** `preview_config: GameConfig` seeded empty, resolved via
   `resolve(specs, Some(&preview_config), None, None)`. `WriteTarget { Scope, Preview }`. Add an
-  `"ide"` arm to both `scope_tag` sites (3335, 3429) AND scope-tag the `text_buffers` keys
-  (3670). Make `remap_one_scope` `pub` and call it in `perform_rename`. Remove the "Previewing
-  against:" string. **Depends on S1 and S4.**
+  `"ide"` arm to **four** sites, not two: the two `scope_tag` matches (gui.rs:3334, gui.rs:3427)
+  AND `set_scoped` (gui.rs:3706) and `unset_scoped` (gui.rs:3739) — S1 split the old inline
+  unset-path match into `unset_scoped` as a twin of `set_scoped`, so both now need the arm. Also
+  scope-tag the `text_buffers` keys (3670). Make `remap_one_scope` `pub` and call it in
+  `perform_rename`. Remove the "Previewing against:" string. **Depends on S1 and S4.**
 - **S6 — Polish.** Game dropdown with "None" default+topmost. IDE settings pane below the
   editor. Read-only banner refinements.
 

@@ -547,6 +547,10 @@ struct Detect {
     author: String,
     name: String,
     var: String,
+    /// The navigation selection this detection was started under. If `nav_sel`
+    /// has moved on by the time the 3s timer fires, the detection is cancelled
+    /// rather than applied — see [`GuiApp::cancel_stale_detect`].
+    nav: NavSel,
 }
 
 impl GuiApp {
@@ -1309,6 +1313,10 @@ impl GuiApp {
             .show(ctx, |ui| {
                 self.render_nav_panel(ui);
             });
+        // The nav panel may have just changed `nav_sel`; drop any detection belonging
+        // to the scope we left before anything renders its "Detecting… Ns" countdown.
+        // `poll_detect` re-checks at the end of the frame to catch the other nav sites.
+        self.cancel_stale_detect();
 
         if !matches!(self.nav_sel, NavSel::GeneralSettings) {
         let mut open_create = false;
@@ -3262,9 +3270,9 @@ impl GuiApp {
                 _ => None,
             };
             if pair_var == Some(field.variable.as_str()) {
-                return self.render_env_pair_field(ui, field, scope);
+                return self.render_env_pair_field(ui, spec, field, scope);
             }
-            return self.render_multi_string_field(ui, field, scope);
+            return self.render_multi_string_field(ui, spec, field, scope);
         }
 
         // Row card: scope-tinted background, 8px rounding, with a 3px left bar.
@@ -3286,7 +3294,7 @@ impl GuiApp {
                     if let Some(new) =
                         scope_checkbox(ui, &label, &hover, state, res.var.truthy, scope, badge)
                     {
-                        self.apply_tri(field, res, new);
+                        self.apply_tri(spec, field, res, new);
                         changed = true;
                     }
                     // Reserve a fixed 260px for the checkbox+label; the control fills the rest.
@@ -3323,8 +3331,7 @@ impl GuiApp {
     /// Render a `multi_string` field: a scope-tinted card with the label and a
     /// growing list of entry rows (text box + delete) plus a `+ Add` button. The
     /// list is stored as a JSON array at the current scope.
-    fn render_multi_string_field(&mut self, ui: &mut egui::Ui, field: &UiField, scope: Color32) -> bool {
-        let Some(spec) = self.cur_specs.get(self.selected_ext) else { return false };
+    fn render_multi_string_field(&mut self, ui: &mut egui::Ui, spec: &Extension, field: &UiField, scope: Color32) -> bool {
         let author = spec.meta.author.clone();
         let name = spec.meta.name.clone();
         let var = field.variable.clone();
@@ -3391,9 +3398,9 @@ impl GuiApp {
         let mut changed = false;
         if cleaned != stored {
             if cleaned.is_empty() {
-                self.unset_current(field);
+                self.unset_current(spec, field);
             } else {
-                self.set_current(field, json!(cleaned));
+                self.set_current(spec, field, json!(cleaned));
             }
             changed = true;
         }
@@ -3418,8 +3425,7 @@ impl GuiApp {
     /// ([`is_valid_env_name`]): an invalid name gets a red outline, and a row whose
     /// name is empty/invalid is dropped when persisting, so a bad pair can never
     /// reach a stored env var. The Value half is unrestricted (may contain `=`).
-    fn render_env_pair_field(&mut self, ui: &mut egui::Ui, field: &UiField, scope: Color32) -> bool {
-        let Some(spec) = self.cur_specs.get(self.selected_ext) else { return false };
+    fn render_env_pair_field(&mut self, ui: &mut egui::Ui, spec: &Extension, field: &UiField, scope: Color32) -> bool {
         let author = spec.meta.author.clone();
         let name = spec.meta.name.clone();
         let var = field.variable.clone();
@@ -3511,9 +3517,9 @@ impl GuiApp {
         let mut changed = false;
         if cleaned != stored {
             if cleaned.is_empty() {
-                self.unset_current(field);
+                self.unset_current(spec, field);
             } else {
-                self.set_current(field, json!(cleaned));
+                self.set_current(spec, field, json!(cleaned));
             }
             changed = true;
         }
@@ -3539,17 +3545,18 @@ impl GuiApp {
         }
     }
 
-    /// Apply a new tri-state to the current field's stored value.
-    fn apply_tri(&mut self, field: &UiField, res: &resolve::ResolvedField, new: Tri) {
+    /// Apply a new tri-state to `spec`'s field. Pure dispatcher — it holds no
+    /// identity of its own, it only forwards the caller's `spec` to the writers.
+    fn apply_tri(&mut self, spec: &Extension, field: &UiField, res: &resolve::ResolvedField, new: Tri) {
         match new {
-            Tri::Unset => self.unset_current(field),
+            Tri::Unset => self.unset_current(spec, field),
             Tri::Disabled => {
                 let val = if field.field_type == FieldType::Toggle {
                     json!(false)
                 } else {
                     Value::Null
                 };
-                self.set_current(field, val);
+                self.set_current(spec, field, val);
             }
             Tri::Enabled => {
                 let val = match field.field_type {
@@ -3577,7 +3584,7 @@ impl GuiApp {
                     // Edited via its own slot card, never through the tri-state checkbox.
                     FieldType::MultiString => json!([] as [String; 0]),
                 };
-                self.set_current(field, val);
+                self.set_current(spec, field, val);
             }
         }
     }
@@ -3633,7 +3640,7 @@ impl GuiApp {
                         });
                 });
                 if let Some(v) = picked {
-                    self.set_current(field, json!(v));
+                    self.set_current(spec, field, json!(v));
                     changed = true;
                 }
             }
@@ -3642,7 +3649,7 @@ impl GuiApp {
                 let (min, max, step) = number_range(field);
                 let v: f64 = res.var.value.parse().unwrap_or(min);
                 if let Some(nv) = scope_slider(ui, v, min, max, step, integer, scope) {
-                    self.set_current(field, num_value(nv, integer));
+                    self.set_current(spec, field, num_value(nv, integer));
                     changed = true;
                 }
             }
@@ -3685,7 +3692,7 @@ impl GuiApp {
                             .then(|| buf.clone())
                     };
                     if let Some(v) = edited {
-                        self.set_current(field, json!(v));
+                        self.set_current(spec, field, json!(v));
                         changed = true;
                     }
                 } else {
@@ -3714,15 +3721,68 @@ impl GuiApp {
                     p.set_value(a, n, var, value);
                 }
             }
-            NavSel::Game(_) | NavSel::GeneralSettings | NavSel::ModuleEditor(_) => {
+            NavSel::Game(_) | NavSel::ModuleEditor(_) => {
                 self.game_config.set_value(a, n, var, value);
+            }
+            // Unreachable, on two legs — both are needed, the render one alone is not
+            // enough:
+            //   1. Render path: no module field is ever rendered while General
+            //      Settings is selected (the central panel returns right after
+            //      `render_general_settings_panel`, and the module-list panel is
+            //      skipped for this selection), so no `set_current` caller runs.
+            //   2. Async path: `poll_detect` runs every frame for *every* `nav_sel`,
+            //      outside both of those gates, and is the one other caller. It is
+            //      barred by `cancel_stale_detect`, which drops a detection whose
+            //      `nav_sel` has changed — and a detection can only ever be started
+            //      from `render_field`, i.e. never under General Settings to begin
+            //      with. Note `NavSel::ModuleEditor` is off the render path for the
+            //      same reason yet stays on the game arm below: it is a real edit
+            //      scope reachable via that async path.
+            // *Why a no-op and not the game arm it used to share:* routing a module
+            // write here into `games/<appid>.json` would be a wrong-scope write with
+            // no visible symptom, and there is no honest scope to pick — General
+            // Settings' own controls write `general_config` (saved inside
+            // `render_general_settings_panel`), never module values. `persist()` maps
+            // this selection to `save_game`, which looks like evidence to the contrary
+            // but is only a harmless re-save of an unchanged game config.
+            NavSel::GeneralSettings => {
+                debug_assert!(false, "module write with General Settings selected: {a}::{n}::{var}");
             }
         }
     }
 
-    /// Set a value for a field on the *currently active edit target*.
-    fn set_current(&mut self, field: &UiField, value: Value) {
-        let Some(spec) = self.cur_specs.get(self.selected_ext) else { return };
+    /// Remove a stored value for `author::name::var` from whichever scope is
+    /// currently being edited — the unset twin of [`Self::set_scoped`], and the
+    /// only place `nav_sel` maps onto a config store for removals.
+    fn unset_scoped(&mut self, a: &str, n: &str, var: &str) {
+        match &self.nav_sel.clone() {
+            NavSel::GlobalSettings => {
+                self.global_config.unset_value(a, n, var);
+            }
+            NavSel::Profile(_) => {
+                if let Some(p) = &mut self.editing_preset_buf {
+                    p.unset_value(a, n, var);
+                }
+            }
+            NavSel::Game(_) | NavSel::ModuleEditor(_) => {
+                self.game_config.unset_value(a, n, var);
+            }
+            // Unreachable for the same reason as in `set_scoped` — see the
+            // rationale there.
+            NavSel::GeneralSettings => {
+                debug_assert!(false, "module unset with General Settings selected: {a}::{n}::{var}");
+            }
+        }
+    }
+
+    /// Set a value for `spec`'s field on the *currently active edit target*.
+    ///
+    /// The module identity comes from the caller's `spec`, never from
+    /// `cur_specs[selected_ext]`: a frame that renders more than one module's
+    /// fields (e.g. a module next to a preview of another) would otherwise write
+    /// every edit into whichever module the global selection index happens to
+    /// point at.
+    fn set_current(&mut self, spec: &Extension, field: &UiField, value: Value) {
         let (a, n) = (spec.meta.author.clone(), spec.meta.name.clone());
         self.set_scoped(&a, &n, &field.variable, value);
     }
@@ -3742,11 +3802,35 @@ impl GuiApp {
             author: spec.meta.author.clone(),
             name: spec.meta.name.clone(),
             var: field.variable.clone(),
+            nav: self.nav_sel.clone(),
         });
+    }
+
+    /// Drop a pending detection whose scope the user has since navigated away from.
+    ///
+    /// `poll_detect` is an async completion writer decoupled from rendering: it runs
+    /// every frame for every `nav_sel`, so without this a detection started under one
+    /// scope could land its `set_scoped` write under another. *Why cancel rather than
+    /// write to the scope it started in:* the snapshotted target may no longer exist —
+    /// `editing_preset_buf` gets swapped on a profile switch and `game_config` gets
+    /// replaced on a game switch — so "apply later" would resurrect exactly the
+    /// wrong-scope write this guard exists to prevent. Cancelling also matches intent:
+    /// the user navigated away from the field they were configuring.
+    ///
+    /// Comparing against a snapshot here (rather than clearing `detect` at each nav
+    /// site) is deliberate: it cannot be defeated by a future `nav_sel` assignment
+    /// that forgets to clear, of which there are a dozen-odd across this file.
+    fn cancel_stale_detect(&mut self) {
+        if self.detect.as_ref().is_some_and(|d| d.nav != self.nav_sel) {
+            self.detect = None;
+        }
     }
 
     /// Apply a finished detection (if any). Returns true if the config changed.
     fn poll_detect(&mut self, ctx: &egui::Context) -> bool {
+        // Must precede the `Waiting` early return below, or an in-flight detection
+        // would never be re-examined for a scope change until it completed.
+        self.cancel_stale_detect();
         let done = match &self.detect {
             Some(d) => match d.result.lock().unwrap().clone() {
                 DetectStatus::Waiting => {
@@ -3781,24 +3865,13 @@ impl GuiApp {
         false
     }
 
-    /// Remove an override for a field on the *currently active edit target* (reset to inherit).
-    fn unset_current(&mut self, field: &UiField) {
-        let Some(spec) = self.cur_specs.get(self.selected_ext) else { return };
+    /// Remove an override for `spec`'s field on the *currently active edit target*
+    /// (reset to inherit). Identity — including the `text_buffers` key — comes from
+    /// the caller's `spec`, for the reason given on [`Self::set_current`].
+    fn unset_current(&mut self, spec: &Extension, field: &UiField) {
         let (a, n) = (spec.meta.author.clone(), spec.meta.name.clone());
         self.text_buffers.remove(&format!("{}::{}", spec.id(), field.variable));
-        match &self.nav_sel.clone() {
-            NavSel::GlobalSettings => {
-                self.global_config.unset_value(&a, &n, &field.variable);
-            }
-            NavSel::Profile(_) => {
-                if let Some(p) = &mut self.editing_preset_buf {
-                    p.unset_value(&a, &n, &field.variable);
-                }
-            }
-            NavSel::Game(_) | NavSel::GeneralSettings | NavSel::ModuleEditor(_) => {
-                self.game_config.unset_value(&a, &n, &field.variable);
-            }
-        }
+        self.unset_scoped(&a, &n, &field.variable);
     }
 
     /// Render general app settings (splash timeout, default profile) in the central panel.
