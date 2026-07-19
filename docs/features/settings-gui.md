@@ -50,11 +50,15 @@ implementing `eframe::App`.
 *Why a separate axis and not another `NavSel` variant:* `NavSel` answers "which config
 scope am I editing"; `Mode` answers "which shape is the window in". Folding the two
 together would force every exhaustive `match self.nav_sel` in `gui.rs` to grow an arm
-with nothing to say about scopes — and would collide with `NavSel::ModuleEditor`, which
-IDE Mode *uses* as its "which module is open" carrier. IDE mode maintains the invariant
-`nav_sel == NavSel::ModuleEditor(_)` at all times (re-established at the top of
-`GuiApp::ui` if anything clears it, which is what makes the editor's Close button read
-as "discard and reload" there).
+with nothing to say about scopes. As of S4b (2026-07-19) the two are fully orthogonal:
+entering or leaving IDE Mode never touches `nav_sel` at all — "which module has focus" is
+carried by `GuiApp::focused_module: Option<String>` instead, a plain field nothing else
+aliases. IDE mode maintains the invariant `GuiApp::focused_module().is_some()` at all
+times (re-established at the top of `GuiApp::ui` if anything clears it, which is what
+makes the editor's Close button read as "discard and reload" there). *Pre-S4b* `Mode::Ide`
+ran with the now-deleted `nav_sel == NavSel::ModuleEditor(_)` as its own "which module is
+open" carrier, which is what made the two axes collide in the first place — see the
+`## Applied` entry at the bottom of `../brainstorm/ide-mode.md` for what changed and why.
 
 ### Title bar (`render_title_bar`) — the mode-aware chip
 
@@ -75,7 +79,7 @@ Profiles/Games category tab, see the tab table above) and keep showing the ambie
 name, not `"Settings"`.
 
 *Why IDE Mode can safely read `editor_header_info(id)` without a load-order race:*
-`GuiApp::update` sets `nav_sel == ModuleEditor(id)` and calls `ensure_draft(&id)` several
+`GuiApp::update` sets `focused_module` and calls `ensure_draft(&id)` several
 lines before `render_title_bar` runs later the same frame, so the draft is already synced
 to `id` on every ordinary frame by the time the chip is computed. The `"IDE Mode"`
 fallback text only shows when `all_specs` is empty (no modules loaded — there is nothing
@@ -163,21 +167,21 @@ takes an `ide_mode: bool` (`true` from this band, `false` from Config mode's inl
 — leaving only `[Fork]`. Save can never be enabled on a bundled module (nothing to save —
 the fields render disabled) and, in IDE mode specifically, that button is not "leave the
 editor":
-the `Mode::Ide` invariant (`nav_sel` is always `NavSel::ModuleEditor(_)`) reopens whatever
-the tree has selected on the very next frame (the guard in `GuiApp::ui` right after the
-draft-drop guard), so Close in IDE mode only ever discards-and-reloads the current
-selection — see `GuiApp::dispatch_top_action`'s `TopAction::Close` arm. On a bundled module
-there is nothing to discard, so the reload was a no-op; hiding the button removes a control
-that did nothing observable. **Config mode keeps both for bundled modules, unchanged**:
-Close there genuinely returns to the previous view (`editor_exit_target`), and Save's
-disabled "Fork to edit" tooltip is the established way Config teaches the fork gesture —
-this fix does not touch that path.
+the `Mode::Ide` invariant (a module is always focused, `GuiApp::focused_module().is_some()`)
+reopens whatever the tree has selected on the very next frame (the guard in `GuiApp::ui`
+right after the draft-drop guard), so Close in IDE mode only ever discards-and-reloads the
+current selection — see `GuiApp::dispatch_top_action`'s `TopAction::Close` arm. On a bundled
+module there is nothing to discard, so the reload was a no-op; hiding the button removes a
+control that did nothing observable. **Config mode keeps both for bundled modules,
+unchanged** (though this whole call path is currently unreachable — see "Manifest editor"
+below): Save's disabled "Fork to edit" tooltip is the established way Config teaches the
+fork gesture — this fix does not touch that path.
 
 *The button is labelled **Discard** in IDE mode and **Close** in Config mode*
 (2026-07-19, S5): both raise the same `TopAction::Close` and run the same
 `GuiApp::dispatch_top_action` arm, including the dirty-draft confirmation — only the
 wording differs, because only the meaning does. `TopAction::Close` calls
-`exit_module_editor`, but the `Mode::Ide` invariant reopens the tree's selected module on
+`GuiApp::discard_module`, but the `Mode::Ide` invariant reopens the tree's selected module on
 the next frame, so in IDE mode it can only ever mean "throw away my edits and reload the
 draft". Labelling it Close there promised an exit that structurally cannot happen.
 `render_editor_header_row` picks the label from its existing `ide_mode` parameter; no
@@ -370,13 +374,15 @@ the band swap on `Mode`.
   *Why Settings shows an empty list:* the tree lists config **scopes**, and
   General Settings is not one — it edits app-wide preferences. Drawing the scope tree
   under it would offer a selection the right-hand panel isn't showing.
-  - *Profiles* from IDE mode calls `exit_module_editor`, which restores the
-    remembered view (else the ambient game) and drops the draft. Coming from **General
-    Settings** it lands on the ambient game (`NavSel::Game(appid)`, the same destination
-    `editor_exit_target` defaults to) — leaving `nav_sel` on `GeneralSettings` would make
-    the box snap straight back to that category and the click look dead.
-  - *IDE Mode* opens `all_specs[ide_selected]` in the editor, establishing the
-    `nav_sel == ModuleEditor(_)` invariant IDE mode's columns rely on.
+  - *Profiles* from IDE mode drops the one focused draft (clean or already-confirmed-dirty
+    — see `nav_category_drops_draft`) and clears focus; `nav_sel` needs no restoring (S4b),
+    since focusing a module never moved it away from a real config scope in the first place.
+    Coming from **General Settings** it lands on the ambient game (`NavSel::Game(appid)`) —
+    leaving `nav_sel` on `GeneralSettings` would make the box snap straight back to that
+    category and the click look dead.
+  - *IDE Mode* focuses `all_specs[ide_selected]` (`GuiApp::focus_module`), establishing the
+    `GuiApp::focused_module().is_some()` invariant IDE mode's columns rely on. `nav_sel` is
+    deliberately left untouched.
   - **Tab rendering** (`crate::gui::nav_category_tab`): a glyph + label built as a
     `LayoutJob` and hand-painted into a cell of exactly `tab_w` points. *Why not
     `full_selectable`,* which the stacked-row version used: it is `top_down_justified`,
@@ -459,8 +465,8 @@ the band swap on `Mode`.
   module you just typed into. Per-row dirty markers replace locking (S4).
   Selection lives in `ide_selected` (an index into `all_specs`, distinct from
   `selected_ext`, which indexes `cur_specs` — different lengths and orderings). `leaf`
-  writes the index directly and never opens the editor, so the click is turned into an
-  `open_module_editor` call *after* the tree renders.
+  writes the index directly and never focuses the editor, so the click is turned into a
+  `GuiApp::focus_module` call *after* the tree renders.
 - **Bottom band** — `Mode::Config`: `GuiApp::render_nav_settings`, context-specific
   controls for whatever's selected. `Mode::Ide`: `GuiApp::render_ide_nav_footer` —
   Group by Author, a full-width **+ New Module**, and Open Folder. It deliberately
@@ -755,16 +761,17 @@ one alone is not sufficient. `set_scoped`/`unset_scoped` have exactly three call
    "Cancel on navigate" above), plus the fact that a detection can only be *started*
    from `render_field` and therefore never carries `GeneralSettings` as its snapshot.
 
-*Why leg 2 matters:* `NavSel::ModuleEditor` is equally off the render path (its central
-panel also returns early) yet correctly stays on the game arm — precisely because it is
-a real edit scope reachable through this async path. A render-only argument would have
-mis-classified it too.
+*Why leg 2 matters:* before S4b deleted `NavSel::ModuleEditor`, that variant was equally
+off the render path (its central panel also returns early) yet correctly stayed on the
+game arm — precisely because it was a real edit scope reachable through this async path. A
+render-only argument would have mis-classified it too. Post-S4b there is nothing left to
+misclassify — every real `NavSel` variant now genuinely names a config scope.
 
-### Manifest editor — `render_module_editor` (`NavSel::ModuleEditor`)
+### Manifest editor — `render_module_editor`
 
-Opening a module in the **IDE Mode** tab routes through `GuiApp::open_module_editor`,
-which records the current view in `GuiApp::editor_return` and switches `nav_sel` to
-`NavSel::ModuleEditor(id)`, whose central panel is a full editor for the module's
+Opening a module in the **IDE Mode** tab routes through `GuiApp::focus_module`, which sets
+`GuiApp::focused_module: Option<String>` — a plain field, independent of `nav_sel` (S4b,
+2026-07-19; see "Two modes" above) — whose central panel is a full editor for the module's
 *manifest* (not its config values). *Why the IDE Mode tab is now the only route*
 (2026-07-19): the Config-mode module detail header used to carry an **✎ Edit** icon
 button calling the same handler, and **Ctrl+E** used to open the editor for
@@ -775,20 +782,23 @@ an index that only exists because the Config-mode `ext_list` column exists (see
 `docs/brainstorm/ide-mode.md`, which staged it as "removed for now, not ported"). The
 keybinding may be revisited once IDE Mode has its own notion of a selected module.
 
-- **Entering / leaving** — `GuiApp::open_module_editor(id)` remembers the prior `nav_sel`
-  in `editor_return` (unless already in an editor) so Close can restore it. Which module
-  the editor is *focused* on is read through the single accessor
-  `GuiApp::focused_module() -> Option<&str>`; drafts themselves are keyed independently
-  (see **Multi-draft** below), so leaving the editor no longer destroys anything but the
-  focused draft. `GuiApp::exit_module_editor` removes that one entry and restores
-  `editor_return` via the pure `editor_exit_target` (falls back to the ambient `Game(appid)` when the stored view
-  is missing or itself an editor, so no dangling editor selection remains). The header's
+- **Entering / leaving** — `GuiApp::focus_module(id)` sets `focused_module = Some(id)` and
+  does not touch `nav_sel` at all (S4b) — there is no "prior view" to remember any more,
+  because focusing a module never moves `nav_sel` away from whatever real config scope was
+  already selected. Which module the editor is *focused* on is read through the single
+  accessor `GuiApp::focused_module() -> Option<&str>`; drafts themselves are keyed
+  independently (see **Multi-draft** below), so leaving the editor no longer destroys
+  anything but the focused draft. `GuiApp::close_focused_draft` (renamed from
+  `exit_module_editor` in S4b, which is what pre-S4b restored a remembered `nav_sel` via
+  `editor_return`/`editor_exit_target` — both deleted, nothing left to restore) removes
+  that one entry and clears focus. The header's
   always-present close button (labelled **Discard** in IDE mode, **✕ Close** in Config mode;
   both `TopAction::Close`) acts on the *focused* draft only — with a dirty editable draft it
   opens the `ConfirmAction::DiscardEdits` modal first and only `discard_module()`s on
   confirm, which in IDE mode re-seeds that draft from disk and stays on the same module.
-  **Save** also exits on success so the
-  user lands back on the real module. *Why no separate Discard button:* Close already means
+  **Save** also clears focus on success (`GuiApp::close_focused_draft`), so the
+  `Mode::Ide` reopen invariant lands the user back on the real (now-saved) module the very
+  next frame. *Why no separate Discard button:* Close already means
   "leave without saving"; two buttons for one outcome, with the warning attached to only one
   of them, was the confusing part.
 - **Leaving the editor with unsaved edits always asks first** (2026-07-19) — the three
@@ -802,7 +812,9 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   - *Why the destination is a payload on the existing variant* rather than a second
     variant: both cases render the identical dialog and differ only in what runs after
     Confirm. `pending_nav: None` is the editor's own Close button (Close doubling as
-    Discard), which lands on the remembered view via `discard_module`.
+    Discard), which drops the focused draft via `discard_module` and clears focus — there
+    is no separate "remembered view" to land on any more (S4b); in IDE mode the reopen
+    invariant picks the tree's current selection up again the next frame.
   - **Only when dirty.** A clean draft is byte-identical to disk, so dropping it loses
     nothing and prompting on every tab click would be pure noise. The pure predicate
     `nav_category_drops_draft` decides *which* clicks even qualify: the two config
@@ -890,7 +902,7 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
   separate `PendingIdentity` (`identity.author` / `identity.name` /
   `identity.var_edits[current-name]`), **never** `ext.meta` or `field.variable`. Because
   `ModuleDraft::snapshot` reads only `ext`/`sections`, identity edits never mark the draft
-  `dirty()`, never enable Save, and never hold the config-autosave interlock — they commit
+  `dirty()` and never enable Save — they commit
   *only* through the explicit **Rename** action. A *newly-added* field's `Variable` is still
   edited directly (no config to orphan). Version stays fixed. `ModuleDraft::name_error`
   (on-disk identity, `GuiApp::refresh_draft_name_error`) feeds the Save gate and stays
@@ -998,15 +1010,22 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
 - **Explicit Save** (`GuiApp::save_module`) is gated by `ModuleDraft::save_enabled`
   (`save_gate`: `dirty && valid && all Requires parse && !name_error`, and `editable`).
   It serializes `snapshot()` and writes via `config::write_atomic`, then reloads
-  extensions so the draft resets clean **and calls `exit_module_editor`** so the user
-  returns to the normal view showing the saved module. **No manifest autosave.** Saving
-  one module removes only its own draft entry; every other open draft survives.
-- **Config-autosave interlock** — while **any** module draft is dirty
-  (`config_autosave_held`), the normal config write at the end of `ui()` is held
-  (`pending_config_write`); the in-memory config still updates, and the held write is
-  flushed by `flush_config_writes_if_clean` once every draft is clean (saved, discarded, or
-  hand-reverted). *Why any and not just the focused one:* a config value could reference a
-  field that only exists in some unsaved draft, focused or not.
+  extensions so the draft resets clean **and calls `GuiApp::close_focused_draft`** so the
+  reopen invariant puts the user back in the normal view showing the saved module. **No
+  manifest autosave.** Saving one module removes only its own draft entry; every other open
+  draft survives.
+- **No config-autosave interlock (S4b, 2026-07-19).** Earlier revisions of this doc
+  described a "config-autosave interlock" (`config_autosave_held` / `pending_config_write` /
+  `flush_config_writes_if_clean`) that withheld the normal end-of-frame config write to disk
+  while any module draft was dirty. That machinery was deleted — it only ever guarded
+  against IDE mode's field writes reaching a real config scope, and they never do: the
+  manifest editor mutates the open `ModuleDraft` directly, and the interactive preview column
+  runs exclusively inside `with_preview_writes` (`WriteTarget::Preview`, see below). In its
+  place, `GuiApp::persist` is now a **no-op under `Mode::Ide`** outright — strictly stronger
+  than holding-and-flushing, and it also closes a path the interlock never covered: confirming
+  a destructive dialog (`DeleteModule`/`DiscardEdits`) makes `render_confirm_dialog` return
+  `true` unconditionally, which used to fall through to a harmless re-save of an unmodified
+  `game_config` — now it's a genuine no-op.
 
 ### Multi-draft — `GuiApp::drafts` (S4a, 2026-07-19)
 
@@ -1020,7 +1039,9 @@ the single `Option<ModuleDraft>` slot that every module switch used to overwrite
   makes re-keying a non-event and removes the whole class of "a missed re-key silently
   orphans a draft" bugs the plan flagged as this stage's main risk. The id rides along as a
   plain `ModuleDraft::id` field.
-- **Accessors.** `focused_module()` reads `nav_sel`; `draft_key(id)` maps an id to its
+- **Accessors.** `focused_module()` reads `GuiApp::focused_module: Option<String>`, a plain
+  field independent of `nav_sel` (S4b, 2026-07-19 — pre-S4b this read `nav_sel`'s
+  `NavSel::ModuleEditor(id)` variant); `draft_key(id)` maps an id to its
   manifest path (via `module_editability`, falling back to a scan of `drafts` so orphans
   stay reachable); `draft()` / `draft_mut()` resolve the focused entry.
 - **`ensure_draft` is insert-if-absent and never clears another entry.** It also no longer
@@ -1036,8 +1057,9 @@ the single `Option<ModuleDraft>` slot that every module switch used to overwrite
   and serializes it, so it is far too expensive to ask per query — it already ran ~4–6× per
   frame with one draft, and per-row dirty markers would make that N× per frame.
   `GuiApp::refresh_dirty_drafts` computes `GuiApp::dirty_drafts: HashSet<PathBuf>` **once**
-  at the top of `ui()` (and again at the frame tail, so the interlock sees edits the frame
-  just made); the tree, the exit gate, the preview splice and `dirty_module_names` all read
+  at the top of `ui()` (and again at the frame tail, so the tree's per-row markers and the
+  exit-confirmation gate see edits the frame just made, not stale state from the top of the
+  frame); the tree, the exit gate, the preview splice and `dirty_module_names` all read
   the cached set.
 - **Dirty markers in the tree.** `theme::ICON_DIRTY` (a filled dot, `theme::ACCENT`) is
   prepended into the existing `icon_lists` glyph column in `render_ext_tree`, which already
@@ -1098,11 +1120,13 @@ box (repo link + credits, `crate::gui::GuiApp::render_about`) when `NavSel` is
 `GeneralSettings` — there's no launch command to preview there — otherwise it calls
 `crate::context::assemble_launch` with whichever resolution matches the panel: when
 editing a **Profile**, the edit-scope resolution (so the preview reflects the profile
-being edited even if it's not the active one for any game); when in the **manifest
-editor** (`NavSel::ModuleEditor`), the draft-spliced spec set (the edited module's entry
+being edited even if it's not the active one for any game); when `GuiApp::focused_module()`
+is `Some` (the draft-spliced spec set, the edited module's entry
 replaced by `ModuleDraft::snapshot`, resolved via `GuiApp::resolve_specs_for_game` — one
 clone/frame, no disk, assembler signature unchanged) plus the red `lossy_env_overwrites`
-lint (see "Diagnostics band"); otherwise the game resolution. *Why Config mode keeps the
+lint (see "Diagnostics band") — **this branch is currently unreachable**, since focus is
+only ever set under `Mode::Ide`, which declares no `preview` panel at all (see "Manifest
+editor" above); otherwise the game resolution. *Why Config mode keeps the
 lint in its launch band* while IDE mode moved it out (2026-07-19): there is no editor band
 in Config mode to move it to — `ide_editor_band` is declared only under `Mode::Ide`. The
 assembled command is rendered with `crates/ritz-app/src/gui.rs:command_job`,
@@ -1200,10 +1224,12 @@ Nothing persists it: no code path hands it to `save_game`, and `persist()` has n
 can reach it.
 
 The routing flag is `GuiApp::write_target: WriteTarget { Scope, Preview }`. **It is a
-second, orthogonal axis and not a `NavSel` arm, deliberately.** In IDE mode `nav_sel` is
-always `NavSel::ModuleEditor(_)` — the *same* value whether the manifest editor column or
-the preview column is rendering — so `nav_sel` structurally cannot tell "editor writing
-config" from "preview writing scratch". `set_scoped`, `unset_scoped` and
+second, orthogonal axis and not a `NavSel` arm, deliberately.** Even before S4b deleted
+`NavSel::ModuleEditor`, `nav_sel` in IDE mode was the *same* value whether the manifest
+editor column or the preview column was rendering — so `nav_sel` structurally could not
+tell "editor writing config" from "preview writing scratch". Since S4b, IDE mode does not
+touch `nav_sel` at all (see "Two modes" above), so it has even less to say about which
+column is rendering. `set_scoped`, `unset_scoped` and
 `current_scope_value` therefore branch on `write_target` **before** their `nav_sel` match.
 (Same reasoning that made `Mode` a separate axis from `NavSel`.)
 
@@ -1215,10 +1241,11 @@ Three guards keep a preview toggle off the user's disk, and all three are load-b
    body can skip it — and both `render_module_settings_body` and the `push_id` block
    around it contain early returns. A `write_target` stuck on `Preview` would be the
    worst failure mode: the *next* Config-mode edit would silently vanish into scratch.
-2. **The `changed` bool from the preview call is explicitly discarded.** In Config mode
-   that bool feeds `ui()`'s `changed`, which calls `persist()` — which maps
-   `NavSel::ModuleEditor(_)` onto `save_game`. Letting it escape would rewrite
-   `games/<appid>.json` on every preview toggle.
+2. **The `changed` bool from the preview call is explicitly discarded.** Outside IDE mode
+   that bool feeds `ui()`'s `changed`, which calls `persist()`. `persist()` is itself a
+   no-op under `Mode::Ide` (S4b), but letting `changed` escape this closure would still be
+   wrong to rely on — nothing outside the scratch layer changed, so there is nothing to
+   report upward regardless.
 3. **A snapshot assertion.** `serde_json::to_value(&game_config.config.modules)` is taken
    before the body call and `debug_assert_eq!`d after. This replaces the old
    `debug_assert!(!changed)` (which could not survive an interactive preview) with an
@@ -1235,7 +1262,8 @@ result in the real game config, bypassing all three guards.
 ### Buffer-key namespacing (`GuiApp::buffer_scope_tag`)
 
 `text_buffers` keys used to be `"{spec.id()}::{var}"` with **no** scope tag, and both
-`multi_edit` scope-tag sites mapped `NavSel::ModuleEditor(_)` onto `"game:{appid}"` — so
+`multi_edit` scope-tag sites mapped the (now-deleted) `NavSel::ModuleEditor(_)` onto
+`"game:{appid}"` — so
 the IDE preview and Config mode's Game view computed **identical** keys for the same
 module/variable, over two different resolution bases. That was inert only while the
 preview never wrote; making it interactive fires it. Every `text_buffers` / `multi_edit`

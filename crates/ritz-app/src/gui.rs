@@ -155,10 +155,6 @@ enum NavSel {
     GlobalSettings,  // extension-variable global overrides — shown in central panel (ext editor)
     Profile(String),
     Game(String), // appid
-    /// Read-only manifest inspector for one module, keyed by its `Extension::id()`
-    /// (`Author::Name::Version`). Not a config-edit scope — non-preview scope
-    /// helpers (persist/current_scope_value/etc.) treat it like the ambient game.
-    ModuleEditor(String),
 }
 
 /// Which top-level area of the window is showing.
@@ -167,9 +163,12 @@ enum NavSel {
 /// answers "which config scope am I editing", `Mode` answers "which shape is the
 /// window in". Folding IDE Mode into `NavSel` would force every exhaustive
 /// `match self.nav_sel` in this file to grow an arm that has nothing to say
-/// about scopes — and would collide with `NavSel::ModuleEditor`, which IDE Mode
-/// *uses* as its "which module is open" carrier. The two are orthogonal:
-/// `Mode::Ide` always runs with `nav_sel == NavSel::ModuleEditor(_)`.
+/// about scopes. The two are fully orthogonal (S4b): entering or leaving IDE
+/// Mode never touches `nav_sel` at all — "which module has focus" is carried by
+/// [`GuiApp::focused_module`] instead, a plain field nothing else aliases. Pre-S4b
+/// `Mode::Ide` ran with the now-deleted `nav_sel == NavSel::ModuleEditor(_)` as
+/// its own "which module is open" carrier, which is what made the two axes
+/// collide in the first place.
 ///
 /// Deliberately **not persisted** — IDE Mode is a workbench you enter for a
 /// session, not a preference. Reopening the settings window always lands in
@@ -185,15 +184,14 @@ enum Mode {
 /// Where a module-field write lands: the real config scope `nav_sel` names, or
 /// the IDE preview's throw-away scratch config.
 ///
-/// *Why an orthogonal flag and not a `NavSel` variant* (S5a): in IDE mode
-/// `nav_sel` is **always** `NavSel::ModuleEditor(_)` — it is IDE mode's "which
-/// module is open" carrier, and it is the *same* value whether the manifest
-/// editor column or the preview column is the one rendering. So `nav_sel` cannot
-/// distinguish "editor writing config" from "preview writing scratch"; adding an
-/// `"ide"` arm to the `nav_sel` matches (which is what the brainstorm plan
-/// proposed) would have sent Config-mode Game writes and preview writes down the
-/// same arm. Only a second, independent axis can tell them apart — exactly the
-/// same reasoning that made [`Mode`] a separate axis from [`NavSel`].
+/// *Why an orthogonal flag and not a `NavSel` variant* (S5a, corrected S4b): even
+/// before S4b deleted `NavSel::ModuleEditor`, `nav_sel` could not distinguish
+/// "editor writing config" from "preview writing scratch" — both IDE columns ran
+/// under the *same* `nav_sel` value. Since S4b, `nav_sel` isn't touched by IDE
+/// Mode at all (see [`Mode`]'s doc comment), so it has even less to say about
+/// which column is rendering. Only a second, independent axis can tell editor
+/// writes from preview writes apart — exactly the same reasoning that made
+/// [`Mode`] a separate axis from [`NavSel`].
 ///
 /// Set to [`WriteTarget::Preview`] for the duration of one
 /// `render_module_settings_body` call and nothing else; see
@@ -369,6 +367,18 @@ pub struct GuiApp {
     /// Which top-level area is showing (see [`Mode`]). Orthogonal to `nav_sel`;
     /// in-memory only, never written to any config file.
     mode: Mode,
+    /// The module IDE Mode currently has focus on, if any (S4b).
+    ///
+    /// *Why a plain field and not the deleted `NavSel::ModuleEditor(_)`:* that
+    /// variant made "which module is focused" and "which config scope am I
+    /// editing" the same piece of state, so entering/leaving the editor had to
+    /// stomp `nav_sel` and remember a prior value to restore (`editor_return`).
+    /// This field carries focus on its own axis — `select_nav_category`,
+    /// `focus_module` and friends never touch `nav_sel` at all, so there is
+    /// nothing to restore on the way out: `nav_sel` was simply never disturbed.
+    /// [`GuiApp::focused_module`] (the accessor, distinct from this field of the
+    /// same name conceptually) is still the single reader everything else uses.
+    focused_module: Option<String>,
     /// Which store module-field writes land in *right now* — see [`WriteTarget`].
     /// Always [`WriteTarget::Scope`] except inside the one
     /// `render_module_settings_body` call the IDE preview column makes.
@@ -453,9 +463,6 @@ pub struct GuiApp {
     /// frame. Anything that mutates a draft outside the render path must call
     /// `refresh_dirty_drafts` itself.
     dirty_drafts: std::collections::HashSet<PathBuf>,
-    /// True when an in-memory config edit was withheld from disk because a module
-    /// editor draft was dirty; flushed once the draft becomes clean.
-    pending_config_write: bool,
     /// The open Fork / Create-new module dialog, if any.
     module_dialog: Option<ModuleDialog>,
     /// "Also purge stored config" checkbox state for the pending Delete-module
@@ -465,10 +472,6 @@ pub struct GuiApp {
     /// future rename) couldn't carry over. Shown near the module editor until
     /// dismissed.
     carryover_report: Option<String>,
-    /// The nav selection to restore when the module editor is closed (the view the
-    /// user was in when they opened it). Cleared on exit; `None` falls back to the
-    /// ambient game.
-    editor_return: Option<NavSel>,
     /// Measured ink centers for icon glyphs, so every icon sits visually centered
     /// in its cell (see `crate::icon_center`). Lives on the app so the
     /// measurement survives across frames.
@@ -648,23 +651,6 @@ fn validate_var_renames(
 /// collision is flagged.
 fn save_gate(dirty: bool, valid: bool, requires_all_parse: bool, name_error: bool) -> bool {
     dirty && valid && requires_all_parse && !name_error
-}
-
-/// Pure interlock predicate (factored out for testing): the normal config/scope
-/// autosave is held while a module editor draft is dirty (draft ≠ disk).
-fn config_autosave_held(editor_dirty: bool) -> bool {
-    editor_dirty
-}
-
-/// Resolve where closing the module editor should land (factored out for
-/// testing). Returns the stored `return_to` view when it is a real (non-editor)
-/// selection; otherwise falls back to the ambient game so no dangling editor
-/// selection remains.
-fn editor_exit_target(return_to: Option<NavSel>, appid: &str) -> NavSel {
-    match return_to {
-        Some(NavSel::ModuleEditor(_)) | None => NavSel::Game(appid.to_string()),
-        Some(other) => other,
-    }
 }
 
 /// Pure predicate (factored out for testing): would applying this category-tab
@@ -909,6 +895,7 @@ impl GuiApp {
             detect: None,
             nav_sel: NavSel::Game(appid.to_string()),
             mode: Mode::Config,
+            focused_module: None,
             write_target: WriteTarget::Scope,
             preview_config: GameConfig::new("__preview__", "None"),
             preview_preset: None,
@@ -929,11 +916,9 @@ impl GuiApp {
             logo: None,
             drafts: IndexMap::new(),
             dirty_drafts: std::collections::HashSet::new(),
-            pending_config_write: false,
             module_dialog: None,
             delete_module_purge: false,
             carryover_report: None,
-            editor_return: None,
             icon_cache: IconCenterCache::new(),
         };
         app.switch_game(appid, name);
@@ -1050,7 +1035,7 @@ impl GuiApp {
             // these screens (config store, launch preview) resolves through
             // `self.appid`, and a momentary disagreement between the two must not
             // make the module list describe a different game than the fields do.
-            NavSel::Game(_) | NavSel::ModuleEditor(_) | NavSel::GeneralSettings => {
+            NavSel::Game(_) | NavSel::GeneralSettings => {
                 Some(self.appid.clone())
             }
         }
@@ -1164,7 +1149,23 @@ impl GuiApp {
 
     /// Scope tint for the layer currently being edited (Game blue / Profile green
     /// / Global red). Used to color values set at that layer.
+    ///
+    /// *Why the `write_target == Preview` guard (S4b)* — this is called from
+    /// `render_field` for **every** field, including inside the IDE preview
+    /// column, where the layer being written is the scratch `preview_config`, not
+    /// whatever `nav_sel` happens to still hold. Pre-S4b `nav_sel` was forced to
+    /// `NavSel::ModuleEditor(_)` for the whole time the preview rendered, which
+    /// fell through to `_ => COL_GAME` here — the preview's "set at this layer"
+    /// badge was always blue. Now that IDE Mode leaves `nav_sel` untouched (see
+    /// [`Mode`]'s doc comment), `nav_sel` can be `GlobalSettings` or `Profile(_)`
+    /// while the preview renders (whichever screen was active before entering IDE
+    /// Mode) — without this guard the preview's badge would silently follow that
+    /// leftover value instead of staying blue, a real (if subtle) color
+    /// regression the refactor would otherwise introduce.
     fn editing_scope_color(&self) -> Color32 {
+        if self.write_target == WriteTarget::Preview {
+            return COL_GAME;
+        }
         match &self.nav_sel {
             NavSel::GlobalSettings => COL_GLOBAL,
             NavSel::Profile(_) => COL_PROFILE,
@@ -1193,9 +1194,7 @@ impl GuiApp {
             NavSel::GeneralSettings => {
                 resolve::resolve(specs, Some(&self.game_config), self.preset.as_ref(), global)
             }
-            // ModuleEditor is a read-only view over one module, not a config-edit
-            // scope — resolve as if the ambient game were selected.
-            NavSel::Game(_) | NavSel::ModuleEditor(_) => {
+            NavSel::Game(_) => {
                 let merged: Option<Preset> = self.preset.as_ref().and_then(|p| {
                     let pname = p.parent.as_ref()?;
                     let mut base = collect_parent_chain(&self.paths, pname);
@@ -1227,7 +1226,8 @@ impl GuiApp {
     ///
     /// *Why a separate method rather than another arm in
     /// [`Self::resolve_specs_for_editing`]:* that one dispatches on `nav_sel`,
-    /// which in IDE mode is `ModuleEditor(_)` for **both** columns — so an arm
+    /// which (S4b) IDE mode never touches — it stays whatever real scope was
+    /// selected before entering IDE mode, the same for both columns — so an arm
     /// there could not tell the manifest editor's resolution from the preview's.
     /// Same reasoning as [`WriteTarget`]. `resolve_specs_for_editing` is left
     /// byte-for-byte alone so Config mode cannot be perturbed.
@@ -1295,6 +1295,14 @@ impl GuiApp {
     /// does not namespace and that becomes reachable the moment the preview's
     /// fields turn editable. Folding the tag into `key` fixes the id and the
     /// buffer key in one move.
+    ///
+    /// *Why the `nav_sel` match below never needs an IDE-mode arm (S4b):* the
+    /// only caller that renders fields under `Mode::Ide` is the preview column,
+    /// and it always renders inside [`Self::with_preview_writes`] — so it always
+    /// takes the `Preview` early return above and never reaches this match at
+    /// all. The manifest editor itself (the other IDE column) never calls this:
+    /// it mutates the open [`ModuleDraft`] directly and has no `text_buffers` /
+    /// `multi_edit` keys of its own.
     fn buffer_scope_tag(&self) -> String {
         if self.write_target == WriteTarget::Preview {
             return "preview".to_string();
@@ -1303,8 +1311,6 @@ impl GuiApp {
             NavSel::GlobalSettings => "global".to_string(),
             NavSel::Profile(n) => format!("profile:{n}"),
             NavSel::Game(a) => format!("game:{a}"),
-            // Not a real edit scope — behave like the ambient game.
-            NavSel::ModuleEditor(_) => format!("game:{}", self.appid),
             NavSel::GeneralSettings => "general".to_string(),
         }
     }
@@ -1363,20 +1369,17 @@ impl GuiApp {
         Some((self.all_manifests[idx].clone(), !bundled))
     }
 
-    /// The module the editor currently has **focus** on, or `None` when the
-    /// selection isn't an editor view.
+    /// The module the editor currently has **focus** on, or `None` when nothing
+    /// is focused.
     ///
-    /// *Why an accessor and not a dozen inline `if let NavSel::ModuleEditor(id)`
-    /// matches (S4a):* "which module is focused" is now distinct from "which
-    /// modules have drafts" — the second is the whole `drafts` map. One reader
-    /// means the eventual removal of `NavSel::ModuleEditor` (S4b) has one place
-    /// to change rather than a dozen, and no site can quietly re-derive focus a
-    /// different way in the meantime.
+    /// *Why an accessor over a bare field read:* "which module is focused" is
+    /// distinct from "which modules have drafts" — the second is the whole
+    /// `drafts` map. Before S4b this read `nav_sel`'s now-deleted
+    /// `NavSel::ModuleEditor(id)` variant; that accessor is why S4b's removal of
+    /// the variant was a one-place change (swap the body to read
+    /// [`GuiApp::focused_module`], the field) rather than a dozen call-site edits.
     fn focused_module(&self) -> Option<&str> {
-        match &self.nav_sel {
-            NavSel::ModuleEditor(id) => Some(id.as_str()),
-            _ => None,
-        }
+        self.focused_module.as_deref()
     }
 
     /// The `drafts` key for module `id`: its manifest path.
@@ -1440,32 +1443,36 @@ impl GuiApp {
             .collect()
     }
 
-    /// Open the module editor for `id`, remembering the current view so Close can
-    /// restore it. No-op if already editing that module.
-    fn open_module_editor(&mut self, id: String) {
-        if self.nav_sel == NavSel::ModuleEditor(id.clone()) {
+    /// Focus the module editor on `id`. No-op if already focused there.
+    ///
+    /// *Why this no longer touches `nav_sel` (S4b):* pre-S4b this set
+    /// `nav_sel = NavSel::ModuleEditor(id)` and remembered the prior `nav_sel` in
+    /// `editor_return` so leaving could restore it. Now that focus lives on its
+    /// own field ([`GuiApp::focused_module`]), `nav_sel` is simply never touched
+    /// by focusing a module — it stays exactly whatever real config scope was
+    /// selected before IDE Mode was entered, with nothing to remember or restore.
+    fn focus_module(&mut self, id: String) {
+        if self.focused_module.as_deref() == Some(id.as_str()) {
             return;
         }
-        if !matches!(self.nav_sel, NavSel::ModuleEditor(_)) {
-            self.editor_return = Some(self.nav_sel.clone());
-        }
-        self.nav_sel = NavSel::ModuleEditor(id);
+        self.focused_module = Some(id);
     }
 
-    /// Leave the module editor for the remembered (or ambient) view, dropping the
-    /// in-memory draft. Releasing the interlock flushes any held config writes.
-    fn exit_module_editor(&mut self) {
-        let target = editor_exit_target(self.editor_return.take(), &self.appid);
-        // Only the focused draft leaves with the editor. The other entries belong
-        // to modules the user is still working on and are not this action's to
-        // destroy (S4a) — the whole-map clear lives in `apply_discard_edits`,
-        // behind the confirmation.
+    /// Drop the draft for whichever module currently has focus (if any) and
+    /// clear focus. Every *other* open draft is left exactly alone.
+    ///
+    /// *Why this no longer "exits" anywhere (S4b):* pre-S4b this restored
+    /// `nav_sel` to a remembered prior view via `editor_return`/
+    /// `editor_exit_target`, because `nav_sel` itself carried "which module is
+    /// focused". Since focus moved to its own field that `nav_sel` never touches,
+    /// there is no view to return to — `nav_sel` was never disturbed by focusing
+    /// a module in the first place, so it already holds the right value.
+    fn close_focused_draft(&mut self) {
         if let Some(key) = self.focused_key() {
             self.drafts.shift_remove(&key);
         }
-        self.nav_sel = target;
+        self.focused_module = None;
         self.refresh_dirty_drafts();
-        self.flush_config_writes_if_clean();
     }
 
     /// Load a draft for `id` unless one already exists for it (keeping any
@@ -1548,12 +1555,13 @@ impl GuiApp {
             eprintln!("ritz: failed to save module: {e:#}");
             return;
         }
-        // Drop **this** draft and reload from disk, then leave the editor so the
-        // user sees the saved ("real") module in the normal view. Other drafts are
+        // Drop **this** draft and reload from disk, then clear focus so the tree's
+        // reopen invariant (or, in Config mode, nothing) puts the user back in the
+        // normal view showing the saved ("real") module. Other drafts are
         // untouched — saving one module says nothing about the others.
         self.drafts.shift_remove(&manifest);
         self.reload_extensions();
-        self.exit_module_editor();
+        self.close_focused_draft();
     }
 
     /// Discard the **focused** draft only.
@@ -1565,12 +1573,13 @@ impl GuiApp {
     ///
     /// In IDE mode this **re-seeds from disk and stays put**: the `Mode::Ide`
     /// invariant reopens the same module next frame anyway, so leaving the editor
-    /// would be theatre. In Config mode it keeps its old meaning (leave for the
-    /// remembered view) — that path is currently unreachable, but Config-mode
-    /// behaviour is not this stage's to change.
+    /// would be theatre. In Config mode it keeps its old meaning (clear focus,
+    /// dropping the draft) — that path is currently unreachable (`focused_module`
+    /// is only ever set under `Mode::Ide`), but Config-mode behaviour is not this
+    /// stage's to change.
     fn discard_module(&mut self) {
         if self.mode != Mode::Ide {
-            self.exit_module_editor();
+            self.close_focused_draft();
             return;
         }
         if let Some(key) = self.focused_key() {
@@ -1580,7 +1589,6 @@ impl GuiApp {
             self.ensure_draft(&id);
         }
         self.refresh_dirty_drafts();
-        self.flush_config_writes_if_clean();
     }
 
     /// Carry out a confirmed [`ConfirmAction::DiscardEdits`].
@@ -1593,17 +1601,15 @@ impl GuiApp {
     /// directly against a real `GuiApp` (see the tests at the bottom of this file).
     fn apply_discard_edits(&mut self, pending_nav: Option<NavCategory>) {
         match pending_nav {
-            // Close acting as Discard: leave for the remembered view.
+            // Close acting as Discard: drop the focused draft only.
             None => self.discard_module(),
             // A category tab was clicked and the user approved the discard. Drop
             // **every** draft: the prompt named them all ("These modules have
             // unsaved changes: …"), so keeping any back would contradict what the
-            // user just agreed to. Flushing releases the config-autosave interlock
-            // the dirty drafts were holding.
+            // user just agreed to.
             Some(cat) => {
                 self.drafts.clear();
                 self.refresh_dirty_drafts();
-                self.flush_config_writes_if_clean();
                 self.select_nav_category(cat);
             }
         }
@@ -1789,11 +1795,13 @@ impl GuiApp {
 
         // The parent's draft (if any) is deliberately **left in place** — forking
         // is not a decision to abandon the original's edits. Focus moves to the
-        // fork; `ensure_draft` builds its draft next frame.
+        // fork; `ensure_draft` builds its draft next frame. `nav_sel` is
+        // untouched (S4b) — Fork only ever runs from inside an already-focused
+        // editor, so it has nothing to say about which config scope is active.
         let new_id = ext.id();
         self.reload_extensions();
         self.reload_configs();
-        self.nav_sel = NavSel::ModuleEditor(new_id);
+        self.focused_module = Some(new_id);
     }
 
     /// Commit the staged identity change (Author / Name / existing-field
@@ -1889,12 +1897,14 @@ impl GuiApp {
             return;
         }
 
-        // Step 5: report dropped vars, reload, keep the editor open on the new id.
+        // Step 5: report dropped vars, reload, keep focus on the new id. `nav_sel`
+        // is untouched (S4b) — Rename only ever runs from inside an already-focused
+        // editor.
         let new_id = ext.id();
         self.set_carryover_report(report);
         self.reload_extensions();
         self.reload_configs();
-        self.nav_sel = NavSel::ModuleEditor(new_id.clone());
+        self.focused_module = Some(new_id.clone());
         // Manifest-path keying means the entry does NOT need re-keying (the file
         // was rewritten in place, never renamed). It DOES need re-seeding: its
         // `id`, `baseline`, `baseline_vars` and staged `identity` all describe the
@@ -1938,15 +1948,17 @@ impl GuiApp {
         }
         // Existing drafts are left alone: creating a module says nothing about the
         // ones already open. Focus moves to the new module; `ensure_draft` builds
-        // its draft next frame.
+        // its draft next frame. `nav_sel` is untouched (S4b) — Create is reached
+        // only from the IDE nav footer, which only shows while a module is
+        // already focused.
         let new_id = ext.id();
         self.reload_extensions();
-        self.nav_sel = NavSel::ModuleEditor(new_id);
+        self.focused_module = Some(new_id);
     }
 
     /// Delete a user-authored module's manifest file. When `purge` is set, also
     /// sweep the now-undeclared config across every scope via [`config_cleanup`].
-    /// Leaves the module editor for the ambient game.
+    /// Clears focus and points `nav_sel` at the ambient game.
     fn delete_module(&mut self, manifest: &Path, purge: bool) {
         if let Err(e) = std::fs::remove_file(manifest) {
             eprintln!("ritz: failed to delete module: {e:#}");
@@ -1962,6 +1974,15 @@ impl GuiApp {
             // exactly them (alongside any other stale values it normally prunes).
             self.config_cleanup();
         }
+        // Clear focus so the `Mode::Ide` reopen invariant (top of `GuiApp::ui`)
+        // picks up whatever the tree has selected next frame, instead of trying
+        // to reopen the now-deleted id. `nav_sel` is deliberately reset to the
+        // ambient game here too (S4b): since nothing else in an IDE session
+        // touches `nav_sel` any more, this is what decides where the user lands
+        // if they leave IDE mode without navigating further — reproducing the
+        // pre-S4b outcome, where the same assignment overwrote whatever
+        // `editor_return` would otherwise have restored.
+        self.focused_module = None;
         self.nav_sel = NavSel::Game(self.appid.clone());
     }
 
@@ -1984,35 +2005,35 @@ impl GuiApp {
         ));
     }
 
-    /// Flush config edits that were withheld by the interlock, but only once no
-    /// module draft is dirty. Saves every config layer so a held edit at any
-    /// scope (global / profile / game) reaches disk.
-    fn flush_config_writes_if_clean(&mut self) {
-        if !self.pending_config_write {
-            return;
-        }
-        // ANY dirty draft holds the interlock, not just the focused one — a config
-        // write flushed while some other module still has unsaved edits would
-        // reintroduce exactly the ordering hazard the interlock exists to prevent.
-        if !self.dirty_drafts.is_empty() {
-            return;
-        }
-        let _ = self.paths.save_global_config(&self.global_config);
-        let _ = self.paths.save_game(&self.game_config);
-        if let Some(p) = &self.editing_preset_buf {
-            let _ = self.paths.save_preset(p);
-        }
-        self.pending_config_write = false;
-    }
-
+    /// Save whichever config store `nav_sel` currently names.
+    ///
+    /// **No-op under `Mode::Ide` (S4b).** There used to be a "config-autosave
+    /// interlock" here (`pending_config_write` / `config_autosave_held` /
+    /// `flush_config_writes_if_clean`) that withheld this write to disk while a
+    /// module draft was dirty, flushing once every draft went clean again. That
+    /// machinery only existed to guard against IDE mode's field writes reaching a
+    /// real scope — but IDE mode's field writes never do: the manifest editor
+    /// mutates the open `ModuleDraft` directly, and the preview column runs
+    /// exclusively inside `with_preview_writes` (`WriteTarget::Preview`), so
+    /// `changed` from a real config write is already false-or-absent for the
+    /// whole time `Mode::Ide` is showing. The one place `changed` *does* come
+    /// back `true` under `Mode::Ide` is `render_confirm_dialog`, which returns
+    /// `true` unconditionally on Confirm (e.g. `DeleteModule`/`DiscardEdits`) even
+    /// though neither touches `game_config`/`global_config`/`editing_preset_buf`.
+    /// The interlock used to let that call through harmlessly (re-saving an
+    /// unmodified `game_config`); this guard is strictly stronger — it closes the
+    /// call off entirely rather than relying on it being harmless.
     fn persist(&self) {
+        if self.mode == Mode::Ide {
+            return;
+        }
         let result = match &self.nav_sel {
             NavSel::GlobalSettings => self.paths.save_global_config(&self.global_config),
             NavSel::Profile(_) => match &self.editing_preset_buf {
                 Some(p) => self.paths.save_preset(p),
                 None => return,
             },
-            NavSel::GeneralSettings | NavSel::Game(_) | NavSel::ModuleEditor(_) => {
+            NavSel::GeneralSettings | NavSel::Game(_) => {
                 self.paths.save_game(&self.game_config)
             }
         };
@@ -2043,21 +2064,22 @@ impl GuiApp {
         // editor by ANY route, without a word — which is precisely the data loss
         // this stage removes. Drafts now outlive navigation; the only routes that
         // destroy one are Save, the per-module Discard, Delete, and the confirmed
-        // whole-map clear behind `ConfirmAction::DiscardEdits`. The interlock the
-        // guard was protecting is handled instead by `flush_config_writes_if_clean`
-        // consulting `dirty_drafts` (every draft, not just the focused one).
+        // whole-map clear behind `ConfirmAction::DiscardEdits`. `persist()`'s
+        // `Mode::Ide` no-op (S4b) is what stands in for the old interlock now —
+        // see its doc comment.
 
-        // IDE-mode invariant: a module is ALWAYS open. `nav_sel` is IDE mode's
-        // "which module" carrier, so anything that clears it (the editor's Close
-        // button, a Save, a Delete) would otherwise drop the central column into
-        // Config mode's module-detail view inside an IDE-shaped window. Re-open the
-        // tree's current selection instead, which makes Close read as
-        // "discard and reload" — the right meaning when there is nowhere to close to.
-        // Runs AFTER the draft-drop guard above so Close's discard still happens.
+        // IDE-mode invariant: a module is ALWAYS focused. `focused_module` is IDE
+        // mode's "which module" carrier (S4b; `nav_sel` plays no part in it), so
+        // anything that clears it (the editor's Close button, a Save, a Delete)
+        // would otherwise drop the central column into Config mode's module-detail
+        // view inside an IDE-shaped window. Re-open the tree's current selection
+        // instead, which makes Close read as "discard and reload" — the right
+        // meaning when there is nowhere to close to. Runs AFTER the draft-drop
+        // guard above so Close's discard still happens.
         if self.mode == Mode::Ide && self.focused_module().is_none() {
             if let Some(spec) = self.all_specs.get(self.ide_selected) {
                 let id = spec.id();
-                self.open_module_editor(id);
+                self.focus_module(id);
             }
         }
 
@@ -2536,7 +2558,7 @@ impl GuiApp {
         // state the header had already invalidated. This lands at the same point in
         // the frame as Config mode's inline dispatch (the tail of
         // `render_module_editor`, one closure up), so `ensure_draft`, the draft-drop
-        // guard, the IDE reopen invariant and the autosave interlock below all keep
+        // guard, the IDE reopen invariant and the `persist()` call below all keep
         // their existing order.
         if let (Some(info), Some(id)) =
             (ide_header.as_ref(), self.focused_module().map(str::to_string))
@@ -2557,24 +2579,15 @@ impl GuiApp {
 
         // Re-derive the dirty set at the frame tail: the body that just rendered
         // may have made a draft dirty (or hand-reverted one back to disk), and
-        // both the interlock below and `flush_config_writes_if_clean` must see
-        // that, not the state from the top of the frame.
+        // `dirty_drafts` must reflect that for the tree's per-row markers and the
+        // exit-confirmation gate next frame, not the state from the top of this one.
         self.refresh_dirty_drafts();
+        // `persist()` is a no-op under `Mode::Ide` (S4b) — see its doc comment for
+        // why that supersedes the old config-autosave interlock outright, rather
+        // than reproducing its hold-while-dirty/flush-when-clean dance.
         if changed {
-            // Interlock: hold the config write to disk while ANY module editor
-            // draft is dirty (the in-memory config already reflects the edit). The
-            // held write is flushed once every draft is clean (Save / Discard /
-            // manual revert), so no config change is lost.
-            let editor_dirty = !self.dirty_drafts.is_empty();
-            if config_autosave_held(editor_dirty) {
-                self.pending_config_write = true;
-            } else {
-                self.persist();
-            }
+            self.persist();
         }
-        // Release the interlock if the drafts became clean without a Save/Discard
-        // click (e.g. the user hand-reverted the edit back to disk).
-        self.flush_config_writes_if_clean();
     }
 
     /// Render the pending-confirmation modal, if any. Returns true if a
@@ -2854,17 +2867,18 @@ struct EditorHeaderInfo {
 ///
 /// - **Config mode** (`GuiApp::render_module_editor`'s `header_inline` call):
 ///   keeps Save and Close always — Save disabled with a "Fork to edit"
-///   tooltip (the established way Config teaches the fork gesture), and Close
-///   genuinely returns to the previous view (`GuiApp::exit_module_editor` via
-///   `editor_exit_target`), useful regardless of editability.
+///   tooltip (the established way Config teaches the fork gesture); useful
+///   regardless of editability. This whole call site is currently unreachable
+///   (see `GuiApp::focused_module`'s doc), kept alive only by this shared
+///   function.
 /// - **IDE mode** (the `ide_module_header` panel): hides both for a bundled
 ///   module, and labels the Close button **Discard**. Save can never be
 ///   enabled there (nothing to save — the fields
 ///   render disabled). Discard is not "leave the editor": IDE mode's
-///   `nav_sel == NavSel::ModuleEditor(_)` invariant reopens whatever the tree
-///   has selected the next frame (see the guard right after the doc comment
-///   on `Mode::Ide`, and `GuiApp::dispatch_top_action`'s `TopAction::Close`
-///   arm), so in IDE mode Close only ever discards-and-reloads the current
+///   invariant that a module is ALWAYS focused (see the guard right after the
+///   doc comment on `Mode::Ide`, and `GuiApp::dispatch_top_action`'s
+///   `TopAction::Close` arm) reopens whatever the tree has selected the next
+///   frame, so in IDE mode Close only ever discards-and-reloads the current
 ///   selection. On a bundled module there is nothing to discard, so the
 ///   reload is a no-op — the button did nothing observable, which is exactly
 ///   why it is hidden here rather than left disabled.
@@ -2897,14 +2911,17 @@ fn render_editor_header_row(
                 // differs, because only the *meaning* differs (2026-07-19).
                 //
                 // *Why IDE mode says Discard:* `TopAction::Close` calls
-                // `GuiApp::exit_module_editor`, but the `Mode::Ide` invariant at
-                // the top of `GuiApp::ui` ("a module is ALWAYS open") reopens the
-                // tree's selected module on the very next frame. So in IDE mode
-                // this button can never mean "leave" — it can only mean "throw
-                // away my edits and reload the draft from disk". Labelling it
-                // Close there promised an exit that structurally cannot happen.
-                // Config mode keeps Close, where it genuinely returns to the
-                // remembered view via `editor_exit_target`.
+                // `GuiApp::discard_module`, but the `Mode::Ide` invariant at
+                // the top of `GuiApp::ui` ("a module is ALWAYS focused") reopens
+                // the tree's selected module on the very next frame. So in IDE
+                // mode this button can never mean "leave" — it can only mean
+                // "throw away my edits and reload the draft from disk". Labelling
+                // it Close there promised an exit that structurally cannot
+                // happen. Config mode keeps Close (currently unreachable, see
+                // above); its `discard_module` branch drops the focused draft
+                // and clears focus via `GuiApp::close_focused_draft` (S4b) —
+                // there is no "remembered view" to return to any more, because
+                // focusing a module never touched `nav_sel` in the first place.
                 //
                 // Behaviour is untouched on both paths, including the dirty-draft
                 // confirmation `dispatch_top_action` puts in front of it.
@@ -3146,15 +3163,18 @@ impl GuiApp {
             // Close doubles as Discard: warn before dropping unsaved edits.
             TopAction::Close => {
                 if dirty && editable {
-                    // `pending_nav: None` — Close has no destination beyond the
-                    // remembered view `discard_module` already restores.
+                    // `pending_nav: None` — Close has no destination to complete
+                    // beyond what `discard_module` already does on Confirm.
                     self.confirm = Some(ConfirmAction::DiscardEdits { pending_nav: None });
                 } else {
-                    // `discard_module`, not `exit_module_editor`: S4a makes Discard
-                    // a per-module action that re-seeds the focused draft from disk
-                    // and stays put. Exiting would bounce through the `Mode::Ide`
-                    // reopen invariant and could land on a *different* module (the
-                    // tree's selection), which is not what the button says.
+                    // `discard_module`: S4a made Discard a per-module action that
+                    // (in IDE mode) re-seeds the focused draft from disk and stays
+                    // put, rather than leaving for some other view. Calling
+                    // `GuiApp::close_focused_draft` directly here instead would
+                    // clear focus and let the `Mode::Ide` reopen invariant pick
+                    // whatever the tree currently has selected — which could be a
+                    // *different* module than the one this button was on, not
+                    // what the button says.
                     self.discard_module();
                 }
             }
@@ -4572,17 +4592,16 @@ impl GuiApp {
     ///   ever sees.
     ///
     /// *Why `"IDE Mode"` and not the previous game name or an empty chip* when
-    /// no module has resolved yet: `GuiApp::update` sets `nav_sel ==
-    /// ModuleEditor(id)` and then calls `ensure_draft(&id)` several lines
-    /// *before* `render_title_bar` runs later the same frame, so on every
-    /// ordinary frame the draft is already synced to `id` by the time this
-    /// method runs and `editor_header_info` returns `Some`. This fallback is
-    /// only live when `all_specs` is empty (no modules loaded at all — nothing
-    /// to be "the current module") or `nav_sel` briefly isn't `ModuleEditor(_)`
-    /// yet inside IDE mode. A fixed string never flickers between two values on
-    /// a module switch (there is no switch to observe — normal switches never
-    /// take this branch) and is never empty, so the chip never changes size
-    /// because it went blank.
+    /// no module has resolved yet: `GuiApp::update` sets `focused_module`
+    /// and then calls `ensure_draft(&id)` several lines *before*
+    /// `render_title_bar` runs later the same frame, so on every ordinary frame
+    /// the draft is already synced to `id` by the time this method runs and
+    /// `editor_header_info` returns `Some`. This fallback is only live when
+    /// `all_specs` is empty (no modules loaded at all — nothing to be "the
+    /// current module") or focus briefly isn't set yet inside IDE mode. A fixed
+    /// string never flickers between two values on a module switch (there is no
+    /// switch to observe — normal switches never take this branch) and is never
+    /// empty, so the chip never changes size because it went blank.
     fn title_chip_text(&self) -> String {
         match self.mode {
             Mode::Ide => match self.focused_module() {
@@ -4903,13 +4922,13 @@ impl GuiApp {
                                 "IDE preview edit reached the real game config"
                             );
                             // Guard #2: DROP `changed` on the floor, deliberately.
-                            // In Config mode this bool feeds `ui()`'s `changed`,
-                            // which calls `persist()` — and `persist()` maps
-                            // `NavSel::ModuleEditor(_)` (which is what `nav_sel` is
-                            // in IDE mode, always) onto `save_game`. Letting it
-                            // escape this closure would rewrite `games/<appid>.json`
-                            // on every preview toggle. Nothing outside the scratch
-                            // layer changed, so there is nothing to report upward.
+                            // Outside IDE mode this bool feeds `ui()`'s `changed`,
+                            // which calls `persist()`. `persist()` is itself a
+                            // no-op under `Mode::Ide` (S4b) — but letting `changed`
+                            // escape this closure would still be wrong to rely on:
+                            // nothing outside the scratch layer changed, so there
+                            // is nothing to report upward regardless of what
+                            // `persist()` does with it.
                             let _ = changed;
                         });
                     });
@@ -4934,7 +4953,6 @@ impl GuiApp {
                 Some("Editing Global Profile — applies to all games".to_string())
             }
             NavSel::Profile(name) => Some(format!("Editing Profile: {name}")),
-            NavSel::ModuleEditor(_) => None, // handled by the caller; unreachable here
             NavSel::Game(_) => {
                 Some(format!("Editing Game: {}", self.game_config.game.name))
             }
@@ -5020,22 +5038,37 @@ impl GuiApp {
                             }
                         });
                         ui.add_space(6.0);
-                        let field_chain: Vec<Preset> = match &self.nav_sel {
-                            NavSel::Game(_) => {
-                                let mut c = Vec::new();
-                                if let Some(p) = &self.preset {
-                                    c.push(p.clone());
-                                    if let Some(pn) = &p.parent {
-                                        c.extend(collect_parent_presets(&self.paths, pn));
+                        // `write_target == Preview` short-circuits to empty (S4b):
+                        // this body renders both Config mode's fields and the IDE
+                        // preview column's, and the preview's `nav_sel` is no
+                        // longer forced away from `Game`/`Profile` while it
+                        // renders (see `Mode`'s doc comment) — without this guard
+                        // a preview opened from the Global Profile or a Profile
+                        // screen would pick up that screen's chain and start
+                        // showing preset-inheritance depth badges the preview has
+                        // no business drawing (the preview's own layer is the
+                        // scratch `preview_config`/`preview_preset`, not
+                        // whatever `nav_sel` happens to still hold).
+                        let field_chain: Vec<Preset> = if self.write_target == WriteTarget::Preview {
+                            Vec::new()
+                        } else {
+                            match &self.nav_sel {
+                                NavSel::Game(_) => {
+                                    let mut c = Vec::new();
+                                    if let Some(p) = &self.preset {
+                                        c.push(p.clone());
+                                        if let Some(pn) = &p.parent {
+                                            c.extend(collect_parent_presets(&self.paths, pn));
+                                        }
                                     }
+                                    c
                                 }
-                                c
+                                NavSel::Profile(_) => self.editing_preset_buf.as_ref()
+                                    .and_then(|p| p.parent.as_ref())
+                                    .map(|pn| collect_parent_presets(&self.paths, pn))
+                                    .unwrap_or_default(),
+                                _ => Vec::new(),
                             }
-                            NavSel::Profile(_) => self.editing_preset_buf.as_ref()
-                                .and_then(|p| p.parent.as_ref())
-                                .map(|pn| collect_parent_presets(&self.paths, pn))
-                                .unwrap_or_default(),
-                            _ => Vec::new(),
                         };
                         for field in visible {
                             let Some(res) = ext_res.and_then(|e| e.fields.get(&field.variable)) else {
@@ -5628,8 +5661,8 @@ impl GuiApp {
         // [`WriteTarget`] for why `nav_sel` structurally cannot carry this
         // distinction. This is guard #1 of the three that keep a preview toggle
         // off the user's disk: the write never reaches `game_config` at all, so
-        // `persist()`'s `ModuleEditor(_) -> save_game` mapping has nothing new to
-        // write even if it fires.
+        // `persist()` (which is itself a no-op under `Mode::Ide`, S4b) has
+        // nothing new to write even if it fires.
         if self.write_target == WriteTarget::Preview {
             self.preview_config.set_value(a, n, var, value);
             return;
@@ -5643,7 +5676,7 @@ impl GuiApp {
                     p.set_value(a, n, var, value);
                 }
             }
-            NavSel::Game(_) | NavSel::ModuleEditor(_) => {
+            NavSel::Game(_) => {
                 self.game_config.set_value(a, n, var, value);
             }
             // Unreachable, on two legs — both are needed, the render one alone is not
@@ -5655,11 +5688,9 @@ impl GuiApp {
             //   2. Async path: `poll_detect` runs every frame for *every* `nav_sel`,
             //      outside both of those gates, and is the one other caller. It is
             //      barred by `cancel_stale_detect`, which drops a detection whose
-            //      `nav_sel` has changed — and a detection can only ever be started
-            //      from `render_field`, i.e. never under General Settings to begin
-            //      with. Note `NavSel::ModuleEditor` is off the render path for the
-            //      same reason yet stays on the game arm below: it is a real edit
-            //      scope reachable via that async path.
+            //      `nav_sel` (or `mode`, S4b) has changed — and a detection can only
+            //      ever be started from `render_field`, i.e. never under General
+            //      Settings to begin with.
             // *Why a no-op and not the game arm it used to share:* routing a module
             // write here into `games/<appid>.json` would be a wrong-scope write with
             // no visible symptom, and there is no honest scope to pick — General
@@ -5691,7 +5722,7 @@ impl GuiApp {
                     p.unset_value(a, n, var);
                 }
             }
-            NavSel::Game(_) | NavSel::ModuleEditor(_) => {
+            NavSel::Game(_) => {
                 self.game_config.unset_value(a, n, var);
             }
             // Unreachable for the same reason as in `set_scoped` — see the
@@ -5750,32 +5781,47 @@ impl GuiApp {
     /// site) is deliberate: it cannot be defeated by a future `nav_sel` assignment
     /// that forgets to clear, of which there are a dozen-odd across this file.
     ///
-    /// *Why an extra `mode` check alongside `nav`* (2026-07-19, QC on `fd726f7`):
-    /// `nav_sel == NavSel::ModuleEditor(_)` is reachable both from IDE mode (via
-    /// the interactive preview, `write_target == Preview` at start) and from
-    /// Config mode's own module-detail view (via `open_module_editor`,
-    /// `write_target == Scope` throughout) — the two are orthogonal axes (see
-    /// [`Mode`]'s doc comment). A detection started in the IDE preview keeps the
-    /// *same* `NavSel::ModuleEditor(id)` value if the user leaves IDE mode without
-    /// `nav_sel` itself changing, so the `nav` comparison alone can miss that
-    /// transition. Tried comparing `d.target` against the *live* `self.write_target`
-    /// instead of adding a second field — rejected: `write_target` is `Scope` for
-    /// almost the entire frame and only flips to `Preview` for the single
-    /// `with_preview_writes` render call, so by the time this method runs again
-    /// (next frame, or even later in the same frame via `poll_detect`) the live
-    /// value is back to `Scope` regardless of whether the user is still on the
-    /// preview — that comparison would cancel a freshly-started preview detection
-    /// almost immediately, not just a stale one. `mode`, captured once at
-    /// `start_detect` and compared against the live `self.mode`, doesn't have that
-    /// problem: `self.mode` holds `Ide` for the user's whole time in IDE mode, not
-    /// just for one render call. The condition is narrow on purpose — cancel only
-    /// when the detection started in IDE mode and the user is no longer there —
-    /// so a Config-mode detection (which was never routed through the preview) is
-    /// never affected by a `mode` value it didn't capture as `Ide`.
+    /// *Why an extra `mode` check alongside `nav`* (2026-07-19, QC on `fd726f7`;
+    /// widened to a full `d.mode != self.mode` comparison in S4b — see below):
+    /// a detection started in the IDE preview (`write_target == Preview` at
+    /// start) and one started in Config mode (`write_target == Scope`
+    /// throughout) are told apart by the orthogonal [`Mode`] axis, not by
+    /// `nav_sel` — pre-S4b `nav_sel` was forced to `NavSel::ModuleEditor(_)` for
+    /// the whole time IDE mode showed, which happened to make *entering or
+    /// leaving* IDE mode always change `nav_sel` too, so the `nav` comparison
+    /// alone caught most transitions by accident. Tried comparing `d.target`
+    /// against the *live* `self.write_target` instead of adding a second field —
+    /// rejected: `write_target` is `Scope` for almost the entire frame and only
+    /// flips to `Preview` for the single `with_preview_writes` render call, so by
+    /// the time this method runs again (next frame, or even later in the same
+    /// frame via `poll_detect`) the live value is back to `Scope` regardless of
+    /// whether the user is still on the preview — that comparison would cancel a
+    /// freshly-started preview detection almost immediately, not just a stale
+    /// one. `mode`, captured once at `start_detect` and compared against the
+    /// live `self.mode`, doesn't have that problem: `self.mode` holds `Ide` for
+    /// the user's whole time in IDE mode, not just for one render call.
+    ///
+    /// *Why S4b widened this from `d.mode == Ide && self.mode != Ide` to a full
+    /// `d.mode != self.mode`:* the one-directional form relied on `nav_sel`
+    /// covering the *other* direction (Config → IDE) — since entering IDE mode
+    /// used to force `nav_sel` to `NavSel::ModuleEditor(_)`, `d.nav != self.nav_sel`
+    /// caught that transition on its own. S4b made entering/leaving IDE mode
+    /// (`select_nav_category(NavCategory::Ide)`, `GuiApp::focus_module`) stop
+    /// touching `nav_sel` at all — focus lives on `GuiApp::focused_module`
+    /// instead — so a detection started in Config mode while `nav_sel` was, say,
+    /// `Game("42")` and left running while the user switches into IDE mode (which
+    /// doesn't touch `nav_sel`) would otherwise see `d.nav == self.nav_sel` *and*
+    /// the old one-directional `mode` term false, and go uncancelled — 3 seconds
+    /// later it would write into `game_config` (and, until `persist()`'s own
+    /// `Mode::Ide` guard suppresses the save, feed `changed`) while the user is
+    /// looking at an unrelated module's manifest editor. The full symmetric
+    /// comparison closes both directions the same way the `nav` comparison
+    /// always has for same-mode navigation.
     fn cancel_stale_detect(&mut self) {
-        let stale = self.detect.as_ref().is_some_and(|d| {
-            d.nav != self.nav_sel || (d.mode == Mode::Ide && self.mode != Mode::Ide)
-        });
+        let stale = self
+            .detect
+            .as_ref()
+            .is_some_and(|d| d.nav != self.nav_sel || d.mode != self.mode);
         if stale {
             self.detect = None;
         }
@@ -5831,10 +5877,9 @@ impl GuiApp {
                 .insert(format!("{}::{ext_id}::{var}", self.buffer_scope_tag()), c);
             self.write_target = prev;
             // Report "changed" only for a real scope. This bool feeds `ui()`'s
-            // `changed`, which calls `persist()` — and `persist()` maps IDE mode's
-            // `NavSel::ModuleEditor(_)` onto `save_game`. A preview detection
-            // changed nothing persistable, so saying so would rewrite
-            // `games/<appid>.json` for a scratch edit. `ctx.request_repaint()`
+            // `changed`, which calls `persist()`. A preview detection changed
+            // nothing persistable, so saying so would be wrong regardless of
+            // `persist()`'s own `Mode::Ide` no-op (S4b) — `ctx.request_repaint()`
             // above already gets the new value on screen. Same reasoning as
             // guard #2 at the preview render site.
             return target == WriteTarget::Scope;
@@ -6315,7 +6360,7 @@ impl GuiApp {
             }
         }
         if let Some(id) = ide_open {
-            self.open_module_editor(id);
+            self.focus_module(id);
         }
         if open_create {
             self.open_create_dialog();
@@ -6409,30 +6454,44 @@ impl GuiApp {
     }
 
     /// Apply a click on the GENERAL category box.
+    ///
+    /// *`nav_sel` is untouched by IDE Mode entry/exit as of S4b* — see [`Mode`]'s
+    /// doc comment. Focus is [`GuiApp::focused_module`]'s job; `nav_sel` here is
+    /// purely about which of the two *Config*-mode destinations (General
+    /// Settings vs. the ambient game/profile/global tree) a click should land on,
+    /// and it is only ever assigned in the two Config-mode arms below.
     fn select_nav_category(&mut self, cat: NavCategory) {
         match cat {
             NavCategory::GeneralSettings => {
                 self.mode = Mode::Config;
+                // Clear focus so a later re-entry into IDE mode re-opens through
+                // the normal invariant rather than finding a stale focus. The
+                // draft itself is deliberately left in `drafts` — pre-S4b,
+                // overwriting `nav_sel` here had exactly this "unfocus but don't
+                // drop" effect as a side effect of focus being read *from*
+                // `nav_sel`; this reproduces it explicitly now that the two are
+                // separate.
+                self.focused_module = None;
                 self.nav_sel = NavSel::GeneralSettings;
             }
             NavCategory::GamesProfiles => {
                 self.mode = Mode::Config;
-                // Coming back from IDE mode `nav_sel` is still `ModuleEditor(_)`,
-                // which is not a config destination. `exit_module_editor` restores
-                // exactly what Close would (the remembered view, else the ambient
-                // game) and drops the draft. Reaching here with a *dirty* draft
-                // means the user already confirmed the discard —
-                // `render_nav_panel` raises `ConfirmAction::DiscardEdits` before
-                // this method is ever called in that case.
-                if matches!(self.nav_sel, NavSel::ModuleEditor(_)) {
-                    self.exit_module_editor();
+                // Coming back from IDE mode with a module focused: drop that ONE
+                // draft (clean — dropping it loses nothing; dirty means the user
+                // already confirmed the discard, since `render_nav_panel` raises
+                // `ConfirmAction::DiscardEdits` before this method is ever called
+                // in that case) and clear focus. Every other open draft is left
+                // exactly alone. `nav_sel` needs no restoring — S4b never moved it
+                // away from a real config scope in the first place.
+                if self.focused_module.is_some() {
+                    self.close_focused_draft();
                 }
                 // Coming back from General Settings, `nav_sel` is still
                 // `GeneralSettings` — which is the box's *other* category. Left
                 // alone, the box would snap straight back to "General Settings"
                 // (`is_general` is derived from `nav_sel`) and the tree would
                 // stay empty, making the click look dead. Land on the ambient
-                // game, the same destination `editor_exit_target` defaults to.
+                // game instead.
                 if matches!(self.nav_sel, NavSel::GeneralSettings) {
                     self.nav_sel = NavSel::Game(self.appid.clone());
                     self.nav_name_buf = self.game_config.game.name.clone();
@@ -6445,10 +6504,13 @@ impl GuiApp {
                 // IDE mode always offers the current set — the list is a directory
                 // scan, run once per mode entry, not per frame.
                 self.refresh_games();
-                // IDE mode is only coherent with a module open — `nav_sel ==
-                // ModuleEditor(_)` is the invariant every IDE column relies on.
+                // IDE mode is only coherent with a module focused — `focused_module`
+                // being `Some` is the invariant every IDE column relies on.
+                // `nav_sel` is deliberately left untouched (S4b): it still names
+                // whichever real config scope was selected before entering IDE
+                // mode, and nothing about focusing a module needs to change that.
                 if let Some(spec) = self.all_specs.get(self.ide_selected) {
-                    self.open_module_editor(spec.id());
+                    self.focus_module(spec.id());
                 }
             }
         }
@@ -6489,8 +6551,8 @@ impl GuiApp {
         // so inheritance/edit badges have no scope to describe.
         self.render_ext_tree(ui, &specs, &dirs, &is_folder_ext, &mut selected, false, &dirty_flags);
         self.ide_selected = selected;
-        // `leaf` writes `selected` directly and never calls `open_module_editor`, so
-        // the tree click has to be turned into an editor open here, after the render.
+        // `leaf` writes `selected` directly and never calls `focus_module`, so the
+        // tree click has to be turned into a focus change here, after the render.
         if selected != before {
             specs.get(selected).map(|s| s.id())
         } else {
@@ -6820,7 +6882,7 @@ impl GuiApp {
                 self.nav_name_buf = self.game_config.game.name.clone();
                 self.nav_appid_buf = appid;
             }
-            NavSel::GeneralSettings | NavSel::GlobalSettings | NavSel::ModuleEditor(_) => {}
+            NavSel::GeneralSettings | NavSel::GlobalSettings => {}
         }
     }
 
@@ -6890,7 +6952,7 @@ impl GuiApp {
         }
 
         match self.nav_sel.clone() {
-            NavSel::GeneralSettings | NavSel::GlobalSettings | NavSel::ModuleEditor(_) => {
+            NavSel::GeneralSettings | NavSel::GlobalSettings => {
                 // Settings for these live in the central panel.
             }
 
@@ -7139,7 +7201,7 @@ impl GuiApp {
                     let _ = self.paths.save_preset(p);
                 }
             }
-            NavSel::Game(_) | NavSel::GeneralSettings | NavSel::ModuleEditor(_) => {
+            NavSel::Game(_) | NavSel::GeneralSettings => {
                 self.game_config.config.modules.authors.clear();
                 self.persist();
             }
@@ -7314,7 +7376,15 @@ impl GuiApp {
                 .unwrap_or_default()
         } else { Vec::new() };
         // Game context: [direct_preset, its_parent, grandparent, …]
-        let game_preset_chain: Vec<Preset> = if matches!(self.nav_sel, NavSel::Game(_) | NavSel::ModuleEditor(_)) {
+        //
+        // *Why this can't over-read in IDE mode (S4b):* the IDE tree always calls
+        // this with `show_inheritance = false`, so `icon_lists` short-circuits to
+        // empty below and neither this chain nor `profile_parent_chain` above nor
+        // the icon `match` further down is ever consulted for it — dead
+        // computation, not dead code with a visible effect. `nav_sel` no longer
+        // being forced to a module-editor value while IDE mode renders (see
+        // `Mode`'s doc comment) therefore can't leak into the tree's badges.
+        let game_preset_chain: Vec<Preset> = if matches!(self.nav_sel, NavSel::Game(_)) {
             let mut chain = Vec::new();
             if let Some(p) = &self.preset {
                 chain.push(p.clone());
@@ -7376,9 +7446,7 @@ impl GuiApp {
             };
             let mut icons: Vec<(&'static str, Color32)> = Vec::new();
             match nav_sel {
-                // ModuleEditor is a read-only view, not an edit scope — show the
-                // same inheritance icons as the ambient game.
-                NavSel::Game(_) | NavSel::ModuleEditor(_) => {
+                NavSel::Game(_) => {
                     if has_in(global_modules) { icons.push((ICON_INHERIT, COL_GLOBAL)); }
                     push_chain_icons(&mut icons, &game_preset_chain);
                     if has_in(game_modules) { icons.push((ICON_EDIT, COL_GAME)); }
@@ -8280,26 +8348,6 @@ mod tests {
     }
 
     #[test]
-    fn editor_exit_target_restores_prior_view_or_falls_back_to_game() {
-        // A real prior view is restored verbatim.
-        assert_eq!(
-            editor_exit_target(Some(NavSel::GlobalSettings), "42"),
-            NavSel::GlobalSettings
-        );
-        assert_eq!(
-            editor_exit_target(Some(NavSel::Profile("Perf".into())), "42"),
-            NavSel::Profile("Perf".into())
-        );
-        // No stored view → ambient game.
-        assert_eq!(editor_exit_target(None, "42"), NavSel::Game("42".into()));
-        // Never land back on the editor (would be a stuck selection) → ambient game.
-        assert_eq!(
-            editor_exit_target(Some(NavSel::ModuleEditor("A::B::1.0".into())), "42"),
-            NavSel::Game("42".into())
-        );
-    }
-
-    #[test]
     fn cleanup_drops_undeclared_vars_and_prunes_empties() {
         // Ritze/Core has a live `kbd_layout` and a stale `xkb_de`; the whole
         // Other/Gone module is gone.
@@ -8376,26 +8424,29 @@ mod tests {
     }
 
     #[test]
-    fn clean_draft_is_not_saveable_and_does_not_hold_autosave() {
+    fn clean_draft_is_not_saveable_and_is_not_dirty() {
         let draft = draft_from(sample_manifest(), true);
-        // A freshly-loaded draft equals disk: not dirty → Save disabled, interlock off.
+        // A freshly-loaded draft equals disk: not dirty → Save disabled. This used
+        // to also assert `!config_autosave_held(draft.dirty())` — that predicate
+        // and the interlock it fed were deleted in S4b (`persist()` is now a
+        // no-op under `Mode::Ide` instead), but "a clean draft reports clean" is
+        // still worth asserting on its own.
         assert!(!draft.dirty());
         assert!(!draft.save_enabled());
-        assert!(!config_autosave_held(draft.dirty()));
     }
 
     #[test]
-    fn valid_dirty_editable_draft_is_saveable_and_holds_autosave() {
+    fn valid_dirty_editable_draft_is_saveable_and_reverts_to_clean() {
         let mut draft = draft_from(sample_manifest(), true);
         draft.ext.meta.description = Some("now edited".to_string());
         assert!(draft.dirty());
         assert!(draft.save_enabled());
-        // Interlock engages while the draft is dirty…
-        assert!(config_autosave_held(draft.dirty()));
-        // …and releases once the edit is reverted to match disk.
+        // …and reports clean again once the edit is reverted to match disk. This
+        // used to also assert the (now-deleted) `config_autosave_held` predicate
+        // engaging/releasing across the same transition — see the note on
+        // `clean_draft_is_not_saveable_and_is_not_dirty`.
         draft.ext.meta.description = None;
         assert!(!draft.dirty());
-        assert!(!config_autosave_held(draft.dirty()));
     }
 
     #[test]
@@ -8468,7 +8519,6 @@ mod tests {
         assert!(draft.has_pending_identity());
         assert!(!draft.dirty(), "identity edits must not dirty the snapshot");
         assert!(!draft.save_enabled(), "identity edits must not enable Save");
-        assert!(!config_autosave_held(draft.dirty()), "identity edits must not hold autosave");
         // The staged variable rename surfaces as an old→new entry…
         assert_eq!(
             draft.changed_var_renames(),
@@ -8602,6 +8652,7 @@ mod tests {
             detect: None,
             nav_sel: NavSel::Game("42".to_string()),
             mode: Mode::Config,
+            focused_module: None,
             write_target: WriteTarget::Scope,
             preview_config: GameConfig::new("__preview__", "None"),
             preview_preset: None,
@@ -8622,11 +8673,9 @@ mod tests {
             logo: None,
             drafts: IndexMap::new(),
             dirty_drafts: std::collections::HashSet::new(),
-            pending_config_write: false,
             module_dialog: None,
             delete_module_purge: false,
             carryover_report: None,
-            editor_return: None,
             icon_cache: IconCenterCache::new(),
         }
     }
@@ -8884,7 +8933,7 @@ mod tests {
             .identity
             .name = "Alpha".to_string();
 
-        app.nav_sel = NavSel::ModuleEditor(beta_id);
+        app.focused_module = Some(beta_id);
         app.refresh_identity_state();
 
         assert_eq!(
@@ -8902,7 +8951,7 @@ mod tests {
         let mut app = test_app();
         insert_draft(&mut app, "Ritze", "Alpha", "/x/alpha.json");
         let beta_id = insert_draft(&mut app, "Ritze", "Beta", "/x/beta.json");
-        app.nav_sel = NavSel::ModuleEditor(beta_id);
+        app.focused_module = Some(beta_id);
 
         // No pending change at all: the draft's own identity must not flag.
         app.refresh_identity_state();
@@ -8936,13 +8985,13 @@ mod tests {
             .description = Some("unsaved work".to_string());
 
         // Focus Beta. `ensure_draft` for Beta must not disturb Alpha's entry.
-        app.nav_sel = NavSel::ModuleEditor(beta_id);
+        app.focused_module = Some(beta_id);
         let focused = app.focused_module().unwrap().to_owned();
         app.ensure_draft(&focused);
         assert_eq!(app.drafts.len(), 2, "switching focus must not evict a draft");
 
         // Focus back: the edit is still there.
-        app.nav_sel = NavSel::ModuleEditor(alpha_id);
+        app.focused_module = Some(alpha_id);
         assert_eq!(
             app.draft().unwrap().ext.meta.description.as_deref(),
             Some("unsaved work")
@@ -8967,7 +9016,7 @@ mod tests {
             .meta
             .description = Some("unsaved work".to_string());
         // `all_specs` is empty in `test_app`, so Alpha is an orphan by construction.
-        app.nav_sel = NavSel::ModuleEditor(alpha_id.clone());
+        app.focused_module = Some(alpha_id.clone());
 
         app.ensure_draft(&alpha_id);
         assert_eq!(app.drafts.len(), 1, "an orphaned draft must never be dropped");
@@ -9036,7 +9085,7 @@ mod tests {
             app.drafts.get_mut(&PathBuf::from(p)).unwrap().ext.meta.version =
                 "9.9".to_string();
         }
-        app.nav_sel = NavSel::ModuleEditor(beta_id);
+        app.focused_module = Some(beta_id);
 
         app.apply_discard_edits(None);
 
@@ -9047,40 +9096,60 @@ mod tests {
         assert_eq!(app.dirty_module_names(), vec!["Ritze::Alpha".to_string()]);
     }
 
-    /// Confirm on a tab-click prompt must do BOTH halves: drop the draft *and*
+    /// Confirm on a tab-click prompt must do BOTH halves: drop every draft *and*
     /// complete the navigation the user clicked. Dropping without navigating would
     /// lose the edits and go nowhere — the worst of both.
+    ///
+    /// Rewritten for S4b: `editor_return` is gone, and `nav_sel` is no longer
+    /// what carries "which module is focused" (that's `focused_module` now), so
+    /// there is nothing to "restore" — the destination comes entirely from
+    /// `select_nav_category(cat)`, exercised here exactly as the real click path
+    /// exercises it.
     #[test]
     fn confirming_a_tab_click_discards_and_completes_the_switch() {
         let mut app = test_app();
+        app.mode = Mode::Ide;
         let mut draft = draft_from(sample_manifest(), true);
         draft.ext.meta.version = "9.9".to_string();
         app.drafts.insert(draft.manifest.clone(), draft);
-        app.nav_sel = NavSel::ModuleEditor("Ritze::Sample::1.0".to_string());
-        // Opened from the Global Profile screen, so that is where Close would land.
-        app.editor_return = Some(NavSel::GlobalSettings);
+        app.focused_module = Some("Ritze::Sample::1.0".to_string());
 
         app.apply_discard_edits(Some(NavCategory::GeneralSettings));
 
         assert!(app.drafts.is_empty(), "the confirmed discard must drop every draft");
+        assert_eq!(app.mode, Mode::Config, "the click must still be applied");
         assert_eq!(app.nav_sel, NavSel::GeneralSettings, "the click must still be applied");
+        assert_eq!(app.focused_module, None, "focus must be cleared along with the mode switch");
     }
 
-    /// Confirm on the *Close* prompt (`pending_nav: None`) keeps its old meaning:
-    /// discard and return to the remembered view, not to a category tab.
+    /// Confirm on the *Close* prompt (`pending_nav: None`) discards the focused
+    /// draft and clears focus.
+    ///
+    /// Rewritten for S4b: the pre-S4b version of this test asserted `nav_sel`
+    /// was restored to a "remembered view" via `editor_return`. That mechanism
+    /// is gone — focusing a module never moves `nav_sel` in the first place (see
+    /// `Mode`'s doc comment), so there is nothing to restore. What actually
+    /// matters now, and is still true, is that `nav_sel` is left **exactly** as
+    /// it was — this asserts that directly instead of asserting a restore that
+    /// no longer happens.
     #[test]
-    fn confirming_close_discards_to_the_remembered_view() {
+    fn confirming_close_discards_and_clears_focus_leaving_nav_sel_untouched() {
         let mut app = test_app();
         let mut draft = draft_from(sample_manifest(), true);
         draft.ext.meta.version = "9.9".to_string();
         app.drafts.insert(draft.manifest.clone(), draft);
-        app.nav_sel = NavSel::ModuleEditor("Ritze::Sample::1.0".to_string());
-        app.editor_return = Some(NavSel::Profile("Handhelds".to_string()));
+        app.focused_module = Some("Ritze::Sample::1.0".to_string());
+        app.nav_sel = NavSel::Profile("Handhelds".to_string());
 
         app.apply_discard_edits(None);
 
         assert!(app.drafts.is_empty());
-        assert_eq!(app.nav_sel, NavSel::Profile("Handhelds".to_string()));
+        assert_eq!(app.focused_module, None, "focus must be cleared");
+        assert_eq!(
+            app.nav_sel,
+            NavSel::Profile("Handhelds".to_string()),
+            "nav_sel must be left exactly as it was — nothing to restore it to any more"
+        );
     }
 
     // ── Which modules a screen lists (2026-07-19) ───────────────────────────

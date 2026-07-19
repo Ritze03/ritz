@@ -350,6 +350,102 @@ renames in the scratch preview."
 
 ## Applied
 
+### 2026-07-19 — S4b: delete `NavSel::ModuleEditor` and its machinery
+
+Pure refactor, zero intended behaviour change. Deleted the enum variant S4a's "Deliberately
+deferred to S4b" note called out, plus everything that existed only to serve it. Behaviour,
+symbols and full rationale live in
+[`../features/settings-gui.md`](../features/settings-gui.md) (search that file for `S4b`);
+only what this changes about *the plan/state model* and what turned out non-mechanical are
+recorded here.
+
+**Deleted:** `NavSel::ModuleEditor(String)` (and its match arms in `cur_specs_filter`,
+`resolve_specs_for_editing`, `persist`, `set_scoped`/`unset_scoped`, `render_ext_tree` ×2,
+`reselect_current`, `render_nav_settings`, `clear_current_settings`,
+`render_module_detail_header`, `buffer_scope_tag`); `editor_return: Option<NavSel>`;
+`editor_exit_target` (pure fn); `config_autosave_held` (pure fn); `pending_config_write:
+bool`; `flush_config_writes_if_clean`. **Renamed:** `open_module_editor` →
+`GuiApp::focus_module` (no longer touches `nav_sel` at all — see below);
+`exit_module_editor` → `GuiApp::close_focused_draft` (drops the focused draft and clears
+focus; no "prior view" to restore any more). **Added:** `GuiApp::focused_module:
+Option<String>`, the field `GuiApp::focused_module()` (the accessor S4a introduced) now
+reads instead of `nav_sel`.
+
+**The state-model payoff, realized:** `nav_sel` and "which module has focus" are now
+genuinely on separate axes. Entering IDE Mode (`select_nav_category(NavCategory::Ide)`),
+switching focus within it (`focus_module`), Fork/Create/Rename, Save, and Discard all leave
+`nav_sel` completely alone — it keeps naming whichever real config scope (General / Global /
+Profile / Game) was last selected, for the entire duration of an IDE session. The one
+deliberate exception is `delete_module`, which still resets `nav_sel` to the ambient game
+(alongside clearing focus) — reproducing, on purpose, the same "give up and land on the
+ambient game" outcome the pre-S4b code got as a side effect of overwriting `nav_sel`.
+
+**Found during S4b, not anticipated by the plan or S4a's notes — two live correctness bugs
+the refactor would otherwise have introduced**, both because code inside
+`render_module_settings_body` (shared by Config mode's fields and the IDE preview column)
+read `self.nav_sel` directly, relying on the old invariant that it was always
+`ModuleEditor(_)` — and therefore always fell through to a `_` catch-all — while the IDE
+preview rendered. Once IDE Mode stopped forcing `nav_sel` to a module-editor value, `nav_sel`
+could be `GlobalSettings` or `Profile(_)` (whatever screen was active before entering IDE
+Mode) **for the entire time the preview renders**, so any code path that switched on
+`nav_sel` without first checking `write_target` would silently start behaving differently
+depending on which screen the user came from:
+
+- **`GuiApp::editing_scope_color`** (picks the scope-tint colour for a value set at the
+  editing layer) fell to `_ => COL_GAME` under old `nav_sel`. Without a
+  `write_target == Preview` guard, a value set in the preview after entering IDE Mode from
+  Global Profile or a Profile screen would have painted **red or green instead of blue** —
+  a real, user-visible colour regression with no code path exercising it before this stage
+  (the invariant that prevented it literally becomes false the moment `NavSel::ModuleEditor`
+  is deleted).
+- **The `field_chain` computation inside `render_module_settings_body`** (drives the
+  preset-inheritance depth badge on a field) matched on `nav_sel` with `Game(_)`/`Profile(_)`
+  arms and a `_ => Vec::new()` fallback. Same failure shape: without the same
+  `write_target == Preview` guard, the preview would start drawing preset-depth badges that
+  describe a screen it isn't showing.
+
+Both are fixed by checking `self.write_target == WriteTarget::Preview` first (mirroring the
+guard `buffer_scope_tag`/`set_scoped`/`unset_scoped`/`current_scope_value` already had) —
+provably equivalent to the old always-`ModuleEditor(_)` behaviour, since the IDE preview's
+only call to `render_module_settings_body` always runs inside `with_preview_writes`. *Lesson
+for future stages:* "reads `nav_sel` directly" was not on the enumerated match-arm list
+because these two sites don't mention `NavSel::ModuleEditor` at all — they rely on it being
+unreachable by omission (a bare `_`/wildcard arm). Grepping for the variant name would have
+missed both; only tracing every `self.nav_sel` read against "is this reachable while
+`write_target == Preview`" found them.
+
+**A third, subtler fix in the same family:** `Detect::mode` (added earlier specifically to
+catch "started in IDE preview, user left IDE mode" since `nav_sel` alone didn't always
+change on that transition) only compared `d.mode == Ide && self.mode != Ide` — one direction.
+That was sufficient pre-S4b because entering IDE Mode *also* always changed `nav_sel` to
+`ModuleEditor(_)`, so `cancel_stale_detect`'s `nav` comparison covered the *other* direction
+(Config → IDE) for free. S4b removes that free coverage: a detection started in Config mode
+while `nav_sel` was, say, `Game("42")`, left running while the user switches into IDE Mode
+(which no longer touches `nav_sel`), would see `d.nav == self.nav_sel` **and** the
+one-directional `mode` term both false — uncancelled — and write into `game_config` days
+after the user moved on to an unrelated module's manifest. Widened to a full
+`d.mode != self.mode` comparison, symmetric in both directions.
+
+**Test changes** (46 → 45 app tests): `editor_exit_target_restores_prior_view_or_falls_back_to_game`
+deleted outright (the function it tested no longer exists). The three
+`config_autosave_held(draft.dirty())` assertions (across two tests) were rewritten as plain
+`draft.dirty()` assertions — same fact, minus the wrapper — per this doc's own instruction
+not to delete a test just because it stops compiling. Two multi-draft tests
+(`confirming_a_tab_click_discards_and_completes_the_switch`,
+`confirming_close_discards_and_clears_focus_leaving_nav_sel_untouched`) were rewritten:
+their old assertions checked `nav_sel` being restored to a value stashed in `editor_return`,
+a mechanism S4b deletes outright; the rewrites assert the property that actually holds now
+— `nav_sel` is left **exactly** as it was, and `focused_module` is cleared. Every other
+`NavSel::ModuleEditor(_)`-touching test needed only a mechanical field swap
+(`app.nav_sel = NavSel::ModuleEditor(id)` → `app.focused_module = Some(id)`).
+
+**Confirmed still holding, not re-litigated:** the "Config-mode editor path was already
+dead" finding from S4a — `render_module_editor(.., header_inline = true)` is unreachable
+because `focused_module()` (now reading the new field) is still only ever `Some` while
+`Mode::Ide`, since nothing outside `focus_module`/`select_nav_category(Ide)`/
+Fork/Create/Rename ever sets it, and all of those run only from inside an
+already-`Mode::Ide` session.
+
 ### 2026-07-19 — S4a: multi-draft (`drafts: IndexMap<PathBuf, ModuleDraft>`)
 
 Unsaved manifest edits now survive switching modules. Behaviour, symbols and full
