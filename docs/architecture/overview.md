@@ -24,6 +24,15 @@ The workspace is two crates:
   loop, the settings GUI, the splash, process supervision, shell hooks, runtime
   backends, and embedded-resource export (`crates/ritz-app/src/main.rs`).
 
+*GUI toolkit version:* `eframe`/`egui` **0.33** (bumped from 0.29 on 2026-07-20).
+**0.33 is a deliberate ceiling, not the latest release** — eframe 0.34+ requires rustc
+1.92 and this project builds on 1.90, so 0.34/0.35 are hard-blocked until the toolchain
+moves. See [STYLING-GUIDE.md](../ui/STYLING-GUIDE.md) for the two rendering changes the
+0.31 step introduced (`Rounding` → `CornerRadius`, explicit `StrokeKind`), and
+[settings-gui.md](../features/settings-gui.md)'s close-guard section for why the upgrade
+did **not** fix the Wayland close-request bug (issue #40) and must not be re-attempted
+for that reason.
+
 *Why two crates:* the value of ritz is the config→launch-command transformation, and
 that logic is worth testing without spinning up a window or a real process. Keeping it in
 a UI-free, thread-free crate means the entire pipeline — schema, conditions, resolution,

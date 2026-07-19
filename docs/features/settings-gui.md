@@ -474,7 +474,7 @@ the band swap on `Mode`.
     border from `theme::selection_tint(accent)` — the same ~16%/~42% alpha formula
     `SEL`/`SELBD` are hand-expanded from (`selection_tint(ACCENT)` reproduces them
     byte-for-byte, pinned by a unit test), rounded on **all four corners** at the same
-    `8.0` radius every other rounded container in the app uses (`Rounding::same(8.0)`,
+    `8` radius every other rounded container in the app uses (`CornerRadius::same(8)`,
     per [STYLING-GUIDE.md](../ui/STYLING-GUIDE.md)); and ink — glyph in `accent`, label
     `TEXT`. Unselected stays identical across all three tabs — transparent (a `HOV` wash
     on hover only), glyph `FAINT`, label `DIM` — so exactly one tab reads as "live" and
@@ -1085,6 +1085,25 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
     `request_app_close` raises (including for a rename-only draft), what
     `apply_discard_edits(ExitApp)` does to drafts/outcome/`pending_close`, Cancel leaving
     the app usable, and the re-entrancy rule.
+  - **The whole guard is dead code under Hyprland/wlroots** (issue #40). The chain above
+    starts at `ctx.input(|i| i.viewport().close_requested())`, and on this compositor that
+    flag never becomes true — the xdg `close` request never reaches the app, verified with
+    a probe and reproduced in a minimal eframe app. Everything downstream is therefore
+    correct and unreachable there; on X11 and on compositors that do send the request it
+    works as documented.
+
+    *Why the 0.29 → 0.33 eframe upgrade did not fix it* (2026-07-20): it cannot, and this
+    was checked rather than assumed. `WindowEvent::CloseRequested` originates in winit's
+    wayland backend, and **eframe 0.29.1 and 0.33.3 resolve to the identical winit
+    0.30.13** — the windowing layer is not merely similar but the same code. `egui-winit`'s
+    translation of that event into the `close_requested()` flag is also character-identical
+    between the two versions. eframe 0.33 *does* carry a "Properly end winit event loop"
+    change (`EventResult::CloseRequested` now destroys windows while the loop is still
+    running, `eframe/src/native/run.rs`), but that governs the **shutdown sequence after a
+    close is already decided** — it may cure a window lingering after
+    `ViewportCommand::Close`, and does nothing for a close request that never arrives.
+    **Do not re-attempt this by bumping egui again**; the fix has to come from winit or the
+    compositor, or from a non-xdg close path.
 - **Locked trees while editing** — the nav-away guard above is now a *backstop*, not the
   normal path: while a draft exists the **MODULES tree** is wrapped
   in `ui.add_enabled_ui(module_draft.is_none(), …)`, so it greys out and can't swap the

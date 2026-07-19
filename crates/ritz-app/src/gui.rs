@@ -157,11 +157,11 @@ const NAV_W: f32 = 280.0;
 /// [`GuiApp::editor_header_info`] returns `None` (a module switch, before
 /// `ensure_draft` catches up) — an auto-sized band would collapse to nothing and
 /// snap back, which reads as a flicker.
-const IDE_HEADER_H: f32 = IDE_HEADER_MARGIN.top
+const IDE_HEADER_H: f32 = IDE_HEADER_MARGIN.top as f32
     + IDE_HEADER_ROW_H
     + 7.0
     + IDE_HEADER_DESC_H
-    + IDE_HEADER_MARGIN.bottom;
+    + IDE_HEADER_MARGIN.bottom as f32;
 
 /// Height of every **bottom band** in the window, in points: the nav column's
 /// footer (`nav_settings`), Config mode's modules-column footer
@@ -185,6 +185,20 @@ const IDE_HEADER_H: f32 = IDE_HEADER_MARGIN.top
 /// grows). The constant is what they opt out *of*, so it still belongs here.
 const BOTTOM_BAND_H: f32 = 198.0;
 
+/// The scroll sources every [`egui::ScrollArea`] in this crate uses, with
+/// drag-to-scroll gated on `touch_mode`.
+///
+/// *Why a helper* (2026-07-20, eframe 0.33 upgrade): egui 0.33 deprecated
+/// `ScrollArea::drag_to_scroll(bool)` in favour of `scroll_source(ScrollSource)`,
+/// which takes all three sources at once. The old call set **only** the `drag`
+/// flag and left `scroll_bar` / `mouse_wheel` at their defaults, so the faithful
+/// replacement is a struct-update from `ScrollSource::default()` rather than a
+/// hand-written literal — spelling out all three fields at the six call sites
+/// would be six chances to silently drop the mouse wheel.
+fn scroll_source(drag: bool) -> egui::scroll_area::ScrollSource {
+    egui::scroll_area::ScrollSource { drag, ..Default::default() }
+}
+
 /// The `ide_module_header` panel frame's inner margin.
 ///
 /// *Why a shared constant and not a literal at the panel* (2026-07-19, issue
@@ -201,11 +215,16 @@ const BOTTOM_BAND_H: f32 = 198.0;
 /// See [`IDE_HEADER_H`]'s *Why 8/12 and not 14/10 (unequal on purpose)* for why
 /// top and bottom are deliberately different numbers, and why `left` is 14 while
 /// `right` is 16.
+/// *Why the terms are bare integers:* `egui::Margin` switched from `f32` to `i8`
+/// in egui 0.31. Every term here was already a whole number, so the change is
+/// lossless and [`IDE_HEADER_H`] still sums to exactly 70 — but note that a
+/// fractional margin is no longer expressible, so a future retune has to land on
+/// a whole point.
 const IDE_HEADER_MARGIN: egui::Margin = egui::Margin {
-    left: 14.0,
-    right: 16.0,
-    top: 8.0,
-    bottom: 11.0,
+    left: 14,
+    right: 16,
+    top: 8,
+    bottom: 11,
 };
 
 /// Height of the header band's first row (name/version/author + action buttons),
@@ -3262,7 +3281,7 @@ impl GuiApp {
         egui::SidePanel::left("nav")
             .exact_width(NAV_W)
             .resizable(false)
-            .frame(egui::Frame::none().fill(theme::PANEL))
+            .frame(egui::Frame::NONE.fill(theme::PANEL))
             .show(ctx, |ui| {
                 self.render_nav_panel(ui);
             });
@@ -3278,13 +3297,13 @@ impl GuiApp {
         egui::SidePanel::left("ext_list")
             .exact_width(NAV_W)
             .resizable(false)
-            .frame(egui::Frame::none().fill(theme::PANEL))
+            .frame(egui::Frame::NONE.fill(theme::PANEL))
             .show(ctx, |ui| {
             egui::TopBottomPanel::top("ext_header")
                 .show_separator_line(false)
-                .frame(egui::Frame::none()
+                .frame(egui::Frame::NONE
                     .fill(theme::PANEL)
-                    .inner_margin(egui::Margin { left: 16.0, right: 16.0, top: 14.0, bottom: 8.0 }))
+                    .inner_margin(egui::Margin { left: 16, right: 16, top: 14, bottom: 8 }))
                 .show_inside(ui, |ui| {
                     // Create-module now lives only in IDE Mode's nav footer
                     // (`render_ide_nav_footer`'s "+ New Module" button, which shares
@@ -3298,19 +3317,19 @@ impl GuiApp {
             egui::TopBottomPanel::bottom("group_toggle")
                 .exact_height(BOTTOM_BAND_H)
                 .show_separator_line(true)
-                .frame(egui::Frame::none()
+                .frame(egui::Frame::NONE
                     .fill(theme::PANEL2)
-                    .inner_margin(egui::Margin::same(14.0)))
+                    .inner_margin(egui::Margin::same(14)))
                 .show_inside(ui, |ui| {
                     self.render_modules_footer(ui);
                 });
             egui::CentralPanel::default()
-                .frame(egui::Frame::none()
+                .frame(egui::Frame::NONE
                     .fill(theme::PANEL)
-                    .inner_margin(egui::Margin { left: 8.0, right: 18.0, top: 0.0, bottom: 0.0 }))
+                    .inner_margin(egui::Margin { left: 8, right: 18, top: 0, bottom: 0 }))
                 .show_inside(ui, |ui| {
                     egui::ScrollArea::vertical()
-                        .drag_to_scroll(self.general_config.touch_mode)
+                        .scroll_source(scroll_source(self.general_config.touch_mode))
                         .show(ui, |ui| {
                             ui.add_space(4.0);
                             self.render_ext_errors_banner(ui);
@@ -3515,7 +3534,7 @@ impl GuiApp {
                     // continuous surface. `PANEL2` (the 198px bands' fill) made it
                     // read as a separate toolbar sitting on top of the editor —
                     // tried, seen, rejected.
-                    .frame(egui::Frame::none()
+                    .frame(egui::Frame::NONE
                         .fill(theme::PANEL)
                         // top 8, left 14, right 16, bottom 12 — top and bottom
                         // are deliberately unequal (not a typo), and the numbers
@@ -3567,9 +3586,9 @@ impl GuiApp {
             egui::TopBottomPanel::bottom("ide_editor_band")
                 .exact_height(BOTTOM_BAND_H)
                 .show_separator_line(true)
-                .frame(egui::Frame::none()
+                .frame(egui::Frame::NONE
                     .fill(theme::PANEL2)
-                    .inner_margin(egui::Margin::same(16.0)))
+                    .inner_margin(egui::Margin::same(16)))
                 .show(ctx, |ui| {
                     // `ide_header` is the SAME snapshot the header band above
                     // rendered from — taken once per frame, before any panel, so
@@ -3585,9 +3604,9 @@ impl GuiApp {
         if self.mode == Mode::Config {
             let mut panel = egui::TopBottomPanel::bottom("preview")
                 .show_separator_line(true)
-                .frame(egui::Frame::none()
+                .frame(egui::Frame::NONE
                     .fill(theme::PANEL2)
-                    .inner_margin(egui::Margin::same(16.0)));
+                    .inner_margin(egui::Margin::same(16)));
             if !dynamic_preview {
                 panel = panel.exact_height(BOTTOM_BAND_H);
             }
@@ -3626,11 +3645,11 @@ impl GuiApp {
                     );
                 }
                 ui.add_space(8.0);
-                egui::Frame::none()
+                egui::Frame::NONE
                     .fill(theme::FIELD)
                     .stroke(egui::Stroke::new(1.0, theme::BORDER))
-                    .rounding(egui::Rounding::same(8.0))
-                    .inner_margin(egui::Margin::symmetric(13.0, 11.0))
+                    .corner_radius(egui::CornerRadius::same(8))
+                    .inner_margin(egui::Margin::symmetric(13, 11))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         if !dynamic_preview {
@@ -3697,8 +3716,8 @@ impl GuiApp {
             // left ONLY for this branch, bringing left to 14 too, without
             // touching the shared panel margin the other `nav_sel` arms render
             // through (they were never part of this complaint).
-            egui::Frame::none()
-                .inner_margin(egui::Margin { left: 6.0, right: 0.0, top: 0.0, bottom: 0.0 })
+            egui::Frame::NONE
+                .inner_margin(egui::Margin { left: 6, right: 0, top: 0, bottom: 0 })
                 .show(ui, |ui| {
                     self.render_module_detail_header(ui, &spec);
 
@@ -3971,7 +3990,7 @@ impl GuiApp {
 
         // Modal backdrop: dim everything and swallow clicks meant for the panels
         // (which live on the Background layer) so only the dialog is interactive.
-        let screen = ctx.screen_rect();
+        let screen = ctx.content_rect();
         egui::Area::new(egui::Id::new("modal_backdrop"))
             .order(egui::Order::Middle)
             .fixed_pos(egui::Pos2::ZERO)
@@ -4096,7 +4115,7 @@ impl GuiApp {
         let sep = icon_sep(self.general_config.mono_ui);
 
         // Modal backdrop (mirrors the confirm dialog).
-        let screen = ctx.screen_rect();
+        let screen = ctx.content_rect();
         egui::Area::new(egui::Id::new("module_dialog_backdrop"))
             .order(egui::Order::Middle)
             .fixed_pos(egui::Pos2::ZERO)
@@ -4394,7 +4413,7 @@ fn render_editor_header_description(ui: &mut egui::Ui, desc: Option<&str>) {
     job.wrap.max_width = rect.width();
     job.wrap.max_rows = 1;
     job.wrap.overflow_character = Some('\u{2026}');
-    let galley = ui.fonts(|f| f.layout_job(job));
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
     let elided = galley.elided;
     let y = rect.center().y - galley.size().y / 2.0;
     ui.painter()
@@ -4751,7 +4770,7 @@ impl GuiApp {
             egui::ScrollArea::vertical()
                 .id_salt("module_editor_body")
                 .auto_shrink([false, false])
-                .drag_to_scroll(touch)
+                .scroll_source(scroll_source(touch))
                 .show(ui, |ui| {
                     ui.vertical(|ui| {
                         let max_w = body_max_width(ui, full_width);
@@ -4921,7 +4940,7 @@ fn icon_button(
                 ),
             };
             let fg = if enabled { fg } else { theme::FAINT };
-            ui.painter().rect(rect, egui::Rounding::same(8.0), fill, stroke);
+            ui.painter().rect(rect, egui::CornerRadius::same(8), fill, stroke, egui::StrokeKind::Outside);
             let cell_x = if label.is_empty() { (rect.width() - ICON_CELL) / 2.0 } else { pad.x };
             let cell = egui::Rect::from_min_size(
                 egui::pos2(rect.min.x + cell_x, rect.min.y),
@@ -4963,11 +4982,11 @@ fn editor_card(
     add: impl FnOnce(&mut egui::Ui, &mut IconCenterCache),
 ) -> RowAction {
     let mut act = RowAction::None;
-    egui::Frame::none()
+    egui::Frame::NONE
         .fill(fill)
         .stroke(egui::Stroke::new(1.0, theme::BORDER))
-        .rounding(egui::Rounding::same(8.0))
-        .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+        .corner_radius(egui::CornerRadius::same(8))
+        .inner_margin(egui::Margin::symmetric(12, 8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             if !title.is_empty() {
@@ -6688,11 +6707,11 @@ fn render_ide_diagnostics_band(
         });
     });
     ui.add_space(8.0);
-    egui::Frame::none()
+    egui::Frame::NONE
         .fill(theme::FIELD)
         .stroke(egui::Stroke::new(1.0, theme::BORDER))
-        .rounding(egui::Rounding::same(8.0))
-        .inner_margin(egui::Margin::symmetric(13.0, 11.0))
+        .corner_radius(egui::CornerRadius::same(8))
+        .inner_margin(egui::Margin::symmetric(13, 11))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             // Fill the rest of the fixed band, less this frame's own 11+11 vertical
@@ -6782,9 +6801,9 @@ impl GuiApp {
         // borrow of `self`. Same reasoning as `ide_header` further down in
         // `update` — read first, use the plain `String` inside the closure.
         let chip_text = self.title_chip_text();
-        let frame = egui::Frame::none()
+        let frame = egui::Frame::NONE
             .fill(theme::HEAD)
-            .inner_margin(egui::Margin { left: 7.0, right: 18.0, top: 0.0, bottom: 0.0 });
+            .inner_margin(egui::Margin { left: 7, right: 18, top: 0, bottom: 0 });
         egui::TopBottomPanel::top("titlebar")
             .exact_height(61.0)
             .frame(frame)
@@ -6924,7 +6943,7 @@ impl GuiApp {
         // panel ends up ~1px narrower than the preview. Absorbing that into the
         // computation would make the two columns provably unequal in the other
         // direction; a 1px asymmetry from a hairline is the smaller lie.
-        let split_w = ((ctx.screen_rect().width() - NAV_W) * 0.5).max(0.0);
+        let split_w = ((ctx.content_rect().width() - NAV_W) * 0.5).max(0.0);
 
         // Id deliberately bumped from "ide_preview" to "ide_preview_split" back
         // when the width was persisted. It stays: `exact_width` + `resizable(false)`
@@ -6935,13 +6954,13 @@ impl GuiApp {
         egui::SidePanel::right("ide_preview_split")
             .resizable(false)
             .exact_width(split_w)
-            .frame(egui::Frame::none().fill(theme::PANEL))
+            .frame(egui::Frame::NONE.fill(theme::PANEL))
             .show(ctx, |ui| {
                 let mut band = egui::TopBottomPanel::bottom("ide_launch_band")
                     .show_separator_line(true)
-                    .frame(egui::Frame::none()
+                    .frame(egui::Frame::NONE
                         .fill(theme::PANEL2)
-                        .inner_margin(egui::Margin::same(16.0)));
+                        .inner_margin(egui::Margin::same(16)));
                 if !dynamic_preview {
                     band = band.exact_height(BOTTOM_BAND_H);
                 }
@@ -6959,11 +6978,11 @@ impl GuiApp {
                     // same warning on screen twice, in the panel that is supposed to
                     // show what the launch *is*, not what is wrong with it.
                     ui.add_space(8.0);
-                    egui::Frame::none()
+                    egui::Frame::NONE
                         .fill(theme::FIELD)
                         .stroke(egui::Stroke::new(1.0, theme::BORDER))
-                        .rounding(egui::Rounding::same(8.0))
-                        .inner_margin(egui::Margin::symmetric(13.0, 11.0))
+                        .corner_radius(egui::CornerRadius::same(8))
+                        .inner_margin(egui::Margin::symmetric(13, 11))
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             if !dynamic_preview {
@@ -6973,16 +6992,16 @@ impl GuiApp {
                             egui::ScrollArea::vertical()
                                 .id_salt("ide_launch_scroll")
                                 .auto_shrink([false, dynamic_preview])
-                                .drag_to_scroll(touch)
+                                .scroll_source(scroll_source(touch))
                                 .show(ui, |ui| {
                                     ui.add(egui::Label::new(command_job(preview)).wrap());
                                 });
                         });
                 });
                 egui::CentralPanel::default()
-                    .frame(egui::Frame::none()
+                    .frame(egui::Frame::NONE
                         .fill(theme::PANEL)
-                        .inner_margin(egui::Margin { left: 16.0, right: 8.0, top: 14.0, bottom: 0.0 }))
+                        .inner_margin(egui::Margin { left: 16, right: 8, top: 14, bottom: 0 }))
                     .show_inside(ui, |ui| {
                         // ── Id namespace ────────────────────────────────────────
                         // The editor column and this one render the same module in
@@ -7218,7 +7237,7 @@ impl GuiApp {
             // Fill the panel (don't shrink to content) so the scrollbar sits at
             // the far right while the content stays capped/left-aligned.
             .auto_shrink([false, false])
-            .drag_to_scroll(self.general_config.touch_mode)
+            .scroll_source(scroll_source(self.general_config.touch_mode))
             .show(ui, |ui| {
             ui.vertical(|ui| {
                 let max_w = body_max_width(ui, full_width);
@@ -7337,10 +7356,10 @@ impl GuiApp {
 
         // Row card: scope-tinted background, 8px rounding, with a 3px left bar.
         let tint = Color32::from_rgba_unmultiplied(scope.r(), scope.g(), scope.b(), 16);
-        let inner = egui::Frame::none()
+        let inner = egui::Frame::NONE
             .fill(tint)
-            .rounding(egui::Rounding::same(8.0))
-            .inner_margin(egui::Margin { left: 12.0, right: 5.0, top: 0.0, bottom: 0.0 })
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin { left: 12, right: 5, top: 0, bottom: 0 })
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
@@ -7392,7 +7411,7 @@ impl GuiApp {
         let bar_clip = egui::Rect::from_min_max(r.min, egui::pos2(r.min.x + 3.0, r.max.y));
         ui.painter()
             .with_clip_rect(bar_clip)
-            .rect_filled(r, egui::Rounding::same(8.0), scope);
+            .rect_filled(r, egui::CornerRadius::same(8), scope);
         ui.add_space(8.0);
 
         changed
@@ -7438,10 +7457,10 @@ impl GuiApp {
         let cache = &mut self.icon_cache;
         let mut to_delete: Option<usize> = None;
 
-        let inner = egui::Frame::none()
+        let inner = egui::Frame::NONE
             .fill(tint)
-            .rounding(egui::Rounding::same(8.0))
-            .inner_margin(egui::Margin { left: 12.0, right: 8.0, top: 8.0, bottom: 8.0 })
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin { left: 12, right: 8, top: 8, bottom: 8 })
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 let lab = ui.label(egui::RichText::new(&label).color(theme::TEXT).strong());
@@ -7489,7 +7508,7 @@ impl GuiApp {
         let bar_clip = egui::Rect::from_min_max(r.min, egui::pos2(r.min.x + 3.0, r.max.y));
         ui.painter()
             .with_clip_rect(bar_clip)
-            .rect_filled(r, egui::Rounding::same(8.0), scope);
+            .rect_filled(r, egui::CornerRadius::same(8), scope);
         ui.add_space(8.0);
 
         if !read_only {
@@ -7538,10 +7557,10 @@ impl GuiApp {
         let cache = &mut self.icon_cache;
         let mut to_delete: Option<usize> = None;
 
-        let inner = egui::Frame::none()
+        let inner = egui::Frame::NONE
             .fill(tint)
-            .rounding(egui::Rounding::same(8.0))
-            .inner_margin(egui::Margin { left: 12.0, right: 8.0, top: 8.0, bottom: 8.0 })
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin { left: 12, right: 8, top: 8, bottom: 8 })
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 let lab = ui.label(egui::RichText::new(&label).color(theme::TEXT).strong());
@@ -7566,8 +7585,9 @@ impl GuiApp {
                         if !name_ok {
                             ui.painter().rect_stroke(
                                 name_resp.rect,
-                                ui.visuals().widgets.inactive.rounding,
+                                ui.visuals().widgets.inactive.corner_radius,
                                 egui::Stroke::new(1.5, theme::COL_GLOBAL),
+                                egui::StrokeKind::Outside,
                             );
                         }
                         ui.add(
@@ -7616,7 +7636,7 @@ impl GuiApp {
         let bar_clip = egui::Rect::from_min_max(r.min, egui::pos2(r.min.x + 3.0, r.max.y));
         ui.painter()
             .with_clip_rect(bar_clip)
-            .rect_filled(r, egui::Rounding::same(8.0), scope);
+            .rect_filled(r, egui::CornerRadius::same(8), scope);
         ui.add_space(8.0);
 
         if !read_only {
@@ -7741,7 +7761,7 @@ impl GuiApp {
                     egui::vec2(right - left, h),
                 );
                 let mut picked = None;
-                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+                ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
                     egui::ComboBox::from_id_salt(&field.variable)
                         .width(rect.width())
                         .selected_text(cur_label)
@@ -8102,7 +8122,7 @@ impl GuiApp {
             // Fill the panel (don't shrink to content) so the scrollbar sits at
             // the far right while the content stays capped/left-aligned.
             .auto_shrink([false, false])
-            .drag_to_scroll(self.general_config.touch_mode)
+            .scroll_source(scroll_source(self.general_config.touch_mode))
             .show(ui, |ui| {
         ui.vertical(|ui| {
         // Cap the row width like the module panel.
@@ -8554,9 +8574,9 @@ impl GuiApp {
         egui::TopBottomPanel::bottom("nav_settings")
             .exact_height(BOTTOM_BAND_H)
             .show_separator_line(true)
-            .frame(egui::Frame::none()
+            .frame(egui::Frame::NONE
                 .fill(theme::PANEL2)
-                .inner_margin(egui::Margin::same(14.0)))
+                .inner_margin(egui::Margin::same(14)))
             .show_inside(ui, |ui| {
                 match mode {
                     Mode::Config => self.render_nav_settings(ui),
@@ -8565,19 +8585,19 @@ impl GuiApp {
             });
         egui::TopBottomPanel::top("nav_header")
             .show_separator_line(false)
-            .frame(egui::Frame::none()
+            .frame(egui::Frame::NONE
                 .fill(theme::PANEL)
-                .inner_margin(egui::Margin { left: 16.0, right: 16.0, top: 14.0, bottom: 8.0 }))
+                .inner_margin(egui::Margin { left: 16, right: 16, top: 14, bottom: 8 }))
             .show_inside(ui, |ui| {
                 nav_action = self.render_nav_category_box(ui);
             });
         egui::CentralPanel::default()
-            .frame(egui::Frame::none()
+            .frame(egui::Frame::NONE
                 .fill(theme::PANEL)
-                .inner_margin(egui::Margin { left: 8.0, right: 18.0, top: 0.0, bottom: 0.0 }))
+                .inner_margin(egui::Margin { left: 8, right: 18, top: 0, bottom: 0 }))
             .show_inside(ui, |ui| {
                 egui::ScrollArea::vertical()
-                    .drag_to_scroll(self.general_config.touch_mode)
+                    .scroll_source(scroll_source(self.general_config.touch_mode))
                     .show(ui, |ui| {
                         ui.add_space(4.0);
                         match mode {
@@ -8662,11 +8682,11 @@ impl GuiApp {
         let is_general = !is_ide && matches!(self.nav_sel, NavSel::GeneralSettings);
         let is_games = !is_ide && !is_general;
         let mono = self.general_config.mono_ui;
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(theme::PANEL2)
             .stroke(egui::Stroke::new(1.0, theme::BORDER))
-            .rounding(egui::Rounding::same(8.0))
-            .inner_margin(egui::Margin::symmetric(8.0, 8.0))
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin::symmetric(8, 8))
             .show(ui, |ui| {
                 let avail = ui.available_width();
                 ui.set_width(avail);
@@ -9323,7 +9343,7 @@ impl GuiApp {
                                     if ui.is_rect_visible(rect) {
                                         let c = theme::COL_GLOBAL;
                                         let fill = egui::Color32::from_rgb(0x3f, 0x21, 0x25);
-                                        ui.painter().rect(rect, ui.visuals().widgets.inactive.rounding, fill, egui::Stroke::new(1.0, c));
+                                        ui.painter().rect(rect, ui.visuals().widgets.inactive.corner_radius, fill, egui::Stroke::new(1.0, c), egui::StrokeKind::Outside);
                                         ui.painter().text(
                                             rect.left_center() + egui::vec2(ui.spacing().button_padding.x, 0.0),
                                             egui::Align2::LEFT_CENTER,
@@ -9990,16 +10010,23 @@ fn breadcrumb_chip(ui: &mut egui::Ui, text: &str) {
     job.wrap.max_width = BREADCRUMB_MAX_TEXT_W;
     job.wrap.max_rows = 1;
     job.wrap.overflow_character = Some('\u{2026}');
-    let galley = ui.fonts(|f| f.layout_job(job));
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
     let elided = galley.elided;
     let pad = egui::vec2(12.0, 4.0);
     let size = galley.size() + pad * 2.0;
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::hover());
     ui.painter().rect(
         rect,
-        egui::Rounding::same(rect.height() / 2.0),
+        // Pill: radius = half the height. `CornerRadius` is `u8` as of egui 0.31,
+        // so this no longer carries the fractional half-point the `f32` `Rounding`
+        // did. `ceil` rather than `as`-truncation on purpose — the tessellator
+        // clamps a corner radius to half the rect's shorter side, so rounding *up*
+        // is free and keeps a true pill, whereas truncating a ~11.5pt radius to 11
+        // would leave the chip visibly boxy at the ends.
+        egui::CornerRadius::same((rect.height() / 2.0).ceil() as u8),
         theme::SEL,
         egui::Stroke::new(1.0, theme::SELBD),
+        egui::StrokeKind::Outside,
     );
     let pos = rect.center() - galley.size() / 2.0;
     ui.painter().galley(pos, galley, theme::TEXT);
@@ -10071,7 +10098,7 @@ const TAB_TEXT_SIZE: f32 = 11.0;
 ///   tint formula `SEL`/`SELBD` are hand-expanded from, applied to whichever
 ///   color this tab owns — rounded on **all four corners** at the same `8.0`
 ///   radius every other rounded container in the app uses
-///   (`Rounding::same(8.0)`, per `docs/ui/STYLING-GUIDE.md`);
+///   (`CornerRadius::same(8)`, per `docs/ui/STYLING-GUIDE.md`);
 /// - **ink**: glyph in `accent`, label in full-brightness `TEXT`.
 ///
 /// *Why per-tab color only on selected, not unselected too:* unselected tabs
@@ -10118,7 +10145,7 @@ fn nav_category_tab(
     let mut job = LayoutJob::default();
     job.append(glyph, 0.0, TextFormat { font_id: font_id.clone(), color: icon_col, ..Default::default() });
     job.append(label, gap, TextFormat { font_id, color: text_col, ..Default::default() });
-    let galley = ui.fonts(|f| f.layout_job(job));
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
 
     // Cell height: the standard control height. No underline band anymore, so
     // there's no extra space to reserve beyond the normal control height.
@@ -10128,12 +10155,12 @@ fn nav_category_tab(
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         // All four corners, matching the app-wide 8px rounding convention (see
-        // `docs/ui/STYLING-GUIDE.md`, "Corner rounding is Rounding::same(8.0)
+        // `docs/ui/STYLING-GUIDE.md`, "Corner rounding is CornerRadius::same(8)
         // everywhere").
-        let rounding = egui::Rounding::same(8.0);
+        let rounding = egui::CornerRadius::same(8);
         if selected {
             let (fill, border) = theme::selection_tint(accent);
-            painter.rect(rect, rounding, fill, egui::Stroke::new(1.0, border));
+            painter.rect(rect, rounding, fill, egui::Stroke::new(1.0, border), egui::StrokeKind::Outside);
         } else if resp.hovered() {
             painter.rect_filled(rect, rounding, theme::HOV);
         }
@@ -10269,10 +10296,10 @@ fn scope_slider(
         // Clamp so the handle circle never spills outside the track rect (e.g. when
         // value == min and fill_x == rect.left()).
         let handle_x = fill_x.clamp(rect.left() + RADIUS, rect.right() - RADIUS);
-        painter.rect_filled(track, egui::Rounding::same(3.0), theme::BORDER);
+        painter.rect_filled(track, egui::CornerRadius::same(3), theme::BORDER);
         painter.rect_filled(
             egui::Rect::from_min_max(track.min, egui::pos2(fill_x, track.max.y)),
-            egui::Rounding::same(3.0),
+            egui::CornerRadius::same(3),
             scope,
         );
         painter.circle_filled(egui::pos2(handle_x, cy), RADIUS, scope);
@@ -10302,7 +10329,7 @@ fn tri_state(res: &resolve::ResolvedField) -> Tri {
 /// Paint an 18×18, 6px-rounded checkbox into `rect`: `color` fill + white check
 /// when on, faint bordered box when off; both dimmed when `faded` (inherited).
 fn paint_scope_box(painter: &egui::Painter, rect: egui::Rect, on: bool, faded: bool, color: Color32) {
-    let round = egui::Rounding::same(6.0);
+    let round = egui::CornerRadius::same(6);
     let box_rect = rect.shrink(1.0);
     if on {
         let fill = if faded { color.gamma_multiply(0.35) } else { color };
@@ -10320,7 +10347,7 @@ fn paint_scope_box(painter: &egui::Painter, rect: egui::Rect, on: bool, faded: b
     } else {
         // Inset the stroke by half its width so its outer edge sits exactly on
         // box_rect (draws inward only) — matching the filled box's size.
-        painter.rect(box_rect.shrink(0.75), round, Color32::TRANSPARENT, egui::Stroke::new(1.5, theme::CHECK_OUTLINE));
+        painter.rect(box_rect.shrink(0.75), round, Color32::TRANSPARENT, egui::Stroke::new(1.5, theme::CHECK_OUTLINE), egui::StrokeKind::Outside);
     }
 }
 
@@ -10350,7 +10377,7 @@ fn checkbox_row(
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         if interactive && resp.hovered() {
-            painter.rect_filled(rect.expand2(egui::vec2(4.0, 2.0)), egui::Rounding::same(6.0), theme::HOV);
+            painter.rect_filled(rect.expand2(egui::vec2(4.0, 2.0)), egui::CornerRadius::same(6), theme::HOV);
         }
         let box_rect = egui::Rect::from_min_size(
             egui::pos2(rect.left(), rect.center().y - BOX / 2.0),
@@ -10393,10 +10420,10 @@ fn cleanup_modules(
 fn settings_card<R>(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let scope = theme::COL_DEFAULT;
     let tint = Color32::from_rgba_unmultiplied(scope.r(), scope.g(), scope.b(), 16);
-    let inner = egui::Frame::none()
+    let inner = egui::Frame::NONE
         .fill(tint)
-        .rounding(egui::Rounding::same(8.0))
-        .inner_margin(egui::Margin { left: 12.0, right: 11.0, top: 0.0, bottom: 0.0 })
+        .corner_radius(egui::CornerRadius::same(8))
+        .inner_margin(egui::Margin { left: 12, right: 11, top: 0, bottom: 0 })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -10410,7 +10437,7 @@ fn settings_card<R>(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui) -> R)
     let bar_clip = egui::Rect::from_min_max(r.min, egui::pos2(r.min.x + 3.0, r.max.y));
     ui.painter()
         .with_clip_rect(bar_clip)
-        .rect_filled(r, egui::Rounding::same(8.0), scope);
+        .rect_filled(r, egui::CornerRadius::same(8), scope);
     ui.add_space(8.0);
     inner.inner
 }
@@ -10933,7 +10960,7 @@ mod tests {
                 // numbers here instead would make this test measure a *copy* of
                 // the band: an edit to the panel's margin alone would then leave
                 // this green while shipping the black bar (tried it — it does).
-                let frame = egui::Frame::none().inner_margin(IDE_HEADER_MARGIN);
+                let frame = egui::Frame::NONE.inner_margin(IDE_HEADER_MARGIN);
                 egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
                     // Wrapped in a `scope` because the measurement is the
                     // *content* bounding box: a `CentralPanel`'s own `Ui`
@@ -10956,8 +10983,8 @@ mod tests {
                     // Content bounding box + the frame's own vertical margins is
                     // what the panel has to be tall enough to hold.
                     measured = content.height()
-                        + IDE_HEADER_MARGIN.top
-                        + IDE_HEADER_MARGIN.bottom;
+                        + IDE_HEADER_MARGIN.top as f32
+                        + IDE_HEADER_MARGIN.bottom as f32;
                 });
             });
             assert_eq!(

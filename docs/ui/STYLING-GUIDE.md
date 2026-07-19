@@ -194,10 +194,33 @@ s.spacing.button_padding = egui::vec2(9.0, 5.0);
 s.spacing.interact_size.y = 23.0;
 ```
 
-Corner rounding is `Rounding::same(8.0)` everywhere (`round` / `round_small` in
+Corner rounding is `CornerRadius::same(8)` everywhere (`round` / `round_small` in
 `theme::apply`) — buttons, fields, cards, combo/menu popups all share the same 8px
 radius. *Why 8px and not 14px:* 8px keeps a flat edge at the app's compact control
 heights; a larger radius would round the short buttons/fields into pill ends.
+
+*Why `CornerRadius` and not `Rounding`, and why a bare `8`* (2026-07-20): egui 0.31
+renamed `Rounding` to `CornerRadius` and changed its backing type from `f32` to
+`u8`. Every radius in this crate was already a whole number, so the rename was
+lossless — but **a fractional radius is no longer expressible**. Where a radius is
+computed rather than literal (the breadcrumb chip's pill, `rect.height() / 2.0`),
+round *up* with `.ceil() as u8`: the tessellator clamps a corner radius to half the
+rect's shorter side, so over-shooting is free, whereas `as`-truncation turns a
+~11.5pt pill radius into 11 and leaves the ends visibly boxy.
+
+### Rect strokes: `StrokeKind::Outside`
+
+`Painter::rect` / `rect_stroke` take an explicit `egui::StrokeKind` as of egui 0.31.
+This crate passes **`StrokeKind::Outside`** at every hand-painted rect. *Why not the
+`Inside` the upstream migration guide suggests* (2026-07-20): egui ≤0.30 painted rect
+strokes with `PathStroke::from(stroke).outside()`, so `Outside` is what every one of
+this crate's hand-tuned rects — notably the checkbox outline's `box_rect.shrink(0.75)`
+against a 1.5pt stroke — was measured against. Passing `Inside` would pull each border
+half a point inward and silently retune them all.
+
+Note that egui's **own** widgets (buttons, fields) moved to `StrokeKind::Inside` in
+0.31, which is not something a call site can override; their 1pt borders therefore sit
+one point further in than they did on 0.29. Widget *sizing* is unaffected.
 
 ### Icon → text gap: always `icon_sep`
 
@@ -244,7 +267,7 @@ Field rows in the settings tree follow one fixed layout, in
 
 ```rust
 let bar_clip = egui::Rect::from_min_max(r.min, egui::pos2(r.min.x + 3.0, r.max.y));
-ui.painter().with_clip_rect(bar_clip).rect_filled(r, egui::Rounding::same(8.0), scope);
+ui.painter().with_clip_rect(bar_clip).rect_filled(r, egui::CornerRadius::same(8), scope);
 ```
 
 Do NOT build a new settings-field row from scratch — call

@@ -3,7 +3,7 @@
 //! Single source of truth for colors — reference these by *role*, never hard-code
 //! raw hex at call sites, so an accent/token change re-themes the whole app.
 
-use egui::{Color32, FontFamily, FontId, Rounding, Stroke, TextStyle};
+use egui::{Color32, CornerRadius, FontFamily, FontId, Stroke, TextStyle};
 use ritz_core::resolve::Provenance;
 
 // ---- Brand / chrome ------------------------------------------------------
@@ -222,43 +222,43 @@ pub fn apply(ctx: &egui::Context) {
 
     // 8px keeps a flat edge at the compact control heights (14px would round the
     // short buttons/fields into pill ends).
-    let round = Rounding::same(8.0);
-    let round_small = Rounding::same(8.0);
+    let round = CornerRadius::same(8);
+    let round_small = CornerRadius::same(8);
 
     // Non-interactive surfaces (labels, separators, group frames).
     v.widgets.noninteractive.bg_fill = PANEL;
     v.widgets.noninteractive.weak_bg_fill = PANEL;
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
     v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, DIM);
-    v.widgets.noninteractive.rounding = round_small;
+    v.widgets.noninteractive.corner_radius = round_small;
 
     // Resting interactive widgets (buttons, checkboxes).
     v.widgets.inactive.bg_fill = BTN;
     v.widgets.inactive.weak_bg_fill = BTN;
     v.widgets.inactive.bg_stroke = Stroke::new(1.0, BTNBD);
     v.widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT);
-    v.widgets.inactive.rounding = round;
+    v.widgets.inactive.corner_radius = round;
 
     // Hovered.
     v.widgets.hovered.bg_fill = BTN;
     v.widgets.hovered.weak_bg_fill = HOV;
     v.widgets.hovered.bg_stroke = Stroke::new(1.0, BTNBD);
     v.widgets.hovered.fg_stroke = Stroke::new(1.0, TEXT);
-    v.widgets.hovered.rounding = round;
+    v.widgets.hovered.corner_radius = round;
 
     // Active / pressed.
     v.widgets.active.bg_fill = BTN;
     v.widgets.active.weak_bg_fill = HOV;
     v.widgets.active.bg_stroke = Stroke::new(1.0, SELBD);
     v.widgets.active.fg_stroke = Stroke::new(1.0, TEXT);
-    v.widgets.active.rounding = round;
+    v.widgets.active.corner_radius = round;
 
     // Open (combo boxes, menus).
     v.widgets.open.bg_fill = FIELD;
     v.widgets.open.weak_bg_fill = FIELD;
     v.widgets.open.bg_stroke = Stroke::new(1.0, BORDER);
     v.widgets.open.fg_stroke = Stroke::new(1.0, TEXT);
-    v.widgets.open.rounding = round;
+    v.widgets.open.corner_radius = round;
 
     ctx.set_visuals(v);
 

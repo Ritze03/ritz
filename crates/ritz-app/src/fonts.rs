@@ -16,19 +16,19 @@ pub fn install(ctx: &egui::Context, mono_ui: bool) {
 
     fonts.font_data.insert(
         "mono".to_owned(),
-        FontData::from_static(crate::resources::mono_font_bytes()),
+        std::sync::Arc::new(FontData::from_static(crate::resources::mono_font_bytes())),
     );
     fonts.font_data.insert(
         "sans".to_owned(),
-        FontData::from_static(crate::resources::sans_font_bytes()),
+        std::sync::Arc::new(FontData::from_static(crate::resources::sans_font_bytes())),
     );
     fonts.font_data.insert(
         "icons".to_owned(),
-        FontData::from_static(crate::resources::icon_font_bytes()),
+        std::sync::Arc::new(FontData::from_static(crate::resources::icon_font_bytes())),
     );
     fonts.font_data.insert(
         "bold".to_owned(),
-        FontData::from_static(crate::resources::bold_font_bytes()),
+        std::sync::Arc::new(FontData::from_static(crate::resources::bold_font_bytes())),
     );
 
     // A named "bold" family (Geist Bold) for the logo wordmark.

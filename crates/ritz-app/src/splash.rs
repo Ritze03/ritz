@@ -128,7 +128,7 @@ impl eframe::App for SplashApp {
 
         let clicked = bottom_buttons(ctx, qwe_button_row);
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(theme::PANEL).inner_margin(egui::Margin::same(22.0)))
+            .frame(egui::Frame::NONE.fill(theme::PANEL).inner_margin(egui::Margin::same(22)))
             .show(ctx, |ui| {
                 let heading = format!("Launching {}", self.game_name);
                 launch_view(
@@ -156,9 +156,9 @@ impl eframe::App for SplashApp {
 fn bottom_buttons<R>(ctx: &egui::Context, row: impl FnOnce(&mut egui::Ui) -> R) -> R {
     egui::TopBottomPanel::bottom("splash_buttons")
         .frame(
-            egui::Frame::none()
+            egui::Frame::NONE
                 .fill(theme::PANEL)
-                .inner_margin(egui::Margin { left: 22.0, right: 22.0, top: 12.0, bottom: 18.0 }),
+                .inner_margin(egui::Margin { left: 22, right: 22, top: 12, bottom: 18 }),
         )
         .show_separator_line(false)
         .show(ctx, |ui| row(ui))
@@ -207,7 +207,7 @@ fn launch_view(
                 egui::FontId::new(38.0, egui::FontFamily::Proportional),
             ),
         };
-        let h = ui.fonts(|f| f.row_height(&font));
+        let h = ui.fonts_mut(|f| f.row_height(&font));
         // +9: optical correction for the bottom button panel's top inner margin,
         // which sits below the CentralPanel's measured bottom edge.
         ui.add_space((((ui.available_height() - h) / 2.0) + 9.0).max(0.0));
@@ -232,7 +232,7 @@ fn buttons_pad(ui: &egui::Ui, labels: &[&str]) -> f32 {
     let total: f32 = labels
         .iter()
         .map(|l| {
-            ui.fonts(|f| f.layout_no_wrap((*l).to_string(), font.clone(), Color32::WHITE).size().x)
+            ui.fonts_mut(|f| f.layout_no_wrap((*l).to_string(), font.clone(), Color32::WHITE).size().x)
                 + bpad
         })
         .sum::<f32>()
@@ -506,7 +506,7 @@ impl eframe::App for NewGameApp {
         });
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(theme::PANEL).inner_margin(egui::Margin::same(22.0)))
+            .frame(egui::Frame::NONE.fill(theme::PANEL).inner_margin(egui::Margin::same(22)))
             .show(ctx, |ui| match &self.state {
                 NewState::Naming => {
                     let (area, _) = ui.allocate_exact_size(
@@ -528,11 +528,11 @@ impl eframe::App for NewGameApp {
                         );
                     });
                     ui.add_space(3.0);
-                    egui::Frame::none()
+                    egui::Frame::NONE
                         .fill(theme::FIELD)
                         .stroke(egui::Stroke::new(1.0, theme::BORDER))
-                        .rounding(egui::Rounding::same(8.0))
-                        .inner_margin(egui::Margin::symmetric(11.0, 9.0))
+                        .corner_radius(egui::CornerRadius::same(8))
+                        .inner_margin(egui::Margin::symmetric(11, 9))
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             let resp = ui.add(
@@ -638,7 +638,7 @@ fn pin_card(ui: &mut egui::Ui, keybind: char, name: &str, width: f32) -> egui::R
         let hovered = resp.hovered();
         let painter = ui.painter();
         let stroke = egui::Stroke::new(if hovered { 2.0 } else { 1.5 }, theme::ACCENT);
-        painter.rect(rect, egui::Rounding::same(8.0), Color32::TRANSPARENT, stroke);
+        painter.rect(rect, egui::CornerRadius::same(8), Color32::TRANSPARENT, stroke, egui::StrokeKind::Outside);
         painter.text(
             egui::pos2(rect.center().x, rect.top() + 13.0),
             egui::Align2::CENTER_CENTER,
@@ -661,7 +661,7 @@ fn pin_card(ui: &mut egui::Ui, keybind: char, name: &str, width: f32) -> egui::R
 /// Truncate `text` with a trailing ".." until it fits `max_w` in `font`.
 fn fit_text(ui: &egui::Ui, text: &str, max_w: f32, font: egui::FontId) -> String {
     let width = |s: &str| {
-        ui.fonts(|f| f.layout_no_wrap(s.to_string(), font.clone(), Color32::WHITE).size().x)
+        ui.fonts_mut(|f| f.layout_no_wrap(s.to_string(), font.clone(), Color32::WHITE).size().x)
     };
     if width(text) <= max_w {
         return text.to_string();
@@ -749,7 +749,7 @@ impl eframe::App for UnknownApp {
         });
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(theme::PANEL).inner_margin(egui::Margin::same(22.0)))
+            .frame(egui::Frame::NONE.fill(theme::PANEL).inner_margin(egui::Margin::same(22)))
             .show(ctx, |ui| {
                 let (area, _) = ui.allocate_exact_size(
                     egui::vec2(ui.available_width(), 168.0),
@@ -764,11 +764,11 @@ impl eframe::App for UnknownApp {
                     );
                 });
                 ui.add_space(14.0);
-                egui::Frame::none()
+                egui::Frame::NONE
                     .fill(theme::FIELD)
                     .stroke(egui::Stroke::new(1.0, theme::BORDER))
-                    .rounding(egui::Rounding::same(8.0))
-                    .inner_margin(egui::Margin::symmetric(11.0, 9.0))
+                    .corner_radius(egui::CornerRadius::same(8))
+                    .inner_margin(egui::Margin::symmetric(11, 9))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         let resp = ui.add(
@@ -799,11 +799,11 @@ impl eframe::App for UnknownApp {
                 } else {
                     format!("RITZ_APPID={id} ritz %command%")
                 };
-                egui::Frame::none()
+                egui::Frame::NONE
                     .fill(theme::FIELD)
                     .stroke(egui::Stroke::new(1.0, theme::BORDER))
-                    .rounding(egui::Rounding::same(8.0))
-                    .inner_margin(egui::Margin::symmetric(11.0, 9.0))
+                    .corner_radius(egui::CornerRadius::same(8))
+                    .inner_margin(egui::Margin::symmetric(11, 9))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.add(egui::Label::new(
