@@ -83,8 +83,9 @@ preferences, not extension variables, so a module tree would have nothing to sel
 ┌───────────── titlebar (render_title_bar) ─────────────────────────┐
 ├────────────────┬─────────────────────────────────────────────────┤
 │ ┌────────────┐ │ ide_module_header — name v… by …   [Fork][🗑][✕][Save] │
-│ │Prof·IDE·Set│ ├──────────────────────┬─────────────────────────┤
-│ └────────────┘ │  manifest editor      │  PREVIEW (read-only)     │
+│ │Prof·IDE·Set│ │   description, one line, elided…                       │
+│ └────────────┘ ├──────────────────────┬─────────────────────────┤
+│                │  manifest editor      │  PREVIEW (read-only)     │
 │ ⚠ errors banner│  (render_module_      │  (render_module_settings │
 │ [module tree,  │   editor, full-width) │   _body, read_only=true) │
 │  all_specs]    │←──── exactly half ───→│←──── exactly half ──────→│
@@ -127,8 +128,18 @@ at any width.) Spanning the full width right of the nav roughly halves that floo
 decouples the editor column's width from the button row outright, rather than moving
 the problem somewhere else.
 
-- **`exact_height(IDE_HEADER_H)`**, where `IDE_HEADER_H = 6.0 + 23.0 + 8.0` — top inset,
-  one `interact_size.y` control row, bottom inset. *Why pinned rather than auto-sized:*
+- **`exact_height(IDE_HEADER_H)`**, where
+  `IDE_HEADER_H = 6.0 + 23.0 + 7.0 + 16.0 + 8.0 = 60.0` — top inset, the
+  `interact_size.y` heading/button row, one `item_spacing.y`, the
+  `IDE_HEADER_DESC_H` description slot, bottom inset. *Where 60 comes from*
+  (2026-07-19): the first cut was one row (`6 + 23 + 8 = 37`) and read as a cramped
+  strip beside Config mode's module header. That header
+  (`render_module_detail_header`) is **not** fixed-height — it is natural-sized — but
+  its structure is: `6` space, the same 23pt heading row, an edit-context line, the
+  description, `10` space, a separator. The band reproduces it minus the two pieces it
+  does not own — the edit-context line (IDE Mode has no edit scope to name; the tree
+  shows the selection) and the trailing separator (`show_separator_line` draws that) —
+  which leaves heading row + description. *Why pinned rather than auto-sized:*
   the band spans half the window, so any height change reflows both columns; and on the
   frames where `GuiApp::editor_header_info` returns `None` (a module switch, before
   `ensure_draft` catches up) an auto-sized band would collapse to nothing and snap back,
@@ -140,10 +151,26 @@ the problem somewhere else.
   and shove the editor *and* the preview column down; kept in the editor column, any
   height change stays confined to where it already was before the header moved. This
   preserves the focus-stability contract documented under the manifest editor.
-- **Fill is `theme::PANEL2`**, matching the 198px bands, so the header reads as a toolbar
-  distinct from both columns. *Alternative if that ever looks wrong:* `theme::PANEL` (or
-  the default central-panel fill) makes it read as part of the editor instead — a
-  one-line change at the `.frame(...)` call in `GuiApp::ui`.
+- **The description renders as a fixed one-line second row**, full band width, under the
+  name and left of nothing — the action cluster owns the right end of row *one*, so a row
+  of its own can never collide with it. Painted by the free function
+  `render_editor_header_description` in `theme::DIM`, matching how
+  `render_module_detail_header` shows the same field in Config mode. **Its height cannot
+  vary**, which `IDE_HEADER_H`'s budget depends on, and three things had to be closed off
+  to say that: a module with **no** description still allocates the slot (the rect is
+  reserved before the text is looked at, so walking the tree never twitches the band); a
+  **long** description elides rather than wraps (`LayoutJob` with `max_rows = 1` and an
+  ellipsis overflow character — this is why the text is painted from a hand-built job
+  instead of `ui.label`, which would size the `Ui` from its galley); and a **narrow
+  window** only moves the ellipsis, since wrapping was the only route from width to
+  height. Elided text keeps the full string on hover.
+- **Fill is `theme::PANEL`** — the same fill as the nav column, the editor `CentralPanel`
+  and the preview panel, so the header reads as the top of one continuous surface rather
+  than as a separate toolbar. (The first cut used `theme::PANEL2`, the 198px bands' fill,
+  for a toolbar look; seen in place, it read as a strip bolted on top of the editor.) With
+  the band and the columns beneath it now sharing a fill, `show_separator_line(true)` — the
+  `theme::BORDER` hairline — is the only thing marking the edge, so it stays; a hand-drawn
+  bottom border on top of it would just double the line.
 - **The click is dispatched after the CentralPanel**, not at the point of the click:
   `ide_action` is hoisted out of the panel closure and fed to
   `GuiApp::dispatch_top_action` once the preview column and editor body have rendered.

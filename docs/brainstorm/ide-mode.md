@@ -394,6 +394,12 @@ corrections to *this* plan are recorded here.
   split"), because the header and body now render in different panel closures while the
   body still holds `&mut module_draft`. The status lines deliberately stayed with the
   body — they are conditional and would have resized a full-width band mid-keystroke.
+  *Follow-ups from the click-through, same day:* the band took the columns' own
+  `theme::PANEL` fill (the `PANEL2` toolbar look was tried and rejected — it read as
+  bolted on), grew to two rows / 60pt to stop reading as a cramped strip next to Config
+  mode's natural-sized module header, and picked up the module description as a
+  fixed-height, elided second row. Full reasoning in `../features/settings-gui.md`
+  ("IDE-mode header band").
   *Still open:* the S4 button cleanup (`[Fork] [Delete] [Discard] [Save]`, Rename moved
   inline beside the identity fields) was explicitly **not** bundled in; it is a separate
   design change, and it is now easier to do because the cluster lives in one small free

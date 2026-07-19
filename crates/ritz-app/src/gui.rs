@@ -39,10 +39,25 @@ const NAV_W: f32 = 280.0;
 
 /// Height of IDE Mode's module-header band, in points.
 ///
-/// Derived, not eyeballed: `6.0` top inset + one control-height row + `8.0`
-/// bottom inset. The row is `max(Heading galley, interact_size.y)` and
-/// `interact_size.y` is `23.0` (`theme.rs`), which is at or above the 19pt
-/// heading's galley — so 23 is the row.
+/// Derived, not eyeballed — term by term, top to bottom:
+///
+/// | term   | what it is                                                       |
+/// |--------|------------------------------------------------------------------|
+/// | `6.0`  | the frame's top inner margin                                     |
+/// | `23.0` | the name/version/author + button row: `interact_size.y` (`theme.rs`), which is at or above the 19pt heading's galley |
+/// | `7.0`  | `item_spacing.y` (`theme.rs`) — egui's gap between those two rows |
+/// | `16.0` | [`IDE_HEADER_DESC_H`], the one-line description slot             |
+/// | `8.0`  | the frame's bottom inner margin                                  |
+///
+/// *Why two rows and not one* (2026-07-19): the one-row band (`6 + 23 + 8 = 37`)
+/// read as a cramped strip next to Config mode's module header. That header
+/// (`GuiApp::render_module_detail_header`) has **no** fixed height — it is
+/// natural-sized — but its structure is fixed: `6` space, the same 23pt heading
+/// row, an edit-context line, the description, `10` space, a separator. This band
+/// reproduces it minus the two parts it does not own: the edit-context line (IDE
+/// Mode has no edit scope to name — the tree shows the selection) and the
+/// trailing separator (the panel's own `show_separator_line` draws that). What is
+/// left is heading row + description, which is the 60pt here.
 ///
 /// *Why `exact_height` and not auto-sizing:* the band spans the editor **and**
 /// preview columns, so any height change there reflows half the window. Pinning
@@ -50,7 +65,14 @@ const NAV_W: f32 = 280.0;
 /// [`GuiApp::editor_header_info`] returns `None` (a module switch, before
 /// `ensure_draft` catches up) — an auto-sized band would collapse to nothing and
 /// snap back, which reads as a flicker.
-const IDE_HEADER_H: f32 = 6.0 + 23.0 + 8.0;
+const IDE_HEADER_H: f32 = 6.0 + 23.0 + 7.0 + IDE_HEADER_DESC_H + 8.0;
+
+/// Height of the header band's description slot, in points.
+///
+/// One `Body` (13pt) text row, rounded to a whole point. The slot is **always**
+/// allocated at exactly this height — see [`render_editor_header_description`]
+/// for why that is the whole point of it.
+const IDE_HEADER_DESC_H: f32 = 16.0;
 
 #[derive(Debug, Clone, PartialEq)]
 enum NavSel {
@@ -1573,9 +1595,19 @@ impl GuiApp {
                 let info = ide_header.as_ref();
                 egui::TopBottomPanel::top("ide_module_header")
                     .exact_height(IDE_HEADER_H)
+                    // Kept: with the band now filled the SAME colour as the
+                    // columns under it, this hairline (`noninteractive.bg_stroke`
+                    // = `theme::BORDER`) is the only thing marking the edge. A
+                    // second, hand-drawn bottom border would just double it.
                     .show_separator_line(true)
+                    // *Why `PANEL` and not `PANEL2`* (2026-07-19): `PANEL` is the
+                    // fill of the nav column, the editor `CentralPanel` and the
+                    // preview panel, so the header reads as the top of one
+                    // continuous surface. `PANEL2` (the 198px bands' fill) made it
+                    // read as a separate toolbar sitting on top of the editor —
+                    // tried, seen, rejected.
                     .frame(egui::Frame::none()
-                        .fill(theme::PANEL2)
+                        .fill(theme::PANEL)
                         .inner_margin(egui::Margin {
                             left: 8.0,
                             right: 16.0,
@@ -1588,6 +1620,12 @@ impl GuiApp {
                         // `ensure_draft` catches up with a module switch.
                         if let Some(info) = info {
                             ide_action = render_editor_header_row(ui, cache, info);
+                            // Second row, full band width. *Why below the name row
+                            // and not beside it:* the action cluster owns the right
+                            // end of row one, so anything sharing that row competes
+                            // for the same space and re-creates the collision the
+                            // band was built to fix. A row of its own cannot collide.
+                            render_editor_header_description(ui, info.description.as_deref());
                         }
                     });
             }
@@ -1959,6 +1997,10 @@ struct EditorHeaderInfo {
     name: String,
     version: String,
     author: String,
+    /// `Extension::meta.description`, verbatim and un-truncated. Truncation is a
+    /// render-time concern (see [`render_editor_header_description`]) — the full
+    /// string has to survive to here so the hover tooltip can show it.
+    description: Option<String>,
     editable: bool,
     dirty: bool,
     save_on: bool,
@@ -2049,6 +2091,64 @@ fn render_editor_header_row(
         });
     });
     action
+}
+
+/// The header band's second row: the module's description, on exactly one line.
+///
+/// **Invariant: this occupies [`IDE_HEADER_DESC_H`] points, unconditionally.**
+/// [`IDE_HEADER_H`] budgets for it, and the band is `exact_height`, so a slot
+/// that grew would paint over the columns beneath it. Three things could have
+/// made it vary, and each is closed off here:
+///
+/// 1. **A module with no description** (`meta.description` is `Option`) — the
+///    rect is allocated *before* the text is even looked at, so the empty case
+///    reserves the identical space and the band does not twitch as you walk the
+///    module tree.
+/// 2. **A long description wrapping to two lines** — the layout job is capped at
+///    `max_rows = 1` with an ellipsis overflow character, so it elides instead of
+///    wrapping. This is why the text is painted from a hand-built `LayoutJob`
+///    rather than handed to `ui.label`: a `Label` sizes the `Ui` from its galley,
+///    and the galley is exactly the thing that must not be allowed to.
+/// 3. **A narrow window** — `max_width` follows the rect, so narrowing the window
+///    moves the ellipsis leftward and changes nothing else. Wrapping is the only
+///    way width could have become height, and (2) removed it.
+///
+/// The galley is *painted*, not allocated, and centred in the slot: if the 13pt
+/// body row ever measures a shade over 16pt it bleeds into the frame's 8pt bottom
+/// margin (invisible, and clipped by the panel) instead of pushing anything.
+///
+/// Elided text keeps the full string on hover, so nothing is actually lost. The
+/// tooltip is attached only when the text *was* elided — a tooltip that merely
+/// repeats what you can already read is noise.
+///
+/// Colour is [`theme::DIM`], matching how `GuiApp::render_module_detail_header`
+/// renders the same field in Config mode.
+fn render_editor_header_description(ui: &mut egui::Ui, desc: Option<&str>) {
+    // Reserve the slot FIRST — before any early return — so every path through
+    // this function costs the same height. See invariant (1) above.
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), IDE_HEADER_DESC_H),
+        egui::Sense::hover(),
+    );
+    let Some(text) = desc.map(str::trim).filter(|t| !t.is_empty()) else {
+        return;
+    };
+    let mut job = egui::text::LayoutJob::simple_singleline(
+        text.to_owned(),
+        egui::TextStyle::Body.resolve(ui.style()),
+        theme::DIM,
+    );
+    job.wrap.max_width = rect.width();
+    job.wrap.max_rows = 1;
+    job.wrap.overflow_character = Some('\u{2026}');
+    let galley = ui.fonts(|f| f.layout_job(job));
+    let elided = galley.elided;
+    let y = rect.center().y - galley.size().y / 2.0;
+    ui.painter()
+        .galley(egui::pos2(rect.left(), y), galley, theme::DIM);
+    if elided {
+        resp.on_hover_text(text);
+    }
 }
 
 /// The status lines under the header: dirty state, then any schema / `Requires`
@@ -2149,6 +2249,7 @@ impl GuiApp {
             name: d.ext.meta.name.clone(),
             version: d.ext.meta.version.clone(),
             author: d.ext.meta.author.clone(),
+            description: d.ext.meta.description.clone(),
             editable: d.editable,
             dirty: d.dirty(),
             save_on: d.save_enabled(),
