@@ -1494,7 +1494,7 @@ impl GuiApp {
 
             let edit_ctx_label: Option<String> = match &self.nav_sel {
                 NavSel::GlobalSettings => {
-                    Some("Editing Global Settings — applies to all games".to_string())
+                    Some("Editing Global Profile — applies to all games".to_string())
                 }
                 NavSel::Profile(name) => Some(format!("Editing Profile: {name}")),
                 NavSel::ModuleEditor(_) => None, // handled above; unreachable here
@@ -1557,11 +1557,7 @@ impl GuiApp {
                 .drag_to_scroll(self.general_config.touch_mode)
                 .show(ui, |ui| {
                 ui.vertical(|ui| {
-                    // Fill the pane (less an 18px scrollbar gutter), but cap at ~743px
-                    // unless "Use full UI width" is on. Using `min(..)` lets it scale
-                    // DOWN on narrow windows instead of overflowing.
-                    let avail = (ui.available_width() - 18.0).max(300.0);
-                    let max_w = if self.general_config.full_width { avail } else { avail.min(743.0) };
+                    let max_w = body_max_width(ui, self.general_config.full_width);
                     ui.set_max_width(max_w);
                     // Custom-env/-game-env/-args modules render through this same
                     // generic section/field loop — `render_field` dispatches their
@@ -2076,8 +2072,7 @@ impl GuiApp {
                 .drag_to_scroll(touch)
                 .show(ui, |ui| {
                     ui.vertical(|ui| {
-                        let avail = (ui.available_width() - 18.0).max(300.0);
-                        let max_w = if full_width { avail } else { avail.min(743.0) };
+                        let max_w = body_max_width(ui, full_width);
                         ui.set_max_width(max_w);
                         ui.add_enabled_ui(editable, |ui| {
                             render_editor_body(ui, &mut cache, draft, &mut deferred);
@@ -2113,6 +2108,28 @@ impl GuiApp {
             TopAction::None => {}
         }
     }
+}
+
+/// Width to clamp a central-panel body to: fills the pane less an 18px
+/// scrollbar gutter, then caps at ~743px unless "Use full UI width" is on.
+/// `min(..)` lets it scale DOWN on narrow windows instead of overflowing.
+/// Shared by the module list, the manifest editor, and General Settings —
+/// was copy-pasted three times before this extraction.
+///
+/// Free function, not a `&self` method: `render_module_editor` computes this
+/// while `self.module_draft` is borrowed mutably (as `draft`) for the whole
+/// surrounding block, so a `&self` call there would conflict with that
+/// borrow. Taking `full_width` as a plain `bool` sidesteps it everywhere,
+/// not just at that one call site.
+///
+/// *Why this exists as its own helper:* IDE mode (see
+/// `docs/brainstorm/ide-mode.md`, S3) will need the clamp to NOT bind in its
+/// wide preview layout — one helper means one place to add that condition
+/// later instead of three. `Mode` doesn't exist yet, so that condition is
+/// deliberately not added here.
+fn body_max_width(ui: &egui::Ui, full_width: bool) -> f32 {
+    let avail = (ui.available_width() - 18.0).max(300.0);
+    if full_width { avail } else { avail.min(743.0) }
 }
 
 // ── Editor column geometry ────────────────────────────────────────────────
@@ -3889,10 +3906,8 @@ impl GuiApp {
             .drag_to_scroll(self.general_config.touch_mode)
             .show(ui, |ui| {
         ui.vertical(|ui| {
-        // Cap the row width like the module panel: fill the pane (less an 18px
-        // gutter), but cap at ~743px unless "Use full UI width" is on.
-        let avail = (ui.available_width() - 18.0).max(300.0);
-        let max_w = if self.general_config.full_width { avail } else { avail.min(743.0) };
+        // Cap the row width like the module panel.
+        let max_w = body_max_width(ui, self.general_config.full_width);
         ui.set_max_width(max_w);
 
         // Splash timeout
@@ -4254,7 +4269,7 @@ impl GuiApp {
 
 impl GuiApp {
     fn render_nav_panel(&mut self, ui: &mut egui::Ui) {
-        // Always show the bottom band (it's empty for General/Global Settings).
+        // Always show the bottom band (it's empty for General Settings/Global Profile).
         egui::TopBottomPanel::bottom("nav_settings")
             .exact_height(198.0)
             .show_separator_line(true)
@@ -4313,7 +4328,7 @@ impl GuiApp {
             action = Some(NavAction::SelectGeneral);
         }
         let is_global = self.nav_sel == NavSel::GlobalSettings;
-        if full_selectable(ui, is_global, egui::RichText::new(format!("\u{f0ac}{sep}Global Settings")).color(COL_GLOBAL)).clicked() {
+        if full_selectable(ui, is_global, egui::RichText::new(format!("\u{f0ac}{sep}Global Profile")).color(COL_GLOBAL)).clicked() {
             action = Some(NavAction::SelectGlobal);
         }
         ui.add_space(2.0);
@@ -4822,8 +4837,8 @@ impl GuiApp {
         }
     }
 
-    /// Delete a profile and return to Global Settings. Any game referencing it
-    /// falls back to no profile.
+    /// Delete a profile and return to the Global Profile view (`NavSel::GlobalSettings`).
+    /// Any game referencing it falls back to no profile.
     fn delete_profile(&mut self, name: &str) {
         let _ = self.paths.delete_preset(name);
         if self.game_config.config.modules.preset.as_deref() == Some(name) {

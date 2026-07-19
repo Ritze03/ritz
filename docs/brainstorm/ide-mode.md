@@ -360,7 +360,8 @@ renames in the scratch preview."
   sit behind. Fix the `GeneralSettings`-writes-to-`game_config` arm. Route `poll_detect` through
   the same writer. Ships alone, zero behaviour change, unblocks everything interactive that
   follows.
-- **S2 — Cosmetic.** "Global Settings" → "Global Profile" (gui.rs:4231, 1489). Extract a
+- **S2 — Cosmetic.** "Global Settings" → "Global Profile" (`GuiApp::render_nav_panel`'s nav
+  tree row, and the edit-context banner in `GuiApp::ui`). Extract a
   `body_max_width` helper replacing the three 743px literals.
 - **S3 — IDE shell, read-only preview.** Add `Mode { Config, Ide }` and the boxed three-button
   nav category. In IDE mode: drop `ext_list`, tree into the `nav` column, editor in Central,

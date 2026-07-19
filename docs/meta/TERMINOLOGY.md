@@ -73,6 +73,22 @@ amend the entry here.
   extra inheritance layer below it
   (`crates/ritz-core/src/config.rs:Preset.parent`).
 
+- **"Global Profile" (UI label for the global scope)** — as of 2026-07-19, the settings
+  GUI's nav tree and edit-context banner display the **global** scope layer (see Scope,
+  above) under the label "Global Profile" instead of its old label "Global Settings"
+  (`docs/brainstorm/ide-mode.md`, decision 9 — naming consistency with "Profiles" in the
+  nav, since it's still the base layer under everything). **This is a pure UI label —
+  do not read it as the Profile term defined above.** The global scope is not, and does
+  not become, a `crates/ritz-core/src/config.rs:Preset`: it has no `Parent`, is not
+  assignable to a game, is not one of the reusable named bundles under `profiles/`, and
+  is not stored at `profiles/global.json` — it stays exactly what the Scope entry
+  describes, stored at `global.json`
+  (`crates/ritz-core/src/config.rs:Paths.global_config`). The `NavSel::GlobalSettings`
+  enum variant, its field name, and the on-disk filename are all unchanged by this
+  rename — only the string rendered on screen changed
+  (`crates/ritz-app/src/gui.rs`, the nav tree row and the "Editing Global Profile —
+  applies to all games" banner).
+
 - **Backend** — an extension's optional route to a built-in Rust runtime handler
   (rather than pure JSON-declared env/wrapper/arg blocks), named in the extension's
   `"Backend"` field (`crates/ritz-core/src/schema.rs:Extension.backend`), e.g.

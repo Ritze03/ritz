@@ -73,7 +73,9 @@ context-specific controls for whatever's selected.
   select: `GeneralSettings`, `GlobalSettings`, `Profile(name)`, `Game(appid)`. Switching
   it clears `text_buffers`/`multi_edit` (in-progress edits) and reloads whichever config
   the new selection needs.
-- **Tree rows** — General Settings and Global Settings are always-visible top rows;
+- **Tree rows** — General Settings and Global Profile (label only; the `NavSel`
+  variant, file, and scope are still `GlobalSettings`/`global.json`/global scope, see
+  [TERMINOLOGY.md](../meta/TERMINOLOGY.md)) are always-visible top rows;
   below them, two `egui::CollapsingHeader`s list **Profiles** (pinned ones first, by
   slot 1–10, via `crate::gui::GuiApp::assign_pin`) and **Games**. `+ Add profile` /
   `+ Add game` switch the bottom band into a create-name form
@@ -93,7 +95,8 @@ context-specific controls for whatever's selected.
   - *Game* — editable AppID (Enter renames the on-disk file via
     `crate::gui::GuiApp::rename_game_appid`), editable Name, a **Profile** combo
     assigning which preset the game uses, Delete button.
-  - *General/Global Settings* — empty; their controls live in the central panel instead.
+  - *General Settings/Global Profile* — empty; their controls live in the central panel
+    instead.
 
 ## Module tree (`ext_list` panel)
 
@@ -505,7 +508,7 @@ just supplies its title/message and its own commit logic.
 
 1. Open from the splash (launch mode, Launch/Cancel bar visible) or standalone via
    `run_manager` (Continue always wins on close).
-2. Pick a target in the **left nav panel** — a game, a profile, Global Settings, or
+2. Pick a target in the **left nav panel** — a game, a profile, Global Profile, or
    General Settings.
 3. Pick a module in the **module tree** (second column) — grouped by author or by
    folder, toggle via **Group by Author** / **Show Inheritance** in the tree's footer.
