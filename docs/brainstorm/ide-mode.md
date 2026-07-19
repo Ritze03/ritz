@@ -384,6 +384,24 @@ corrections to *this* plan are recorded here.
   (`position(|s| s.id() == draft.id)`) no-ops when the edited module doesn't apply to the
   ambient game — which is routine once the tree browses `all_specs`. S3b appends in that
   case so the band always reflects what you're typing.
+- **The module header had to leave the editor column (2026-07-19).** Not in the plan: with
+  the header inside the editor's half, the `[Fork] [Delete] [✕] [Save]` cluster plus the
+  name/version/author heading (~500pt of row) was what set the editor column's minimum
+  usable width — under roughly a 1300pt window the cluster overflowed and drew over the
+  module name. It is now a `TopBottomPanel::top("ide_module_header")` spanning everything
+  right of the nav, declared between the nav and the preview panel. This forced the
+  header/body split described in `../features/settings-gui.md` ("Header / status / body
+  split"), because the header and body now render in different panel closures while the
+  body still holds `&mut module_draft`. The status lines deliberately stayed with the
+  body — they are conditional and would have resized a full-width band mid-keystroke.
+  *Still open:* the S4 button cleanup (`[Fork] [Delete] [Discard] [Save]`, Rename moved
+  inline beside the identity fields) was explicitly **not** bundled in; it is a separate
+  design change, and it is now easier to do because the cluster lives in one small free
+  function (`render_editor_header_row`).
+- **Ctrl+E is gone (2026-07-19).** Staged in the table above as "removed for now, not
+  ported" but missed at the time; removed along with `enter_editor_for_selection`, its
+  only caller. It was keyed off `selected_ext`, an index that only exists because the
+  Config-mode `ext_list` column exists — so it was never portable to IDE mode as written.
 
 **Deliberately left for S4/S5 (not defects):**
 

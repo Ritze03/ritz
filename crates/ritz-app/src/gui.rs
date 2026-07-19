@@ -37,6 +37,21 @@ use crate::theme::{self, COL_GAME, COL_GLOBAL, COL_PROFILE, ICON_EDIT, ICON_INHE
 /// a separate column with its own reasons, so it keeps its own literal.)
 const NAV_W: f32 = 280.0;
 
+/// Height of IDE Mode's module-header band, in points.
+///
+/// Derived, not eyeballed: `6.0` top inset + one control-height row + `8.0`
+/// bottom inset. The row is `max(Heading galley, interact_size.y)` and
+/// `interact_size.y` is `23.0` (`theme.rs`), which is at or above the 19pt
+/// heading's galley — so 23 is the row.
+///
+/// *Why `exact_height` and not auto-sizing:* the band spans the editor **and**
+/// preview columns, so any height change there reflows half the window. Pinning
+/// it also keeps the layout still on the frames where
+/// [`GuiApp::editor_header_info`] returns `None` (a module switch, before
+/// `ensure_draft` catches up) — an auto-sized band would collapse to nothing and
+/// snap back, which reads as a flicker.
+const IDE_HEADER_H: f32 = 6.0 + 23.0 + 8.0;
+
 #[derive(Debug, Clone, PartialEq)]
 enum NavSel {
     GeneralSettings, // splash timeout, default preset — shown in central panel
@@ -1528,9 +1543,54 @@ impl GuiApp {
 
         // ── Panel declaration order is load-bearing ──────────────────────────
         // egui hands each panel the rect left over by the panels declared before
-        // it. Order here is: nav (above) → ide_preview (full height, right) →
-        // ide_editor_band (bottom, in what's left) → CentralPanel (the editor).
+        // it (`TopBottomPanel`/`SidePanel::show` both start from
+        // `ctx.available_rect()`). Order here is: nav (above, left) →
+        // ide_module_header (top, spans what's right of the nav) → ide_preview
+        // (right, full remaining height) → ide_editor_band (bottom, in what's
+        // left) → CentralPanel (the editor).
+        //
+        // The header's slot is the load-bearing part: declared AFTER the nav it
+        // starts at the nav's right edge instead of the window's, and declared
+        // BEFORE the preview it spans the editor AND preview columns rather than
+        // just the editor's half. Move it after `render_ide_preview_panel` and it
+        // silently shrinks to the editor column — no compile error, just the old
+        // cramped layout back.
+        let mut ide_action = TopAction::None;
+        let mut ide_header: Option<EditorHeaderInfo> = None;
         if self.mode == Mode::Ide {
+            // Full-width module header, above both columns.
+            //
+            // *Why it spans both columns* (2026-07-19): the action cluster
+            // (`[Fork] [Delete] [✕] [Save]` + `Rename`) plus the name/version/author
+            // heading needs ~500pt, and inside the editor's half that set the
+            // column's effective minimum window width — the buttons collided with
+            // the module name on anything under ~1300pt wide. Spanning the full
+            // width right of the nav roughly halves that floor and decouples the
+            // editor column's width from the button row entirely.
+            if let NavSel::ModuleEditor(id) = self.nav_sel.clone() {
+                ide_header = self.editor_header_info(&id);
+                let cache = &mut self.icon_cache;
+                let info = ide_header.as_ref();
+                egui::TopBottomPanel::top("ide_module_header")
+                    .exact_height(IDE_HEADER_H)
+                    .show_separator_line(true)
+                    .frame(egui::Frame::none()
+                        .fill(theme::PANEL2)
+                        .inner_margin(egui::Margin {
+                            left: 8.0,
+                            right: 16.0,
+                            top: 6.0,
+                            bottom: 8.0,
+                        }))
+                    .show(ctx, |ui| {
+                        // `None` renders an empty band rather than skipping the
+                        // panel: `exact_height` holds the layout still while
+                        // `ensure_draft` catches up with a module switch.
+                        if let Some(info) = info {
+                            ide_action = render_editor_header_row(ui, cache, info);
+                        }
+                    });
+            }
             self.render_ide_preview_panel(ctx, &ide_specs, &preview, &collisions, dynamic_preview);
             // Reserved, declared-but-empty: the future diagnostics pane under the
             // editor column. `exact_height(198.0)` is the same band height as the
@@ -1616,7 +1676,10 @@ impl GuiApp {
             }
 
             if let NavSel::ModuleEditor(id) = self.nav_sel.clone() {
-                self.render_module_editor(ui, &id, true);
+                // IDE mode drew the header row in its own full-width band above
+                // and dispatches that click itself, below.
+                let header_inline = self.mode == Mode::Config;
+                self.render_module_editor(ui, &id, header_inline);
                 return;
             }
 
@@ -1638,6 +1701,19 @@ impl GuiApp {
                 changed = true;
             }
         });
+
+        // IDE mode's header band produced its click before the preview column and
+        // the editor body rendered; carry it out only now that both have. Acting on
+        // it at the point of the click would drop the draft mid-frame and leave
+        // everything downstream rendering a "no longer available" flash against
+        // state the header had already invalidated. This lands at the same point in
+        // the frame as Config mode's inline dispatch (the tail of
+        // `render_module_editor`, one closure up), so `ensure_draft`, the draft-drop
+        // guard, the IDE reopen invariant and the autosave interlock below all keep
+        // their existing order.
+        if let (Some(info), NavSel::ModuleEditor(id)) = (ide_header.as_ref(), self.nav_sel.clone()) {
+            self.dispatch_top_action(ide_action, &id, info.dirty, info.editable);
+        }
 
         if self.render_confirm_dialog(ctx) {
             changed = true;

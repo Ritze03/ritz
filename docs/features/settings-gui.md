@@ -81,13 +81,13 @@ preferences, not extension variables, so a module tree would have nothing to sel
 
 ```
 ┌───────────── titlebar (render_title_bar) ─────────────────────────┐
-├────────────────┬──────────────────────┬─────────────────────────┤
-│ ┌────────────┐ │  manifest editor      │  PREVIEW (read-only)     │
-│ │Set·IDE·Prof│ │  (render_module_      │  (render_module_settings │
-│ └────────────┘ │   editor, full-width) │   _body, read_only=true) │
-│ ⚠ errors banner│                       │                          │
-│ [module tree,  │←──── exactly half ───→│←──── exactly half ──────→│
-│  all_specs]    │                       │                          │
+├────────────────┬─────────────────────────────────────────────────┤
+│ ┌────────────┐ │ ide_module_header — name v… by …   [Fork][🗑][✕][Save] │
+│ │Prof·IDE·Set│ ├──────────────────────┬─────────────────────────┤
+│ └────────────┘ │  manifest editor      │  PREVIEW (read-only)     │
+│ ⚠ errors banner│  (render_module_      │  (render_module_settings │
+│ [module tree,  │   editor, full-width) │   _body, read_only=true) │
+│  all_specs]    │←──── exactly half ───→│←──── exactly half ──────→│
 ├────────────────┼──────────────────────┼─────────────────────────┤
 │ Group by Author│  ide_editor_band      │  ide_launch_band         │
 │ [+ New Module ]│  (198px, declared     │  (launch command, nested │
@@ -97,11 +97,61 @@ preferences, not extension variables, so a module tree would have nothing to sel
 ```
 
 **Panel declaration order is load-bearing** — egui hands each panel the rect left over
-by the panels declared before it, so `GuiApp::ui` declares, in this order: titlebar →
-`SidePanel::left("nav")` → `SidePanel::right("ide_preview_split")` →
-`TopBottomPanel::bottom("ide_editor_band")` → `CentralPanel`. Declaring the right panel
-first is what makes the bottom band span only the editor column instead of the whole
-window.
+by the panels declared before it (both `SidePanel::show` and `TopBottomPanel::show`
+start from `ctx.available_rect()`), so `GuiApp::ui` declares, in this order: titlebar →
+`SidePanel::left("nav")` → `TopBottomPanel::top("ide_module_header")` →
+`SidePanel::right("ide_preview_split")` → `TopBottomPanel::bottom("ide_editor_band")` →
+`CentralPanel`. Two slots in that order carry weight:
+
+- Declaring the **right panel before the bottom band** is what makes `ide_editor_band`
+  span only the editor column instead of the whole window.
+- Declaring the **header after the nav but before the right panel** is what makes it
+  start at the nav's right edge (not the window's) *and* span the editor **and** preview
+  columns (not just the editor's half). Moving it after `render_ide_preview_panel` would
+  silently shrink it back to the editor column — no compile error, just the old layout.
+
+### IDE-mode header band (`ide_module_header`)
+
+The module header — name, version, author, and the `[Fork] [Delete] [✕ Close] [Save]`
+(+ `Rename`) cluster — spans the **full width right of the nav**, above both columns.
+Rendered by the free function `render_editor_header_row`; see "Header / status / body
+split" under the manifest editor for how the state reaches it across panel closures.
+
+*Why full-width and not inside the editor column* (2026-07-19): the action cluster plus
+the heading needs roughly 500pt of row. Inside the editor's half — `(window − 280) / 2`
+— that made the **button row the thing setting the editor column's minimum usable
+width**: below about a 1300pt-wide window the right-to-left cluster overflowed its
+region and drew over the module name. (The editor's *field rows* were never the
+constraint: `editor_control_width` floors at `MIN_CONTROL_W`, so they degrade gracefully
+at any width.) Spanning the full width right of the nav roughly halves that floor and
+decouples the editor column's width from the button row outright, rather than moving
+the problem somewhere else.
+
+- **`exact_height(IDE_HEADER_H)`**, where `IDE_HEADER_H = 6.0 + 23.0 + 8.0` — top inset,
+  one `interact_size.y` control row, bottom inset. *Why pinned rather than auto-sized:*
+  the band spans half the window, so any height change reflows both columns; and on the
+  frames where `GuiApp::editor_header_info` returns `None` (a module switch, before
+  `ensure_draft` catches up) an auto-sized band would collapse to nothing and snap back,
+  which reads as a flicker. `None` renders an **empty band of the same height** instead.
+- **The status lines did NOT move up with the header.** They stay at the top of the
+  editor `CentralPanel`. *Why:* only the first line ("Unsaved changes" / "All changes
+  saved") is unconditional — the validation, `Requires` and pending-identity lines appear
+  and disappear **as you type**. In the full-width band they would resize it mid-keystroke
+  and shove the editor *and* the preview column down; kept in the editor column, any
+  height change stays confined to where it already was before the header moved. This
+  preserves the focus-stability contract documented under the manifest editor.
+- **Fill is `theme::PANEL2`**, matching the 198px bands, so the header reads as a toolbar
+  distinct from both columns. *Alternative if that ever looks wrong:* `theme::PANEL` (or
+  the default central-panel fill) makes it read as part of the editor instead — a
+  one-line change at the `.frame(...)` call in `GuiApp::ui`.
+- **The click is dispatched after the CentralPanel**, not at the point of the click:
+  `ide_action` is hoisted out of the panel closure and fed to
+  `GuiApp::dispatch_top_action` once the preview column and editor body have rendered.
+  Acting on Save/Close inside the header closure would drop the draft mid-frame and leave
+  everything downstream rendering a "no longer available" flash against state the header
+  had already invalidated.
+- **Config mode is untouched** — the whole band is inside `if self.mode == Mode::Ide`, and
+  `render_module_editor(.., header_inline = true)` keeps drawing the header inline there.
 
 - The `ext_list` column is **dropped entirely** in IDE mode (its tree moves into the nav
   column); a second copy would be redundant and would eat the width the editor/preview
