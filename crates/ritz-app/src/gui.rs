@@ -28,6 +28,15 @@ use crate::icon_center::IconCenterCache;
 
 use crate::theme::{self, COL_GAME, COL_GLOBAL, COL_PROFILE, ICON_EDIT, ICON_INHERIT};
 
+/// Width of the left navigator column, in points.
+///
+/// Named because two places have to agree on it: the `SidePanel::left("nav")`
+/// that *is* the column, and IDE Mode's 50/50 split, which sizes itself from
+/// "everything to the right of the nav". A literal in both would let them drift.
+/// (The Config-mode `ext_list` column happens to be the same width today; that's
+/// a separate column with its own reasons, so it keeps its own literal.)
+const NAV_W: f32 = 280.0;
+
 #[derive(Debug, Clone, PartialEq)]
 enum NavSel {
     GeneralSettings, // splash timeout, default preset — shown in central panel
@@ -1376,7 +1385,7 @@ impl GuiApp {
         self.render_title_bar(ctx);
 
         egui::SidePanel::left("nav")
-            .exact_width(280.0)
+            .exact_width(NAV_W)
             .resizable(false)
             .frame(egui::Frame::none().fill(theme::PANEL))
             .show(ctx, |ui| {
@@ -3301,37 +3310,36 @@ impl GuiApp {
         let spec = ide_specs.iter().find(|s| s.id() == id).cloned();
         let touch = self.general_config.touch_mode;
         // ── Column split ────────────────────────────────────────────────────
-        // Editor and preview each get HALF of everything right of the fixed
-        // 280px nav column. The splitter — not a constant — is the user's width
-        // control, so the only hard limits are the two columns' usability
-        // floors:
-        //   * preview 400px — `render_field` reserves a fixed 260px for the
-        //     label/checkbox column before the control even starts.
-        //   * editor  340px — `body_max_width`'s `.max(300.0)` floor plus the
-        //     column's own margins.
-        // *Why the old `.clamp(400.0, 900.0)` was wrong:* the 900px **maximum**
-        // binds on any wide display, so the editor kept everything past 900px
-        // and the split skewed to roughly a third / two thirds. The max is now
-        // derived from the window instead of hard-coded.
-        const PREVIEW_MIN_W: f32 = 400.0;
-        const EDITOR_MIN_W: f32 = 340.0;
-        let avail = (ctx.screen_rect().width() - 280.0).max(0.0);
-        // `.max(PREVIEW_MIN_W)` keeps the range non-empty on a narrow window,
-        // where `avail - EDITOR_MIN_W` can fall below the preview's own floor.
-        let max_w = (avail - EDITOR_MIN_W).max(PREVIEW_MIN_W);
-        let default_w = (avail * 0.5).clamp(PREVIEW_MIN_W, max_w);
+        // A STATIC 50/50: editor and preview each get exactly half of everything
+        // right of the fixed `NAV_W` nav column. Recomputed from the live
+        // `screen_rect` every frame, so the halves track a window resize instead
+        // of holding a width captured at first paint.
+        //
+        // *Why fixed and not a clamped drag range:* the splitter could be dragged
+        // far enough left that the preview slid **behind** the nav column and
+        // vanished. Clamping would paper over that; removing the handle removes
+        // the failure mode outright, and the user asked for a static half-and-half
+        // to begin with. The old `PREVIEW_MIN_W`/`EDITOR_MIN_W`/`width_range`
+        // machinery only existed to bound that drag, so it is gone rather than
+        // left inert — half a window is comfortably above either column's floor
+        // on any display this app is usable on.
+        //
+        // *Not exactly half, by one pixel:* `SidePanel` paints its separator line
+        // out of the space **outside** `exact_width`, so the editor's central
+        // panel ends up ~1px narrower than the preview. Absorbing that into the
+        // computation would make the two columns provably unequal in the other
+        // direction; a 1px asymmetry from a hairline is the smaller lie.
+        let split_w = ((ctx.screen_rect().width() - NAV_W) * 0.5).max(0.0);
 
-        // Id deliberately bumped from "ide_preview" to "ide_preview_split".
-        // *Why:* `default_width` only applies the first time a panel id is seen,
-        // and eframe persists egui memory by default — so anyone who ran the
-        // previous build has the old capped width stored and would keep seeing
-        // the skewed split no matter what this code computes. A new id retires
-        // that stale entry exactly once. (The `push_id("ide_preview")` widget
-        // namespace below is unrelated and intentionally left alone.)
+        // Id deliberately bumped from "ide_preview" to "ide_preview_split" back
+        // when the width was persisted. It stays: `exact_width` + `resizable(false)`
+        // ignores stored width entirely, so the stale-memory hazard that motivated
+        // the rename is now moot, but renaming again would only churn ids. (The
+        // `push_id("ide_preview")` widget namespace below is unrelated and
+        // intentionally left alone.)
         egui::SidePanel::right("ide_preview_split")
-            .resizable(true)
-            .width_range(PREVIEW_MIN_W..=max_w)
-            .default_width(default_w)
+            .resizable(false)
+            .exact_width(split_w)
             .frame(egui::Frame::none().fill(theme::PANEL))
             .show(ctx, |ui| {
                 let mut band = egui::TopBottomPanel::bottom("ide_launch_band")
@@ -4782,10 +4790,18 @@ impl GuiApp {
         }
     }
 
-    /// The bordered GENERAL category box that sits above the nav tree: the three
-    /// top-level destinations. Replaces the old single `header_label("Profiles /
-    /// Games")` — the header is now the box's title and the destinations are rows
-    /// inside it, so the thing the tree below is showing is always named on screen.
+    /// The bordered category **tab bar** that sits above the nav tree: the three
+    /// top-level destinations as three buttons side by side. Replaces the old
+    /// single `header_label("Profiles / Games")` — the destinations are now named
+    /// on screen, so what the tree below is showing is never a guess.
+    ///
+    /// *Why a horizontal tab strip and not the earlier stacked rows:* three
+    /// full-width rows plus an uppercase `GENERAL` caption spent four lines of
+    /// vertical space on navigation that the module tree needs, and read as a
+    /// list of *items* rather than as a mode switch. One row of tabs is the
+    /// conventional shape for "pick one of N views" and costs one line. The
+    /// caption is gone with it (the tabs label themselves); the border stays,
+    /// which is what still groups the three as one control.
     ///
     /// Border idiom copied from [`editor_card`] rather than reusing it:
     /// `editor_card` is specialised for the manifest editor (it takes an
@@ -4808,23 +4824,29 @@ impl GuiApp {
             .rounding(egui::Rounding::same(8.0))
             .inner_margin(egui::Margin::symmetric(8.0, 8.0))
             .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                // `section_label` (uppercase ACCENT 12px), not `header_label`
-                // (uppercase FAINT 11px): this is an emphasized section heading,
-                // the same role the settings-page section headers use, and the
-                // FAINT gray is exactly why the box "drowned" in the panel.
-                ui.label(theme::section_label("General"));
-                ui.add_space(4.0);
-                // Cog reused verbatim from the old General Settings tree row.
-                if nav_category_row(ui, is_general, "\u{f013}", "General Settings", mono).clicked() {
-                    action = Some(NavCategory::GeneralSettings);
-                }
-                if nav_category_row(ui, is_ide, "\u{eef4}", "IDE Mode", mono).clicked() {
-                    action = Some(NavCategory::Ide);
-                }
-                if nav_category_row(ui, is_games, "\u{f4ff}", "Games / Profiles", mono).clicked() {
-                    action = Some(NavCategory::GamesProfiles);
-                }
+                let avail = ui.available_width();
+                ui.set_width(avail);
+                // Equal thirds of whatever the frame leaves, minus the two gutters
+                // between them — computed, not a constant, so the tabs stay equal
+                // if the nav width or the frame margins ever move.
+                let tab_w = ((avail - 2.0 * TAB_GAP) / 3.0).max(0.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = TAB_GAP;
+                    // Cog reused verbatim from the old General Settings tree row.
+                    if nav_category_tab(ui, tab_w, is_general, "\u{f013}", "Settings", mono).clicked() {
+                        action = Some(NavCategory::GeneralSettings);
+                    }
+                    // `\u{f044}` is `theme::ICON_EDIT`, the same pencil the module
+                    // detail header uses for its Edit affordance. Reused on purpose:
+                    // both mean "author this thing". It replaced `\u{eef4}`, whose
+                    // ink is too fine to read at 11px.
+                    if nav_category_tab(ui, tab_w, is_ide, theme::ICON_EDIT, "IDE Mode", mono).clicked() {
+                        action = Some(NavCategory::Ide);
+                    }
+                    if nav_category_tab(ui, tab_w, is_games, "\u{f4ff}", "Profiles", mono).clicked() {
+                        action = Some(NavCategory::GamesProfiles);
+                    }
+                });
             });
         ui.add_space(2.0);
         action
@@ -4920,9 +4942,16 @@ impl GuiApp {
             let w = ui.available_width();
             if ui
                 .add_sized([w, 30.0], theme::secondary_button(format!("\u{f07b}{sep}Open Folder")))
+                .on_hover_text("Open the user extensions folder")
                 .clicked()
             {
-                let _ = Command::new("xdg-open").arg(self.paths.games_dir()).spawn();
+                // `user_extensions()`, **not** `games_dir()` — IDE Mode edits module
+                // *manifests*, which live in `~/.config/ritz/extensions/`. The
+                // Config-mode module footer's identical-looking button still opens
+                // `games_dir()`; that is a pre-existing target bug on a different
+                // screen and is deliberately left alone here, so the two buttons
+                // now open different folders on purpose.
+                let _ = Command::new("xdg-open").arg(self.paths.user_extensions()).spawn();
             }
             if ui
                 .add_sized([w, 30.0], theme::primary_button(format!("\u{f067}{sep}New Module")))
@@ -5889,47 +5918,115 @@ fn full_selectable(
     .inner
 }
 
-/// One row of the nav's GENERAL category box: `glyph` + `label`, full-width
-/// selectable.
+/// Gutter between two adjacent category tabs, in points. Tighter than the
+/// global `item_spacing.x` (7px) — see [`nav_category_tab`] for the width
+/// arithmetic this number is part of.
+const TAB_GAP: f32 = 4.0;
+
+/// Text size for a category tab's glyph + label, in points.
 ///
-/// Built on [`full_selectable`] — the very same call the nav tree's rows use —
-/// so the row shape, hit area and selection fill are literally the tree's, and
-/// the box reads as the tree's header rather than as a competing widget. Only
-/// the *ink* differs, which is what carries the category/scope distinction:
+/// **This number is measured, not chosen.** The nav column is a fixed
+/// [`NAV_W`] 280px; the header frame's 16px side margins and the category
+/// frame's 8px inner margins leave **232px** for three tabs, i.e. `(232 −
+/// 2×`[`TAB_GAP`]`) / 3 ≈ 74.7px` each. Worst case is `mono_ui` (the default),
+/// where Geist Mono makes every glyph 0.6em wide and all three labels are
+/// exactly 8 characters:
 ///
-/// - **selected** — glyph in `ACCENT`, label in full-brightness `TEXT`, over
-///   `full_selectable`'s accent-tinted fill. *Why color and not a bold weight:*
-///   the bold family (`FontFamily::Name("bold")`) is reserved for the logo
-///   wordmark, and a per-row weight switch would reflow the row's width.
-/// - **unselected** — glyph in `FAINT`, label in `DIM`. Legible but clearly
-///   receded, so exactly one row reads as "live".
+/// | size | glyph + gap + label (mono) | fits 74.7px? |
+/// |------|----------------------------|--------------|
+/// | 13px (Body)  | 8 + 8 + 64 = **80px** | no — clips |
+/// | 12px         | 7 + 7 + 56 = **70px** | only just — 4.7px total slack |
+/// | 11px (Small) | 6 + 7 + 48 = **61px** | yes — 13.7px slack |
 ///
-/// *Why every color is explicit (no `PLACEHOLDER`):* a *selected*
-/// `selectable_label` resolves the placeholder color to the selection stroke,
-/// which would tint the label blue — the same trap documented in [`leaf`].
+/// So 11px, which is also an existing step of the type scale
+/// (`TextStyle::Small`) rather than an invented size. *Consequence worth
+/// knowing:* the fit is driven by the **label length**, not by this size — any
+/// label longer than 8 characters clips again, so the three labels cannot grow
+/// without revisiting this table.
+///
+/// *Why not icon-only with tooltips,* which would fit at full 13px: a tooltip
+/// is not discoverable, and top-level navigation is exactly where a first-time
+/// reader should not have to hover to find out where a button goes.
+const TAB_TEXT_SIZE: f32 = 11.0;
+
+/// One tab of the nav's category bar: `glyph` + `label`, centered in a cell of
+/// exactly `tab_w` points.
+///
+/// *Why hand-painted instead of [`full_selectable`],* which the stacked-row
+/// version used: `full_selectable` is `top_down_justified`, i.e. deliberately
+/// full-width — the wrong primitive once three of these have to share one row.
+/// Its selection fill is also a plain rounded rect, which in a horizontal strip
+/// reads as "one cell is slightly lighter" rather than "this is the open tab".
+///
+/// Selected state therefore layers three cues, all from existing theme tokens:
+///
+/// - **fill** `SEL` (the same accent tint `full_selectable` uses) with a `SELBD`
+///   hairline, rounded on the **top two corners only** so the cell sits on its
+///   underline the way a tab sits on its strip;
+/// - **a 2px `ACCENT` underline** across the cell's bottom edge — the actual
+///   "this one is active" signal, and the cue that survives at a glance;
+/// - **ink**: glyph in `ACCENT`, label in full-brightness `TEXT`.
+///
+/// Unselected is transparent (a `HOV` wash on hover only), glyph in `FAINT`,
+/// label in `DIM` — legible but clearly receded, so exactly one tab reads as
+/// live. *Why color and not a bold weight:* the bold family
+/// (`FontFamily::Name("bold")`) is reserved for the logo wordmark, and a weight
+/// switch would reflow the label inside a fixed-width cell.
 ///
 /// Icons go through a plain [`LayoutJob`], **not** [`IconCenterCache`]: that
-/// cache exists to center glyph *ink* inside a square `icon_button`, and these
-/// are left-aligned label rows, identical in construction to `leaf`'s.
-fn nav_category_row(
+/// cache corrects glyph *ink* for a square `icon_button`, whereas here the glyph
+/// is just the first run of a text line, identical in construction to [`leaf`]'s.
+fn nav_category_tab(
     ui: &mut egui::Ui,
+    tab_w: f32,
     selected: bool,
     glyph: &str,
     label: &str,
     mono: bool,
 ) -> egui::Response {
-    // Same font-independent icon→text gap the tree leaves use.
-    let gap = if mono { 8.0 } else { 7.0 };
+    // Same font-independent icon→text gap idiom the tree leaves use, scaled to
+    // the smaller tab text.
+    let gap = if mono { 7.0 } else { 6.0 };
     let (icon_col, text_col) = if selected {
         (theme::ACCENT, theme::TEXT)
     } else {
         (theme::FAINT, theme::DIM)
     };
-    let font_id = ui.style().text_styles[&egui::TextStyle::Body].clone();
+    let font_id = egui::FontId::new(TAB_TEXT_SIZE, egui::FontFamily::Proportional);
     let mut job = LayoutJob::default();
     job.append(glyph, 0.0, TextFormat { font_id: font_id.clone(), color: icon_col, ..Default::default() });
     job.append(label, gap, TextFormat { font_id, color: text_col, ..Default::default() });
-    full_selectable(ui, selected, job)
+    let galley = ui.fonts(|f| f.layout_job(job));
+
+    // Cell height: the standard control height plus the underline's own band, so
+    // the text keeps its usual breathing room and the underline is added space
+    // rather than stolen space.
+    const UNDERLINE_H: f32 = 2.0;
+    let h = ui.spacing().interact_size.y + UNDERLINE_H;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(tab_w, h), egui::Sense::click());
+
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        // Top corners only — `sw`/`se` stay square so the cell meets its
+        // underline (and the box's inner edge) flush.
+        let rounding = egui::Rounding { nw: 6.0, ne: 6.0, sw: 0.0, se: 0.0 };
+        if selected {
+            painter.rect(rect, rounding, theme::SEL, egui::Stroke::new(1.0, theme::SELBD));
+            let underline = egui::Rect::from_min_max(
+                egui::pos2(rect.left(), rect.bottom() - UNDERLINE_H),
+                rect.right_bottom(),
+            );
+            painter.rect_filled(underline, egui::Rounding::ZERO, theme::ACCENT);
+        } else if resp.hovered() {
+            painter.rect_filled(rect, rounding, theme::HOV);
+        }
+        // Centered on the text band (the cell minus the underline strip), not on
+        // the whole cell — otherwise the label rides 1px low on every tab.
+        let text_band = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), rect.bottom() - UNDERLINE_H));
+        let pos = text_band.center() - galley.size() * 0.5;
+        ui.painter().galley(pos, galley, theme::TEXT);
+    }
+    resp
 }
 
 /// A single selectable extension leaf.

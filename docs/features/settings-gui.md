@@ -82,18 +82,17 @@ preferences, not extension variables, so a module tree would have nothing to sel
 ```
 ┌───────────── titlebar (render_title_bar) ─────────────────────────┐
 ├────────────────┬──────────────────────┬─────────────────────────┤
-│ ┌ GENERAL ───┐ │  manifest editor      │  PREVIEW (read-only)     │
-│ │ Gen. Set.  │ │  (render_module_      │  (render_module_settings │
-│ │ IDE Mode   │ │   editor, full-width) │   _body, read_only=true) │
-│ │ Games/Prof.│ │                       │                          │
-│ └────────────┘ │                       │                          │
+│ ┌────────────┐ │  manifest editor      │  PREVIEW (read-only)     │
+│ │Set·IDE·Prof│ │  (render_module_      │  (render_module_settings │
+│ └────────────┘ │   editor, full-width) │   _body, read_only=true) │
 │ ⚠ errors banner│                       │                          │
-│ [module tree,  │                       │                          │
+│ [module tree,  │←──── exactly half ───→│←──── exactly half ──────→│
 │  all_specs]    │                       │                          │
 ├────────────────┼──────────────────────┼─────────────────────────┤
 │ Group by Author│  ide_editor_band      │  ide_launch_band         │
 │ [+ New Module ]│  (198px, declared     │  (launch command, nested │
-│ [Open Folder  ]│   but empty)          │   inside the preview)    │
+│ [Open Folder →]│   but empty)          │   inside the preview)    │
+│  extensions/   │                       │                          │
 └────────────────┴──────────────────────┴─────────────────────────┘
 ```
 
@@ -113,22 +112,29 @@ window.
 - `ide_editor_band` is deliberately **declared but empty**, reserved for a future
   diagnostics pane. Its `exact_height(198.0)` matches the nav footer band so the two
   bottom edges align.
-- `ide_preview_split` is `resizable(true)` and defaults to **half** of everything right
-  of the fixed 280px nav column, so the editor and preview start 50/50. The only limits
-  are the two columns' usability floors: the preview cannot go below **400px**
-  (`render_field` reserves a fixed 260px for the label/checkbox column before the
-  control) and the editor is held at **340px** by deriving the preview's *maximum* from
-  the window (`avail - 340`, itself floored at 400 so the range stays non-empty on a
-  narrow window). *Why no constant upper bound:* the previous `width_range(400.0..=900.0)`
-  meant the 900px maximum bound on any wide display — the editor kept everything past it
-  and the split skewed to roughly a third. The splitter, not a constant, is the user's
-  width control.
-- *Why the panel id is `ide_preview_split` and not `ide_preview`:* `default_width` only
-  applies the first time egui sees a panel id, and eframe persists egui memory by
-  default, so anyone who ran the previous build had the old capped width stored and would
-  have kept the skewed split regardless of the computed default. The new id retires that
-  stale entry once. The `push_id("ide_preview")` widget namespace inside the panel is
-  unrelated and unchanged.
+- `ide_preview_split` is **`resizable(false)` with an `exact_width` of exactly half** of
+  everything right of the fixed `NAV_W` (280px) nav column:
+  `((ctx.screen_rect().width() - NAV_W) * 0.5).max(0.0)`, recomputed every frame so the
+  halves track a window resize instead of holding a width captured at first paint.
+
+  *Why static and not a clamped drag range* (2026-07-19): the splitter could be dragged
+  far enough left that the preview slid **behind** the nav column and disappeared.
+  Clamping would have papered over that; removing the handle removes the failure mode
+  outright, and a static half-and-half is what was asked for. The `PREVIEW_MIN_W` /
+  `EDITOR_MIN_W` / `width_range` / `default_width` machinery existed only to bound that
+  drag and was deleted rather than left inert — half a window clears either column's
+  usability floor (preview 400px, editor 340px) on any display this app is usable on.
+
+  *It is half to within one pixel, not exactly half:* `SidePanel` paints its separator
+  line out of the space **outside** `exact_width`, so the editor's central panel ends up
+  ~1px narrower. Compensating would make the columns provably unequal the other way; a
+  1px asymmetry from a hairline is the smaller lie.
+- The panel id is `ide_preview_split` rather than `ide_preview` for a reason that is now
+  **historical**: `default_width` only applied the first time egui saw a panel id, and
+  eframe persists egui memory, so the rename was needed to retire a stale stored width.
+  `exact_width` + `resizable(false)` ignores stored width entirely, so the hazard is
+  gone; the id stays only because renaming again would be pure churn. The
+  `push_id("ide_preview")` widget namespace inside the panel is unrelated and unchanged.
 - The editor column renders at `body_max_width(ui, full_width = true)`: the 743px clamp
   exists for Config mode's wider unsplit central panel and would only add a dead gutter
   here.
@@ -139,10 +145,10 @@ window.
 fixed-height (198px) bottom band. The header is constant across both modes; the body and
 the band swap on `Mode`.
 
-- **Header — the GENERAL category box** (`GuiApp::render_nav_category_box`): a bordered
+- **Header — the category tab bar** (`GuiApp::render_nav_category_box`): a bordered
   frame (the `editor_card` border idiom, rebuilt locally — `editor_card` itself is
-  specialised for the manifest editor) titled `GENERAL`, containing three rows:
-  **General Settings**, **IDE Mode**, **Games / Profiles**. It replaced the old single
+  specialised for the manifest editor) holding three tabs **side by side in one
+  horizontal row**: **Settings**, **IDE Mode**, **Profiles**. It replaced the old single
   `header_label("Profiles / Games")`. *Why a box and not two top-level categories:* it
   is the cheapest change that splits the old "Profiles / Games" destination in two — the
   nav's existing "fixed header box above a scrolling tree" shape is reused verbatim and
@@ -150,7 +156,15 @@ the band swap on `Mode`.
   after the render closure by `GuiApp::select_nav_category` (the closure already holds
   `&mut self`).
 
-  **The box is the *only* control for these three destinations, and it is always
+  *Why a horizontal tab strip and not the original stacked rows* (2026-07-19): three
+  full-width rows plus an uppercase `GENERAL` caption spent four lines of vertical space
+  on navigation that the module tree needs, and read as a list of *items* rather than as
+  a mode switch. One row of tabs is the conventional shape for "pick one of N views" and
+  costs one line. The caption was removed with it — the tabs label themselves — and the
+  labels shortened (`General Settings` → **Settings**, `Games / Profiles` →
+  **Profiles**). The border stays; it is what still groups the three as one control.
+
+  **The bar is the *only* control for these three destinations, and it is always
   truthful.** `is_ide` / `is_general` / `is_games` are recomputed from `mode` and
   `nav_sel` on every frame — there is no cached "current category" that could drift, so
   any other code path that moves `nav_sel` (Close, Ctrl+E, the exit interlock) is
@@ -158,33 +172,68 @@ the band swap on `Mode`.
 
   Each category owns what the list below it shows:
 
-  | Category | List below the box |
+  | Tab | List below the bar |
   | --- | --- |
-  | General Settings | **empty** — the page renders in the central panel |
+  | Settings | **empty** — the page renders in the central panel |
   | IDE Mode | all modules (`render_ide_module_tree` over `all_specs`) |
-  | Games / Profiles | Global Profile · Profiles ▸ · Games ▸ |
+  | Profiles | Global Profile · Profiles ▸ · Games ▸ |
 
-  *Why General Settings shows an empty list:* the tree lists config **scopes**, and
+  *Why Settings shows an empty list:* the tree lists config **scopes**, and
   General Settings is not one — it edits app-wide preferences. Drawing the scope tree
   under it would offer a selection the right-hand panel isn't showing.
-  - *Games / Profiles* from IDE mode calls `exit_module_editor`, which restores the
+  - *Profiles* from IDE mode calls `exit_module_editor`, which restores the
     remembered view (else the ambient game) and drops the draft. Coming from **General
     Settings** it lands on the ambient game (`NavSel::Game(appid)`, the same destination
     `editor_exit_target` defaults to) — leaving `nav_sel` on `GeneralSettings` would make
     the box snap straight back to that category and the click look dead.
   - *IDE Mode* opens `all_specs[ide_selected]` in the editor, establishing the
     `nav_sel == ModuleEditor(_)` invariant IDE mode's columns rely on.
-  - **Row rendering** (`crate::gui::nav_category_row`): a glyph + label built as a
-    `LayoutJob` and passed to `full_selectable` — the *same* call the tree's rows use, so
-    row shape, hit area and selection fill are literally the tree's and the box reads as
-    the tree's header rather than a competing widget. Only the ink differs: **selected**
-    is glyph `ACCENT` + label `TEXT`, **unselected** is glyph `FAINT` + label `DIM`. The
-    box title uses `theme::section_label` (uppercase `ACCENT`), not `header_label`
-    (uppercase `FAINT`) — it is an emphasized section heading, and the faint gray is what
-    made the box recede into the panel. Glyphs are `\u{f013}` (cog, reused verbatim from
-    the retired tree row), `\u{f121}` (code) and `\u{f11b}` (gamepad); they go through a
-    plain `LayoutJob`, **not** `IconCenterCache`, which exists to center glyph ink inside
-    a square `icon_button` and has nothing to say about a left-aligned label row.
+  - **Tab rendering** (`crate::gui::nav_category_tab`): a glyph + label built as a
+    `LayoutJob` and hand-painted into a cell of exactly `tab_w` points. *Why not
+    `full_selectable`,* which the stacked-row version used: it is `top_down_justified`,
+    i.e. deliberately full-width — the wrong primitive once three tabs share one row —
+    and its plain rounded selection fill reads in a horizontal strip as "one cell is
+    slightly lighter" rather than "this is the open tab".
+
+    **Selected state layers three cues**, all from existing theme tokens: a `SEL` fill
+    with a `SELBD` hairline, rounded on the **top two corners only** so the cell sits on
+    its underline the way a tab sits on its strip; a **2px `ACCENT` underline** along the
+    bottom edge (the cue that survives at a glance); and ink — glyph `ACCENT`, label
+    `TEXT`. Unselected is transparent (a `HOV` wash on hover only), glyph `FAINT`, label
+    `DIM`. *Why colour and not a bold weight:* the bold family
+    (`FontFamily::Name("bold")`) is reserved for the logo wordmark, and a weight switch
+    would reflow the label inside a fixed-width cell.
+
+    **Width and text size are measured, not chosen.** The nav column is a fixed `NAV_W`
+    280px; the header frame's 16px side margins and the category frame's 8px inner
+    margins leave **232px**, so each tab is `(232 − 2×TAB_GAP) / 3 ≈ 74.7px` (`TAB_GAP`
+    = 4px, tighter than the global 7px `item_spacing.x`). Worst case is `mono_ui` (the
+    default), where Geist Mono makes every glyph 0.6em wide and all three labels are
+    exactly 8 characters:
+
+    | size | glyph + gap + label (mono) | fits 74.7px? |
+    | --- | --- | --- |
+    | 13px (`Body`) | 8 + 8 + 64 = **80px** | no — clips |
+    | 12px | 7 + 7 + 56 = **70px** | only just — 4.7px slack |
+    | 11px (`Small`) | 6 + 7 + 48 = **61px** | yes — 13.7px slack |
+
+    Hence `TAB_TEXT_SIZE = 11.0`, which is also an existing step of the type scale rather
+    than an invented size. *Consequence worth knowing:* the fit is driven by **label
+    length**, not by the size — any label longer than 8 characters clips again, so the
+    three labels cannot grow without revisiting this table. *Why not icon-only with
+    tooltips,* which would fit at full 13px: a tooltip is not discoverable, and top-level
+    navigation is exactly where a first-time reader should not have to hover to find out
+    where a button goes.
+
+    Glyphs are `\u{f013}` (cog, reused verbatim from the retired tree row),
+    `theme::ICON_EDIT` = `\u{f044}` (pencil) and `\u{f4ff}` (person). The pencil replaced
+    `\u{eef4}` on 2026-07-19 — that glyph's ink is too fine to read at this size — and is
+    deliberately the *same* pencil the module detail header uses for its Edit
+    affordance, since both mean "author this thing". All three resolve from
+    `resources/assets/GeistMonoNerdFont-Regular.otf` via the `Proportional` family's icon
+    fallback, so they share one font path. They go through a plain `LayoutJob`, **not**
+    `IconCenterCache`, which corrects glyph ink for a square `icon_button` and has
+    nothing to say about a glyph that is simply the first run of a text line.
 - **Body** — `Mode::Config`: `GuiApp::render_nav_tree`, wrapped in the `nav_live`
   disable-while-dirty gate — **unless** `nav_sel == GeneralSettings`, which renders
   nothing at all (see the table above). `Mode::Ide`: `GuiApp::render_ide_module_tree` — the
@@ -206,6 +255,14 @@ the band swap on `Mode`.
   IDE mode) and **Clear Settings** (it clears stored *config*; IDE Mode edits manifests
   and must never touch config).
 
+  **Open Folder here opens `Paths::user_extensions()`** (`~/.config/ritz/extensions/`),
+  not `games_dir()` — IDE Mode edits module *manifests*, and that is where they live
+  (2026-07-19). Note the Config-mode module footer (`GuiApp::render_modules_footer`) has
+  an identical-looking Open Folder button that still opens `games_dir()`; that is a
+  **pre-existing target bug on a different screen**, left alone deliberately because
+  changing it is a separate behaviour change needing its own decision. The two buttons
+  therefore open different folders on purpose — this is not drift.
+
 - **`NavSel`** (`crates/ritz-app/src/gui.rs:NavSel`) is the four things the tree can
   select: `GeneralSettings`, `GlobalSettings`, `Profile(name)`, `Game(appid)`. Switching
   it clears `text_buffers`/`multi_edit` (in-progress edits) and reloads whichever config
@@ -218,10 +275,10 @@ the band swap on `Mode`.
   `+ Add game` switch the bottom band into a create-name form
   (`GuiApp::creating_profile` / `GuiApp::creating_game`).
   There is **no General Settings row in the tree** — it is reachable only from the
-  GENERAL box. *Why removed:* with the box present the row was a second, competing
-  control for the same destination. Selecting it left the box reading "Games / Profiles"
+  category tab bar. *Why removed:* with the bar present the row was a second, competing
+  control for the same destination. Selecting it left the bar reading "Profiles"
   while the panel showed General Settings, and picking any profile or game afterwards
-  silently flipped the box's category. One destination, one control. This is a
+  silently flipped the bar's category. One destination, one control. This is a
   deliberate Config-mode rendering change (user-confirmed) and supersedes the earlier
   "Config mode stays pixel-identical" constraint for this row alone.
 - **Inheritance indicators in the tree** — each profile/game row can carry an
