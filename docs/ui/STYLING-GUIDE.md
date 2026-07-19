@@ -222,6 +222,40 @@ Note that egui's **own** widgets (buttons, fields) moved to `StrokeKind::Inside`
 0.31, which is not something a call site can override; their 1pt borders therefore sit
 one point further in than they did on 0.29. Widget *sizing* is unaffected.
 
+### Translucent fills: use `theme::tint`, never `Color32::from_rgba_unmultiplied`
+
+**egui changed what `from_rgba_unmultiplied` means between 0.29 and 0.33.** Both build a
+lookup table, but the entry went from gamma-correct
+
+```text
+gamma_u8_from_linear_f32(linear_f32_from_gamma_u8(value) * alpha_lin)   // 0.29
+```
+
+to a naive multiply
+
+```text
+fast_round(value as f32 * alpha_lin)                                    // 0.33
+```
+
+At the low alphas this app uses that is not subtle. `COL_GAME`'s green at alpha 16
+premultiplies to **42** under 0.29 and **10** under 0.33, so a scope-tinted field row
+composited over `PANEL` rendered `rgb(43,71,96)` before the upgrade and `rgb(33,41,49)`
+after — the tint all but disappeared. It was caught by eye, then confirmed by sampling
+the two screenshots.
+
+`theme::tint(base, alpha)` reproduces the 0.29 maths. **Call it for any translucent
+fill or stroke.** The naive form is arguably more defensible — premultiplied alpha
+ought to be applied in the space the channels live in — but every tint here was chosen
+by eye against the old behaviour, so reproducing it is what keeps the palette looking
+like itself.
+
+Two deliberate exceptions, both of which render identically under either version because
+they never call the egui function: `SEL`/`SELBD`/`HOV` are hand-expanded constants, and
+`selection_tint` reproduces *their* naive integer premultiply on purpose.
+
+`tint_reproduces_egui_029_gamma_correct_premultiply` pins the values, derived from a
+pre-upgrade screenshot rather than from arithmetic.
+
 ### Icon → text gap: always `icon_sep`
 
 Whenever a Nerd Font glyph and its label live in **one string**, separate them with

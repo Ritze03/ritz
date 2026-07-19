@@ -4927,15 +4927,7 @@ fn icon_button(
                 IconBtn::Secondary => (vis.weak_bg_fill, vis.bg_stroke, theme::TEXT),
                 IconBtn::Danger => (
                     if resp.hovered() { theme::HOV } else { Color32::TRANSPARENT },
-                    egui::Stroke::new(
-                        1.0,
-                        Color32::from_rgba_unmultiplied(
-                            theme::COL_GLOBAL.r(),
-                            theme::COL_GLOBAL.g(),
-                            theme::COL_GLOBAL.b(),
-                            82,
-                        ),
-                    ),
+                    egui::Stroke::new(1.0, theme::danger_border()),
                     theme::COL_GLOBAL,
                 ),
             };
@@ -7355,7 +7347,7 @@ impl GuiApp {
         }
 
         // Row card: scope-tinted background, 8px rounding, with a 3px left bar.
-        let tint = Color32::from_rgba_unmultiplied(scope.r(), scope.g(), scope.b(), 16);
+        let tint = theme::tint(scope, 16);
         let inner = egui::Frame::NONE
             .fill(tint)
             .corner_radius(egui::CornerRadius::same(8))
@@ -7452,7 +7444,7 @@ impl GuiApp {
             self.multi_edit.remove(&key).unwrap_or(stored.clone())
         };
 
-        let tint = Color32::from_rgba_unmultiplied(scope.r(), scope.g(), scope.b(), 16);
+        let tint = theme::tint(scope, 16);
         let btn_w = icon_button_width(ui) + ui.spacing().item_spacing.x;
         let cache = &mut self.icon_cache;
         let mut to_delete: Option<usize> = None;
@@ -7552,7 +7544,7 @@ impl GuiApp {
             self.multi_edit.remove(&key).unwrap_or(stored.clone())
         };
 
-        let tint = Color32::from_rgba_unmultiplied(scope.r(), scope.g(), scope.b(), 16);
+        let tint = theme::tint(scope, 16);
         let btn_w = icon_button_width(ui) + ui.spacing().item_spacing.x;
         let cache = &mut self.icon_cache;
         let mut to_delete: Option<usize> = None;
@@ -10419,7 +10411,7 @@ fn cleanup_modules(
 /// Runs `content` inside the row and returns its value.
 fn settings_card<R>(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let scope = theme::COL_DEFAULT;
-    let tint = Color32::from_rgba_unmultiplied(scope.r(), scope.g(), scope.b(), 16);
+    let tint = theme::tint(scope, 16);
     let inner = egui::Frame::NONE
         .fill(tint)
         .corner_radius(egui::CornerRadius::same(8))

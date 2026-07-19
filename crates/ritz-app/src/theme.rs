@@ -68,6 +68,44 @@ pub const HOV: Color32 = Color32::from_rgba_premultiplied(0x0D, 0x0D, 0x0D, 0x0D
 /// were hand-computed with. Using it here would make a derived tab read
 /// differently from the accent tab's `SEL`/`SELBD` fill even at the same
 /// nominal alpha — defeating the point of sharing one formula.
+/// Premultiply `base` by `alpha` the way **egui 0.29** did — gamma → linear,
+/// multiply, linear → gamma.
+///
+/// *Why this exists:* egui changed the semantics of
+/// `Color32::from_rgba_unmultiplied` between 0.29 and 0.33. Both versions build a
+/// lookup table, but 0.29's entry was
+/// `gamma_u8_from_linear_f32(linear_f32_from_gamma_u8(value) * alpha_lin)` while
+/// 0.33's is a naive `value * alpha_lin`. For the low alphas this app uses that is
+/// not a subtle difference: `COL_GAME`'s green at alpha 16 premultiplies to **42**
+/// under 0.29 and **10** under 0.33, so a scope-tinted row composited over
+/// [`PANEL`] rendered `rgb(43,71,96)` before the upgrade and `rgb(33,41,49)` after
+/// — the tint all but vanished.
+///
+/// The naive form is arguably the more defensible one (premultiplied alpha ought to
+/// be applied in the same space the channels live in), but every tint in this app
+/// was picked by eye against the old behaviour, so reproducing it is what keeps the
+/// palette looking like itself. Call this instead of
+/// `Color32::from_rgba_unmultiplied` for any translucent fill or stroke.
+///
+/// Note [`selection_tint`] does *not* use this: it deliberately reproduces the
+/// naive integer premultiply that [`SEL`]/[`SELBD`] were hand-computed with, and
+/// those two render identically under both egui versions.
+pub fn tint(base: Color32, alpha: u8) -> Color32 {
+    match alpha {
+        0 => Color32::TRANSPARENT,
+        255 => base,
+        a => {
+            let alpha_lin = f32::from(a) / 255.0;
+            let mix = |c: u8| {
+                egui::ecolor::gamma_u8_from_linear_f32(
+                    egui::ecolor::linear_f32_from_gamma_u8(c) * alpha_lin,
+                )
+            };
+            Color32::from_rgba_premultiplied(mix(base.r()), mix(base.g()), mix(base.b()), a)
+        }
+    }
+}
+
 pub fn selection_tint(base: Color32) -> (Color32, Color32) {
     // 0x29/255 ≈ 16% (fill), 0x6B/255 ≈ 42% (border) — SEL/SELBD's own alphas.
     fn premul(base: Color32, alpha: u8) -> Color32 {
@@ -167,13 +205,12 @@ const DANGER_BORDER_ALPHA: u8 = 82;
 
 /// Destructive / abort: transparent fill, red text + faint red border.
 ///
-/// *Why `Color32::from_rgba_unmultiplied` and not [`selection_tint`]:* the tint
-/// helper deliberately premultiplies by hand to match `SEL`/`SELBD`, and its two
-/// alphas (~16% / ~42%) are not this border's. Routing this stroke through it
-/// would change the rendered color — egui's `from_rgba_unmultiplied` blends in
-/// linear space and lands somewhere else — so the fix here is only to stop
-/// re-typing `COL_GLOBAL`'s channels as literals, keeping the same call and
-/// therefore the exact same pixels (pinned by `danger_border_matches_col_global`).
+/// *Why [`tint`] and not [`selection_tint`]:* `selection_tint` deliberately
+/// premultiplies by hand to match `SEL`/`SELBD`, and its two alphas (~16% / ~42%)
+/// are not this border's. [`tint`] reproduces what `Color32::from_rgba_unmultiplied`
+/// did under egui 0.29, which is what this border was picked against — see [`tint`]
+/// for why that stopped being the same thing at 0.33. Pinned by
+/// `danger_border_matches_col_global`.
 pub fn danger_button(text: impl Into<String>) -> egui::Button<'static> {
     egui::Button::new(egui::RichText::new(text.into()).color(COL_GLOBAL))
         .fill(Color32::TRANSPARENT)
@@ -185,7 +222,7 @@ pub fn danger_button(text: impl Into<String>) -> egui::Button<'static> {
 /// Split out of `danger_button` only so the derivation is reachable from a test —
 /// an `egui::Button`'s stroke can't be read back once built.
 pub(crate) fn danger_border() -> Color32 {
-    Color32::from_rgba_unmultiplied(COL_GLOBAL.r(), COL_GLOBAL.g(), COL_GLOBAL.b(), DANGER_BORDER_ALPHA)
+    tint(COL_GLOBAL, DANGER_BORDER_ALPHA)
 }
 
 /// Secondary: btn fill + button border.
@@ -313,10 +350,32 @@ mod tests {
 
     #[test]
     fn danger_border_matches_col_global() {
-        assert_eq!(danger_border(), Color32::from_rgba_unmultiplied(0xE1, 0x55, 0x54, 82));
-        assert_eq!(
-            danger_border(),
-            Color32::from_rgba_unmultiplied(COL_GLOBAL.r(), COL_GLOBAL.g(), COL_GLOBAL.b(), 82)
+        // Derived from the palette, not re-typed: if the red is retuned, this
+        // failing is the signal that the border moved with it.
+        assert_eq!(danger_border(), tint(COL_GLOBAL, DANGER_BORDER_ALPHA));
+        assert_eq!(danger_border(), tint(Color32::from_rgb(0xE1, 0x55, 0x54), 82));
+    }
+
+    /// [`tint`] must reproduce **egui 0.29**'s `from_rgba_unmultiplied`, not 0.33's.
+    ///
+    /// The two disagree badly at the low alphas this app uses, and the difference is
+    /// what made every scope-tinted row nearly vanish after the upgrade. These are
+    /// the 0.29 values, and they are **derived from a real screenshot** rather than
+    /// from arithmetic: a scope-tinted row rendered `rgb(43,71,95)` over [`PANEL`]
+    /// `rgb(30,33,37)` before the upgrade, so the premultiplied channels must be
+    /// `(43,71,95) - (30,33,37) * (1 - 16/255)` = `(14.9, 40.1, 60.3)`.
+    #[test]
+    fn tint_reproduces_egui_029_gamma_correct_premultiply() {
+        let t = tint(COL_GAME, 16);
+        assert_eq!(t.a(), 16, "alpha is carried through untouched");
+        // 0.33's naive multiply gives (5, 10, 14) here — nearly invisible.
+        assert_eq!((t.r(), t.g(), t.b()), (15, 40, 61));
+        assert!(
+            t.g() > Color32::from_rgba_unmultiplied(COL_GAME.r(), COL_GAME.g(), COL_GAME.b(), 16).g(),
+            "must be brighter than the current egui behaviour, or the fix is inert"
         );
+        // Degenerate alphas keep egui's own shortcuts.
+        assert_eq!(tint(COL_GAME, 0), Color32::TRANSPARENT);
+        assert_eq!(tint(COL_GAME, 255), COL_GAME);
     }
 }
