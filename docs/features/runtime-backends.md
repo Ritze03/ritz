@@ -48,7 +48,8 @@ expressed as env vars or argv at all.
     clean, then spawns a thread that sleeps for the delay and hot-patches just the
     multiplier back up via `crates/ritz-core/src/lsfg_toml.rs:set_multiplier`
     (`crates/ritz-app/src/backends/lsfg.rs:LsfgBackend::pre_launch`), firing a desktop
-    notification on completion. *Why:* some games briefly render broken frames or a
+    notification (carrying the app logo as its icon — see Resource Export) on
+    completion. *Why:* some games briefly render broken frames or a
     black screen if frame generation is active from process start, so the delay lets
     the game reach a stable frame before lsfg-vk's multiplier kicks in.
 - **Hypr-Monctl** (`crates/ritz-app/src/backends/hypr_monctl.rs:HyprMonctlBackend`)

@@ -12,12 +12,19 @@ rest of the app can treat them as ordinary files on disk.
   Everything under `resources/` (fonts in `assets/`, manifests in `extensions/`, native
   backends in `plugins/`) is part of the binary; there is no runtime dependency on the
   source tree.
-- **Fonts and the logo are read straight from the embed, never exported.**
+- **Fonts and the logo are read straight from the embed for on-screen use.**
   `crates/ritz-app/src/resources.rs:mono_font_bytes` / `sans_font_bytes` /
   `bold_font_bytes` / `icon_font_bytes` / `logo_bytes` / `logo_1024_bytes` hand back
   `&'static [u8]` slices from `RESOURCES.get_file(...)`. `crates/ritz-app/src/fonts.rs:install`
   loads those bytes into `egui::FontDefinitions` on startup (and again, live, whenever
   `mono_ui` is toggled) — no filesystem round-trip for fonts at all.
+- **The logo is the one exception that also lands on disk**, because `notify-send -i`
+  needs a real file: `crates/ritz-app/src/notify.rs:icon_path` writes `logo_bytes` out
+  to `<config>/ritz-icon.png` the first time a desktop notification fires (missing-only,
+  so it doesn't churn), and passes that path as the notification icon. Best-effort — any
+  IO error just drops the icon, the notification still goes out. *Consequence of
+  missing-only:* if the bundled logo changes, the on-disk `ritz-icon.png` is not
+  refreshed automatically — delete it to force a re-export on the next notification.
 - **Extensions and plugins are exported to disk**, because
   `crates/ritz-core/src/extension.rs:discover` reads `.json` manifests off a real
   directory, and the shipped `.so` plugins have to exist as loadable files for their
