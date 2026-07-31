@@ -60,9 +60,9 @@
   <div class="grid">
     <div class="card mod-card"><div class="mod-target">wrapper</div><h3>Gamescope</h3><p>The <code>gamescope</code> micro-compositor: enable/backend/scaler, output &amp; internal resolution, refresh rate, sync &amp; input flags, FSR upscaling.</p></div>
     <div class="card mod-card"><div class="mod-target">env vars</div><h3>Proton</h3><p>Sync backend (NTSync/FSYNC), renderer overrides (WineD3D, D3D8/10/11), display (Wayland, HDR, integer scaling), NVAPI/GPU-hiding, compat &amp; debug toggles.</p></div>
-    <div class="card mod-card"><div class="mod-target">env vars</div><h3>AMD</h3><p><code>RADV_PERFTEST</code> flags (NGGC, SAM), Mesa Anti-Lag layer, Vulkan present-mode override, <code>RADV_DEBUG</code> nohiz workaround, experimental UMR queue, shader cache size.</p></div>
+    <div class="card mod-card"><div class="mod-target">env vars</div><h3>AMD</h3><p><code>RADV_PERFTEST</code> flags (NGGC, SAM), Mesa Anti-Lag layer, Vulkan present-mode override, <code>RADV_DEBUG</code> nohiz workaround, experimental user queue (<code>AMD_USERQ</code>), shader cache size.</p></div>
     <div class="card mod-card"><div class="mod-target">env vars</div><h3>DXVK</h3><p>D3D8/9/10/11 → Vulkan: FPS limit, HUD overlay, graphics-pipeline-library, frame latency, tearing/HDR.</p></div>
-    <div class="card mod-card"><div class="mod-target">env vars</div><h3>VKD3D</h3><p>D3D12 → Vulkan: FPS limit, a dozen <code>VKD3D_CONFIG</code> flags (descriptor heap, ray tracing, PSO retention…) plus a raw-flags passthrough, present mode.</p></div>
+    <div class="card mod-card"><div class="mod-target">env vars</div><h3>VKD3D</h3><p>D3D12 → Vulkan: FPS limit, over a dozen <code>VKD3D_CONFIG</code> flags (descriptor heap, ray tracing, PSO retention…) plus a raw-flags passthrough, present mode.</p></div>
     <div class="card mod-card"><div class="mod-target">env vars + wrapper</div><h3>Misc</h3><p>Clear <code>LD_PRELOAD</code>/<code>VK_INSTANCE_LAYERS</code>, force X11 SDL backend, keyboard layout, and a <code>gamemoderun</code> wrapper.</p></div>
     <div class="card mod-card"><div class="mod-target">env vars</div><h3>PulseAudio</h3><p>Client latency, output sink routing, <code>media.role=game</code> tagging for PulseAudio/PipeWire-pulse.</p></div>
     <div class="card mod-card"><div class="mod-target">hooks</div><h3>Scripts</h3><p>Pre-launch (blocking), post-spawn (background), and post-exit (blocking) user shell commands.</p></div>
@@ -151,6 +151,7 @@
     <tr><td><code>AppIds</code></td><td>Array of Steam AppIds this module applies to. Omit for a global module (all games).</td></tr>
     <tr><td><code>Backend</code></td><td>Routes the module's values to a built-in handler instead of (or alongside) the command builder. See <a href="#backends">Backends</a>.</td></tr>
     <tr><td><code>RequiresDesktop</code></td><td>Only load when <code>$XDG_CURRENT_DESKTOP</code> matches (e.g. <code>"Hyprland"</code>). Otherwise the module is hidden and never applied.</td></tr>
+    <tr><td><code>ForkedFrom</code></td><td>Optional <code>"Author::Name"</code> of the parent module this one was forked from in the GUI editor. Provenance/display only — never participates in <code>id</code> or config lookup.</td></tr>
   </table>
   </div>
 </section>
