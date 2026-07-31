@@ -14,7 +14,7 @@ and driven by simple JSON modules you can edit or extend.
 
 📖 **[Full documentation & guides »](https://ritze03.github.io/ritz/)**
 
-<img src="docs/assets/gui.png" width="820" alt="Ritz settings GUI — module editor with live launch-command preview">
+<img src="docs/assets/screenshots/example-game-config.png" width="820" alt="ritz settings GUI showing the navigator, module tree, the Misc module's options with scope colors, and the launch-command preview">
 
 </div>
 
@@ -45,7 +45,7 @@ Launch the game. The first time Ritz sees it, a short wizard asks for a **name**
 optional **profile**, then the game starts. From then on you get a splash screen on every
 launch:
 
-<div align="center"><img src="docs/assets/splashscreen.png" width="380" alt="Ritz launch splash with countdown and Q/W/E keys"></div>
+<div align="center"><img src="docs/assets/screenshots/splash-launching-game.png" width="380" alt="Ritz launch splash with countdown and Q/W/E keys"></div>
 
 | Key | Action |
 |-----|--------|

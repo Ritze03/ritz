@@ -346,9 +346,28 @@ figure.shot img {
   max-width: 100%; height: auto; display: block; border-radius: 8px;
   box-shadow: 0 20px 50px rgba(0,0,0,.55);
 }
-figure.shot.splash .frame { max-width: 380px; }
 figure.shot figcaption {
   color: var(--ink-faint); font-size: 13px; margin-top: 14px; font-family: var(--mono);
+}
+
+/* step-by-step screenshot gallery for a single self-contained flow (e.g. the
+   new-game wizard's 3 steps) — same .frame treatment as a single .shot, laid out as
+   an evenly-spaced row/grid so the steps read as one sequence. Deliberately scoped to
+   flows that really are sequential: an unrelated screen (like the countdown splash
+   shown on a later, separate launch) gets its own plain .shot instead, so it doesn't
+   visually read as "step 4" of this grid. */
+.shot-gallery {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
+  margin: 30px 0; text-align: center;
+}
+.shot-gallery figure.shot { margin: 0; }
+.shot-gallery .frame { display: block; padding: 7px; border-radius: 12px; }
+.shot-gallery img { border-radius: 6px; }
+.shot-gallery figcaption {
+  margin-top: 10px; font-size: 12px; color: var(--ink-faint);
+}
+@media (max-width: 640px) {
+  .shot-gallery { grid-template-columns: 1fr; }
 }
 
 kbd {

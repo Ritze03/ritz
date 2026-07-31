@@ -34,6 +34,7 @@
     <div class="pagenav" style="margin-top:8px">
       <a href="#catalog">bundled catalog</a>
       <a href="#anatomy">anatomy</a>
+      <a href="#ide">IDE mode</a>
       <a href="#meta">metadata</a>
       <a href="#ui">UI &amp; fields</a>
       <a href="#variables">variables</a>
@@ -78,6 +79,9 @@
 
 <section id="anatomy">
   <h2>anatomy of a module</h2>
+  <p>Everything below is the raw JSON. If you'd rather not hand-write it, ritz ships a
+  built-in visual editor that builds the same manifest for you — see <a href="#ide">IDE
+  mode</a>.</p>
   <p>A module is either a single file or a folder with exactly one manifest plus any
   scripts it references:</p>
   <pre><code>extensions/
@@ -113,6 +117,21 @@
   "Hooks": { /* lifecycle scripts */ },
   "ScriptBuilders": [ /* advanced: scripts that emit block content */ ]
 }</code></pre>
+</section>
+
+<section id="ide">
+  <h2>editing modules visually — IDE mode</h2>
+  <p>Don't want to hand-write JSON? The settings GUI has an <strong>IDE Mode</strong>
+  nav destination: pick a module from the list on the left, edit its metadata and UI
+  sections/fields in the middle manifest editor, and watch a live preview on the
+  right — the module rendered exactly as it would look in normal use, driving the
+  same launch-command preview, checked against any game you choose. <strong>Fork</strong>
+  a bundled module to start from a working example, or <strong>New Module</strong> to
+  build one from scratch — either way you're still just editing the same JSON schema
+  documented below, without leaving the GUI.</p>
+  <figure class="shot">
+    <div class="frame"><img src="assets/screenshots/example-ide-mode.png" alt="ritz IDE mode: the module list on the left, a manifest editor for CUSTOM-VKD3D's fields in the middle, and a live preview with launch-command output on the right"></div>
+  </figure>
 </section>
 
 <section id="meta">
