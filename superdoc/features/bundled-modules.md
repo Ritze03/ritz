@@ -118,12 +118,6 @@ modules described above. Once the new manifests shipped, a one-time migration wa
 that the migration ran, what it touched, and where the backup lives, for anyone later
 wondering "what happened to the numbered slots?".
 
-## Adding or extending options
-
-New option fields for these modules are tracked in `MODULE-OPTIONS-BACKLOG.md` at the repo
-root rather than duplicated here — check it before adding a new field to any manifest above
-to avoid clashing with a planned addition.
-
 ## Related links
 
 - [extension-system.md](extension-system.md) — how manifests are loaded, validated, and
