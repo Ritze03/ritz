@@ -223,6 +223,11 @@ pub fn build(inputs: &[ExtInput<'_>], game_command: &[String]) -> Result<LaunchC
 
 /// Minimal shell quoting: only quote tokens that need it. Leaves `KEY=VAL`,
 /// paths, and common flag characters unquoted.
+///
+/// Not applied to `game_args` in [`LaunchCommand::display_tokens`] — those tokens
+/// are appended verbatim by extension/program logic and may legitimately contain
+/// spaces (e.g. `-exec autoexec`); quoting them there was cosmetic noise, not an
+/// accurate shell-copy-paste representation, so it was removed per user report.
 fn shq(s: &str) -> String {
     if s.is_empty() {
         return "''".to_string();
@@ -282,7 +287,10 @@ fn render_env_shim(env: &IndexMap<String, EnvAction>) -> Vec<String> {
 }
 
 impl LaunchCommand {
-    /// Flat token list for display / preview (shell-quoted).
+    /// Flat token list for display / preview (shell-quoted), except `game_args`
+    /// which are emitted raw/unquoted — they're appended by extension/program
+    /// logic and may contain spaces (e.g. `-exec autoexec`); this matches how
+    /// [`LaunchCommand::exec_plan`] already treats them (never quoted).
     pub fn display_tokens(&self) -> Vec<String> {
         let mut parts: Vec<String> = Vec::new();
         if self.wrappers.is_empty() {
@@ -293,7 +301,7 @@ impl LaunchCommand {
             }
             parts.extend(render_prefix_env(&merged));
             parts.extend(self.game_command.iter().map(|t| shq(t)));
-            parts.extend(self.game_args.iter().map(|t| shq(t)));
+            parts.extend(self.game_args.iter().cloned());
         } else {
             parts.extend(render_prefix_env(&self.env_vars));
             parts.extend(self.wrappers.iter().map(|t| shq(t)));
@@ -301,7 +309,7 @@ impl LaunchCommand {
                 parts.extend(render_env_shim(&self.game_env_vars));
             }
             parts.extend(self.game_command.iter().map(|t| shq(t)));
-            parts.extend(self.game_args.iter().map(|t| shq(t)));
+            parts.extend(self.game_args.iter().cloned());
         }
         parts
     }
@@ -491,6 +499,25 @@ mod tests {
         assert_eq!(
             lc.to_string(),
             "RADV_PERFTEST=aco gamescope -f -- env MANGOHUD=1 /games/cs2 -condebug"
+        );
+    }
+
+    #[test]
+    fn display_tokens_does_not_quote_game_args_with_spaces() {
+        let spec = ext(json!({
+            "Extension": {"Name": "cs2", "Author": "Ritze", "Version": "1.0"},
+            "ENV_VARS": [{
+                "Name": "RADV_DEBUG", "Requires": "",
+                "Builder": [{"Requires": "", "Type": "set", "Value": "no vbo"}]
+            }],
+            "GAME_LAUNCH_ARGS": [{"Requires": "", "Value": "-exec autoexec"}]
+        }));
+        let vars = VarStore::new();
+        let game = toks(&["/games/cs2"]);
+        let lc = build(&[ExtInput { spec: &spec, vars: &vars }], &game).unwrap();
+        assert_eq!(
+            lc.to_string(),
+            "RADV_DEBUG='no vbo' /games/cs2 -exec autoexec"
         );
     }
 

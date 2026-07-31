@@ -80,7 +80,12 @@ either to `exec` directly or to print for inspection.
   token becomes `program`. `crates/ritz-app/src/supervisor.rs` uses this to actually
   spawn and supervise the game. `crates/ritz-core/src/builder.rs:LaunchCommand::display_tokens`
   produces the same shape as a shell-quoted string (via `crates/ritz-core/src/builder.rs:shq`)
-  for human display — used by both the GUI preview and `--print`.
+  for human display — used by both the GUI preview and `--print`. **Exception:**
+  `game_args` (`GAME_LAUNCH_ARGS`) tokens are emitted raw, unquoted, matching how
+  `exec_plan` already treats them — they're appended by extension/program logic and may
+  contain spaces (e.g. `-exec autoexec`); quoting them there was cosmetic and not an
+  accurate copy-paste shell command, so it was removed (user report, 2026-07-31). Every
+  other block (env vars, wrappers, `game_command`) is still shell-quoted.
 
 ### Backend pre-pass
 
@@ -122,9 +127,10 @@ handlers (`lsfg-vk`, `hypr-monctl`) this is *not* one of, and
 - **Dry run**: `ritz --print %command%` routes to
   `crates/ritz-app/src/main.rs:cmd_print`, which parses the command, loads context,
   resolves the game, builds the `LaunchCommand`, and prints diagnostics (`AppId`,
-  `Game`, extension count, active `Preset`) to stderr followed by the fully assembled,
-  shell-quoted command (`LaunchCommand`'s `Display` impl) to stdout — no process is
-  spawned.
+  `Game`, extension count, active `Preset`) to stderr followed by the fully assembled
+  command (`LaunchCommand`'s `Display` impl) to stdout — no process is spawned. The
+  output is shell-quoted except `game_args`, which print raw/unquoted (see the
+  `display_tokens` exception noted above).
 
 ## Related links
 
