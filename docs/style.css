@@ -1,8 +1,13 @@
 /* ritz — "Console" theme.
-   A launch console for your launch console: terminal-chrome panels, phosphor-amber
+   A launch console for your launch console: terminal-chrome panels, an indigo
    accent, monospace command headers set against a warm serif body face. Committed to
    dark-only (this is a CRT, not a color-scheme toggle) — color-scheme: dark below tells
-   browsers not to fight it with forced light-mode form chrome. */
+   browsers not to fight it with forced light-mode form chrome.
+
+   Accent/scope palette is kept in sync with the real app's Graphite theme
+   (crates/ritz-app/src/theme.rs) — same ACCENT for brand + links (the app has no
+   separate link color, so neither does this site), same scope chip hexes, same
+   warning color reserved for the warning role only. */
 
 :root {
   color-scheme: dark;
@@ -19,14 +24,20 @@
   --ink-dim: #9aa0a6;
   --ink-faint: #5b6169;
 
-  --amber:      #ffb454;  /* primary accent — phosphor amber */
-  --amber-dim:  #c98a3a;
-  --cyan:       #6ee7d8;  /* secondary accent — links, cool contrast */
+  /* Brand accent — matches the app's ACCENT (crates/ritz-app/src/theme.rs).
+     Reused for links too, same as the app's v.hyperlink_color = ACCENT: there is no
+     separate secondary/link accent, by design. */
+  --accent:     #5b8bf0;
+  --accent-dim: #4269ba;
+  /* Warning role only (the app's COL_WARN) — never the brand accent. Wired up via
+     .note.warn below for the day a genuine caveat/heads-up callout is added; no page
+     copy needs it yet. */
+  --warn:       #e1a854;
 
-  --global:  #e0685f;  /* red   */
-  --profile: #7ec966;  /* green */
-  --game:    #5aa4e8;  /* blue  */
-  --default: #6b7280;  /* gray  */
+  --global:  #e15554;  /* red   — COL_GLOBAL */
+  --profile: #6cc551;  /* green — COL_PROFILE */
+  --game:    #4d9de0;  /* blue  — COL_GAME */
+  --default: #464d57;  /* gray  — COL_DEFAULT */
 
   --mono: ui-monospace, "Cascadia Code", "SFMono-Regular", "JetBrains Mono", Consolas, "Liberation Mono", monospace;
   --serif: Charter, "Iowan Old Style", "Palatino Linotype", Georgia, "Noto Serif", serif;
@@ -41,8 +52,8 @@ body {
   margin: 0;
   min-height: 100vh;
   background:
-    radial-gradient(ellipse 900px 500px at 15% -10%, rgba(255,180,84,0.07), transparent 60%),
-    radial-gradient(ellipse 700px 500px at 100% 0%, rgba(110,231,216,0.05), transparent 55%),
+    radial-gradient(ellipse 900px 500px at 15% -10%, rgba(91,139,240,0.08), transparent 60%),
+    radial-gradient(ellipse 700px 500px at 100% 0%, rgba(91,139,240,0.04), transparent 55%),
     repeating-linear-gradient(180deg, rgba(255,255,255,0.012) 0px, rgba(255,255,255,0.012) 1px, transparent 1px, transparent 3px),
     var(--bg);
   color: var(--ink);
@@ -53,10 +64,10 @@ body {
   overflow-x: hidden;
 }
 
-a { color: var(--cyan); text-decoration: none; }
+a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; text-underline-offset: 3px; }
 
-::selection { background: rgba(255,180,84,0.28); color: #fff; }
+::selection { background: rgba(91,139,240,0.32); color: #fff; }
 
 /* ---------------- terminal-tab top nav ---------------- */
 header.nav {
@@ -75,14 +86,14 @@ header.nav {
   font-size: 15px; letter-spacing: .02em;
 }
 .nav-brand img { width: 24px; height: 24px; border-radius: 6px; }
-.nav-brand .prompt { color: var(--amber); }
+.nav-brand .prompt { color: var(--accent); }
 .nav-links { display: flex; gap: 4px; margin-left: auto; flex-wrap: wrap; font-family: var(--mono); font-size: 13.5px; }
 .nav-links a {
   color: var(--ink-dim); padding: 6px 12px; border-radius: 6px; position: relative;
 }
 .nav-links a:hover { color: var(--ink); background: var(--panel); text-decoration: none; }
-.nav-links a.active { color: var(--amber); }
-.nav-links a.active::before { content: "// "; color: var(--amber-dim); }
+.nav-links a.active { color: var(--accent); }
+.nav-links a.active::before { content: "// "; color: var(--accent-dim); }
 .nav-links a.gh { color: var(--ink-faint); border: 1px solid var(--border); }
 .nav-links a.gh:hover { border-color: var(--border-lit); color: var(--ink); }
 
@@ -104,13 +115,13 @@ footer a { color: var(--ink-dim); }
 }
 .hero .logo-wrap img {
   width: 100%; height: 100%; display: block;
-  filter: drop-shadow(0 0 40px rgba(255,180,84,0.25)) drop-shadow(0 10px 26px rgba(0,0,0,.6));
+  filter: drop-shadow(0 0 40px rgba(91,139,240,0.30)) drop-shadow(0 10px 26px rgba(0,0,0,.6));
 }
 .hero .kicker {
   font-family: var(--mono); font-size: 12.5px; letter-spacing: .18em; text-transform: uppercase;
-  color: var(--amber-dim); margin: 0 0 14px;
+  color: var(--accent-dim); margin: 0 0 14px;
 }
-.hero .kicker::before { content: "$ "; color: var(--amber); }
+.hero .kicker::before { content: "$ "; color: var(--accent); }
 .hero h1 {
   font-family: var(--mono); font-size: 52px; margin: 0 0 14px; letter-spacing: -0.02em;
   color: var(--ink); font-weight: 600;
@@ -119,12 +130,12 @@ footer a { color: var(--ink-dim); }
   color: var(--ink-dim); font-size: 18.5px; max-width: 640px; margin: 0 auto 30px;
   font-family: var(--serif);
 }
-.hero .tag code { color: var(--amber); }
+.hero .tag code { color: var(--accent); }
 .hero .cta { display: inline-flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
 
 /* blinking cursor after hero tagline */
 .cursor {
-  display: inline-block; width: .5em; height: 1em; background: var(--amber);
+  display: inline-block; width: .5em; height: 1em; background: var(--accent);
   vertical-align: text-bottom; margin-left: 2px; animation: blink 1.1s steps(1) infinite;
 }
 @keyframes blink { 50% { opacity: 0; } }
@@ -134,12 +145,12 @@ footer a { color: var(--ink-dim); }
   display: inline-flex; align-items: center; gap: 8px;
   padding: 10px 20px; border-radius: 8px;
   font-family: var(--mono); font-weight: 600; font-size: 14.5px;
-  border: 1px solid var(--amber); background: var(--amber); color: #1a1206;
+  border: 1px solid var(--accent); background: var(--accent); color: #0e1a18;
   transition: transform .12s ease, filter .12s ease;
 }
 .btn:hover { text-decoration: none; filter: brightness(1.08); transform: translateY(-1px); }
 .btn.secondary { background: transparent; border-color: var(--border-lit); color: var(--ink); }
-.btn.secondary:hover { border-color: var(--amber-dim); color: var(--amber); }
+.btn.secondary:hover { border-color: var(--accent-dim); color: var(--accent); }
 
 /* ---------------- headings ---------------- */
 h1, h2, h3 { line-height: 1.3; font-weight: 600; color: var(--ink); }
@@ -148,12 +159,16 @@ h2 {
   border-bottom: 1px solid var(--border); letter-spacing: -0.01em;
   display: flex; align-items: baseline; gap: 10px;
 }
-h2::before { content: "#"; color: var(--amber-dim); font-weight: 400; }
+h2::before { content: "#"; color: var(--accent-dim); font-weight: 400; }
 h3 { font-size: 18.5px; margin: 28px 0 10px; font-family: var(--serif); font-weight: 700; }
 p { color: #cfd1cd; }
 main p, main li { color: #cfd1cd; }
 
 /* ---------------- inline code / blocks ---------------- */
+/* Inline `code` keeps its own warm tan hue rather than switching to --accent: with
+   links, buttons, headings and section markers all blue now, code needs a distinct
+   hue to still pop out of body copy. Not a warning and not amber-derived from
+   --accent — an unrelated, deliberately-kept warm tone (unchanged: #e6b880). */
 code {
   font-family: var(--mono); font-size: .88em;
   background: var(--field); border: 1px solid var(--border);
@@ -188,7 +203,7 @@ pre code { background: none; border: none; padding: 0; font-size: inherit; color
 
 /* module cards (extensions page) */
 .mod-card { display: flex; flex-direction: column; gap: 8px; }
-.mod-card .mod-target { font-family: var(--mono); font-size: 11.5px; color: var(--amber-dim); text-transform: uppercase; letter-spacing: .06em; }
+.mod-card .mod-target { font-family: var(--mono); font-size: 11.5px; color: var(--accent-dim); text-transform: uppercase; letter-spacing: .06em; }
 .mod-card h3 { margin: 0; }
 .mod-card p { color: var(--ink-dim); }
 
@@ -210,17 +225,22 @@ td code { white-space: nowrap; }
   font-family: var(--mono);
 }
 .chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-.chip.global  { color: var(--global);  background: rgba(224,104,95,0.13); }
-.chip.profile { color: var(--profile); background: rgba(126,201,102,0.13); }
-.chip.game    { color: var(--game);    background: rgba(90,164,232,0.13); }
-.chip.default { color: #b7bcc2;        background: rgba(107,114,128,0.22); }
+.chip.global  { color: var(--global);  background: rgba(225,85,84,0.13); }
+.chip.profile { color: var(--profile); background: rgba(108,197,81,0.13); }
+.chip.game    { color: var(--game);    background: rgba(77,157,224,0.13); }
+.chip.default { color: #b7bcc2;        background: rgba(70,77,87,0.30); }
 
 .note {
-  border-left: 3px solid var(--amber); background: var(--panel);
+  border-left: 3px solid var(--accent); background: var(--panel);
   border-radius: 0 8px 8px 0; padding: 13px 17px; margin: 18px 0; color: var(--ink-dim);
   font-size: 15px;
 }
 .note strong { color: var(--ink); }
+
+/* Genuine caveat/heads-up variant — the app's COL_WARN role, not the brand accent.
+   Opt-in via class="note warn" (no current page copy needs it, kept ready). */
+.note.warn { border-left-color: var(--warn); }
+.note.warn strong { color: var(--warn); }
 
 /* ---------------- steps ---------------- */
 ol.steps { counter-reset: s; list-style: none; padding-left: 0; margin: 18px 0; }
@@ -230,7 +250,7 @@ ol.steps > li {
 ol.steps > li::before {
   content: counter(s); position: absolute; left: 0; top: 0;
   width: 30px; height: 30px; border-radius: 6px;
-  background: rgba(255,180,84,0.1); border: 1px solid rgba(255,180,84,0.3); color: var(--amber);
+  background: rgba(91,139,240,0.12); border: 1px solid rgba(91,139,240,0.35); color: var(--accent);
   display: grid; place-items: center; font-weight: 600; font-size: 13.5px; font-family: var(--mono);
 }
 ol.steps > li:not(:last-child)::after {
@@ -276,7 +296,7 @@ kbd {
   padding: 6px 11px; border-radius: 6px; border: 1px solid var(--border-lit);
   background: var(--panel);
 }
-.assembly span.cmd { color: var(--amber); border-color: var(--amber-dim); background: rgba(255,180,84,0.08); font-weight: 600; }
+.assembly span.cmd { color: var(--accent); border-color: var(--accent-dim); background: rgba(91,139,240,0.10); font-weight: 600; }
 .assembly span.arrow { border: none; background: none; padding: 0 2px; color: var(--ink-faint); }
 
 /* on-this-page pill nav */
@@ -284,7 +304,7 @@ kbd {
 .pagenav a {
   padding: 5px 11px; border: 1px solid var(--border); border-radius: 999px; color: var(--ink-dim);
 }
-.pagenav a:hover { border-color: var(--amber-dim); color: var(--amber); text-decoration: none; }
+.pagenav a:hover { border-color: var(--accent-dim); color: var(--accent); text-decoration: none; }
 
 @media (max-width: 620px) {
   .hero h1 { font-size: 38px; }
