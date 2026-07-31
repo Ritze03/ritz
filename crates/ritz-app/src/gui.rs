@@ -5538,8 +5538,20 @@ fn render_field_editor(
                 // option rows — "Add option" below is what creates one.
                 let opts = selection_options(&mut field.options);
                 let ol = opts.len();
+                // Captured once, outside the loop, and pinned onto every row
+                // below via `ui.set_width` — NOT re-read live per row. A
+                // row's own content (the action cluster's `allocate_ui_with_
+                // layout`, in particular) nudges the *parent* Ui's max_rect a
+                // few px wider than it started; read live, that growth folds
+                // into `ui.available_width()` for the next row, which folds
+                // in further, so each row's textbox came out visibly wider
+                // than the one above it — by the last row, wide enough to
+                // shove the up/down/delete cluster past the panel edge. One
+                // width for the whole list closes that feedback loop.
+                let row_w = ui.available_width();
                 for (oi, opt) in opts.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
+                        ui.set_width(row_w);
                         // Each option row keeps the same label column and the
                         // same right-pinned action cluster as every other row.
                         let w = editor_row_label(ui, "Option", ACTION_COL_W);
@@ -10695,6 +10707,93 @@ mod tests {
                  all: {widths:?}",
             );
         }
+    }
+
+    /// Renders `n` synthetic Option rows using the same shape as the real
+    /// Selection-field Option list in `render_field_editor` — a `row_w`
+    /// captured once before the loop, then each row going through
+    /// `ui.horizontal` + (optionally) `ui.set_width(row_w)` +
+    /// `editor_row_label` + a `TextEdit` + `row_actions` — and returns each
+    /// row's computed control width. `pin` toggles the fix under test:
+    /// `false` reproduces the pre-fix behaviour (live `available_width()`
+    /// per row), `true` is the shipped fix.
+    fn synthetic_option_row_widths(pin: bool, n: usize) -> Vec<f32> {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx, false);
+        crate::theme::apply(&ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(760.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        let mut cache = IconCenterCache::default();
+        let mut widths = Vec::new();
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let row_w = ui.available_width();
+                for oi in 0..n {
+                    ui.horizontal(|ui| {
+                        if pin {
+                            ui.set_width(row_w);
+                        }
+                        let w = editor_row_label(ui, "Option", ACTION_COL_W);
+                        widths.push(w);
+                        let mut dummy = String::new();
+                        ui.add(
+                            egui::TextEdit::singleline(&mut dummy)
+                                .id_salt(("synthetic_opt", oi))
+                                .desired_width(w),
+                        );
+                        let _ = row_actions(ui, &mut cache, oi, n);
+                    });
+                }
+            });
+        });
+        widths
+    }
+
+    /// Regression test for the Option-row width-growth bug: each subsequent
+    /// row's control grew wider than the one above it (5 rows compounding
+    /// enough to push the up/down/delete cluster off the panel edge), because
+    /// each row's `ui.horizontal` re-read the *live* `ui.available_width()`,
+    /// which a prior row's action-button cluster had already nudged wider.
+    /// Fixed by capturing `row_w` once before the loop and pinning it onto
+    /// every row via `ui.set_width(row_w)` (`render_field_editor`,
+    /// `FieldType::Selection` arm). With the pin, every row must compute the
+    /// identical control width.
+    #[test]
+    fn option_rows_share_one_width_when_pinned() {
+        let widths = synthetic_option_row_widths(true, 5);
+        let first = widths[0];
+        for (i, w) in widths.iter().enumerate() {
+            assert!(
+                (w - first).abs() < 0.01,
+                "row {i} width {w} != row 0 width {first} — the pin should make \
+                 every row identical: {widths:?}",
+            );
+        }
+    }
+
+    /// Companion to [`option_rows_share_one_width_when_pinned`]: without the
+    /// `set_width` pin, rows must visibly drift wider as they go — this is
+    /// the bug the fix closes. Kept as a live check (not just a comment) so a
+    /// future refactor that accidentally removes the pin is caught here
+    /// instead of in a user screenshot.
+    #[test]
+    fn option_rows_drift_wider_without_the_pin() {
+        let widths = synthetic_option_row_widths(false, 5);
+        assert!(
+            widths.windows(2).all(|w| w[1] >= w[0]),
+            "expected monotonically non-decreasing widths without the pin: {widths:?}",
+        );
+        let drift = widths.last().unwrap() - widths.first().unwrap();
+        assert!(
+            drift > 1.0,
+            "expected unpinned rows to drift by more than 1px end to end \
+             (reproducing the original bug), got {widths:?}",
+        );
     }
 
     /// An [`EditorHeaderInfo`] with every optional status line switched on:
