@@ -23,9 +23,9 @@
 </header>
 
 <main>
-<section>
-  <h1 style="margin-top:36px; font-family:var(--mono)">extension reference</h1>
-  <p class="tag" style="color:var(--ink-dim); max-width:640px">Everything ritz can do
+<section class="page-hero">
+  <h1>extension reference</h1>
+  <p class="tag">Everything ritz can do
   ships as a small JSON file called a <strong>module</strong> (extension). Below: the
   bundled catalog, then the complete manifest schema so you can write your own.</p>
 
@@ -371,7 +371,8 @@ atom  := "!" atom | IDENT          // NOT also written "!"</code></pre>
   ]
 }</code></pre>
   <p>Preview any config with <code>ritz --print %command%</code> to see exactly how it
-  assembles.</p>
+  assembles (outside real Steam, set an id first:
+  <code>RITZ_APPID=&lt;id&gt; ritz --print %command%</code>).</p>
 </section>
 
 <section id="config">

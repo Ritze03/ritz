@@ -23,9 +23,9 @@
 </header>
 
 <main>
-<section>
-  <h1 style="margin-top:36px; font-family:var(--mono)">usage guide</h1>
-  <p class="tag" style="color:var(--ink-dim); max-width:640px">Everything you do
+<section class="page-hero">
+  <h1>usage guide</h1>
+  <p class="tag">Everything you do
   day-to-day: the launch splash, the settings window, scopes, and profiles.</p>
 
   <div class="note">
@@ -49,7 +49,7 @@
     <tr><th>Command</th><th>What happens</th></tr>
     <tr><td><code>ritz %command%</code></td><td>Steam launch path: shows the splash, then launches (or opens the editor).</td></tr>
     <tr><td><code>ritz</code></td><td>Opens the settings GUI manager — no game launch.</td></tr>
-    <tr><td><code>ritz --print %command%</code></td><td>Prints the assembled launch command and exits — never launches.</td></tr>
+    <tr><td><code>ritz --print %command%</code></td><td>Prints the assembled launch command and exits — never launches. Outside real Steam (which sets <code>$SteamAppId</code> for you), pair it with an id: <code>RITZ_APPID=&lt;id&gt; ritz --print %command%</code>.</td></tr>
     <tr><td><code>ritz --splash &lt;appid&gt; -- %command%</code></td><td>Internal: the splash window, spawned as its own process.</td></tr>
     <tr><td><code>ritz --edit [--launch] &lt;appid&gt; [-- %command%]</code></td><td>Opens the settings GUI scoped to one game.</td></tr>
     <tr><td><code>RITZ_APPID=&lt;id&gt; ritz %command%</code></td><td>Gives a non-Steam game a stable identity.</td></tr>
