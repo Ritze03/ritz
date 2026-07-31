@@ -1,0 +1,294 @@
+/* ritz — "Console" theme.
+   A launch console for your launch console: terminal-chrome panels, phosphor-amber
+   accent, monospace command headers set against a warm serif body face. Committed to
+   dark-only (this is a CRT, not a color-scheme toggle) — color-scheme: dark below tells
+   browsers not to fight it with forced light-mode form chrome. */
+
+:root {
+  color-scheme: dark;
+
+  --bg:      #0a0c0e;
+  --bg-alt:  #0d1013;
+  --panel:   #12161a;
+  --panel2:  #0e1114;
+  --field:   #0a0d10;
+  --border:  #23292f;
+  --border-lit: #34404a;
+
+  --ink:     #e9e6dc;   /* warm paper-white body text */
+  --ink-dim: #9aa0a6;
+  --ink-faint: #5b6169;
+
+  --amber:      #ffb454;  /* primary accent — phosphor amber */
+  --amber-dim:  #c98a3a;
+  --cyan:       #6ee7d8;  /* secondary accent — links, cool contrast */
+
+  --global:  #e0685f;  /* red   */
+  --profile: #7ec966;  /* green */
+  --game:    #5aa4e8;  /* blue  */
+  --default: #6b7280;  /* gray  */
+
+  --mono: ui-monospace, "Cascadia Code", "SFMono-Regular", "JetBrains Mono", Consolas, "Liberation Mono", monospace;
+  --serif: Charter, "Iowan Old Style", "Palatino Linotype", Georgia, "Noto Serif", serif;
+
+  --maxw: 900px;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    radial-gradient(ellipse 900px 500px at 15% -10%, rgba(255,180,84,0.07), transparent 60%),
+    radial-gradient(ellipse 700px 500px at 100% 0%, rgba(110,231,216,0.05), transparent 55%),
+    repeating-linear-gradient(180deg, rgba(255,255,255,0.012) 0px, rgba(255,255,255,0.012) 1px, transparent 1px, transparent 3px),
+    var(--bg);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: 17px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+a { color: var(--cyan); text-decoration: none; }
+a:hover { text-decoration: underline; text-underline-offset: 3px; }
+
+::selection { background: rgba(255,180,84,0.28); color: #fff; }
+
+/* ---------------- terminal-tab top nav ---------------- */
+header.nav {
+  position: sticky; top: 0; z-index: 20;
+  background: rgba(10,12,14,0.86);
+  border-bottom: 1px solid var(--border);
+  backdrop-filter: blur(10px) saturate(1.1);
+}
+.nav-inner {
+  max-width: var(--maxw); margin: 0 auto; padding: 14px 22px;
+  display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+}
+.nav-brand {
+  display: flex; align-items: center; gap: 9px;
+  font-family: var(--mono); font-weight: 600; color: var(--ink);
+  font-size: 15px; letter-spacing: .02em;
+}
+.nav-brand img { width: 24px; height: 24px; border-radius: 6px; }
+.nav-brand .prompt { color: var(--amber); }
+.nav-links { display: flex; gap: 4px; margin-left: auto; flex-wrap: wrap; font-family: var(--mono); font-size: 13.5px; }
+.nav-links a {
+  color: var(--ink-dim); padding: 6px 12px; border-radius: 6px; position: relative;
+}
+.nav-links a:hover { color: var(--ink); background: var(--panel); text-decoration: none; }
+.nav-links a.active { color: var(--amber); }
+.nav-links a.active::before { content: "// "; color: var(--amber-dim); }
+.nav-links a.gh { color: var(--ink-faint); border: 1px solid var(--border); }
+.nav-links a.gh:hover { border-color: var(--border-lit); color: var(--ink); }
+
+/* ---------------- layout ---------------- */
+main { max-width: var(--maxw); margin: 0 auto; padding: 0 22px 90px; }
+section { padding-top: 40px; }
+footer {
+  max-width: var(--maxw); margin: 0 auto; padding: 34px 22px 70px;
+  border-top: 1px solid var(--border); color: var(--ink-faint);
+  font-family: var(--mono); font-size: 13px; display: flex; gap: 10px; flex-wrap: wrap;
+  justify-content: space-between;
+}
+footer a { color: var(--ink-dim); }
+
+/* ---------------- hero ---------------- */
+.hero { padding: 74px 22px 20px; text-align: center; position: relative; }
+.hero .logo-wrap {
+  width: 120px; height: 120px; margin: 0 auto 22px; position: relative;
+}
+.hero .logo-wrap img {
+  width: 100%; height: 100%; display: block;
+  filter: drop-shadow(0 0 40px rgba(255,180,84,0.25)) drop-shadow(0 10px 26px rgba(0,0,0,.6));
+}
+.hero .kicker {
+  font-family: var(--mono); font-size: 12.5px; letter-spacing: .18em; text-transform: uppercase;
+  color: var(--amber-dim); margin: 0 0 14px;
+}
+.hero .kicker::before { content: "$ "; color: var(--amber); }
+.hero h1 {
+  font-family: var(--mono); font-size: 52px; margin: 0 0 14px; letter-spacing: -0.02em;
+  color: var(--ink); font-weight: 600;
+}
+.hero .tag {
+  color: var(--ink-dim); font-size: 18.5px; max-width: 640px; margin: 0 auto 30px;
+  font-family: var(--serif);
+}
+.hero .tag code { color: var(--amber); }
+.hero .cta { display: inline-flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+
+/* blinking cursor after hero tagline */
+.cursor {
+  display: inline-block; width: .5em; height: 1em; background: var(--amber);
+  vertical-align: text-bottom; margin-left: 2px; animation: blink 1.1s steps(1) infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+
+/* ---------------- buttons ---------------- */
+.btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 10px 20px; border-radius: 8px;
+  font-family: var(--mono); font-weight: 600; font-size: 14.5px;
+  border: 1px solid var(--amber); background: var(--amber); color: #1a1206;
+  transition: transform .12s ease, filter .12s ease;
+}
+.btn:hover { text-decoration: none; filter: brightness(1.08); transform: translateY(-1px); }
+.btn.secondary { background: transparent; border-color: var(--border-lit); color: var(--ink); }
+.btn.secondary:hover { border-color: var(--amber-dim); color: var(--amber); }
+
+/* ---------------- headings ---------------- */
+h1, h2, h3 { line-height: 1.3; font-weight: 600; color: var(--ink); }
+h2 {
+  font-family: var(--mono); font-size: 22px; margin: 10px 0 16px; padding-bottom: 10px;
+  border-bottom: 1px solid var(--border); letter-spacing: -0.01em;
+  display: flex; align-items: baseline; gap: 10px;
+}
+h2::before { content: "#"; color: var(--amber-dim); font-weight: 400; }
+h3 { font-size: 18.5px; margin: 28px 0 10px; font-family: var(--serif); font-weight: 700; }
+p { color: #cfd1cd; }
+main p, main li { color: #cfd1cd; }
+
+/* ---------------- inline code / blocks ---------------- */
+code {
+  font-family: var(--mono); font-size: .88em;
+  background: var(--field); border: 1px solid var(--border);
+  padding: 1.5px 6px; border-radius: 5px; color: #e6b880;
+}
+
+/* terminal window chrome for <pre> blocks */
+pre {
+  background: var(--field); border: 1px solid var(--border);
+  border-radius: 10px; padding: 34px 20px 18px; margin: 16px 0;
+  overflow-x: auto; position: relative;
+  font-family: var(--mono); font-size: 13.5px; line-height: 1.65;
+}
+pre::before {
+  content: "\25CF   \25CF   \25CF";
+  position: absolute; top: 12px; left: 16px;
+  font-size: 9px; letter-spacing: 3px; color: var(--border-lit);
+}
+pre code { background: none; border: none; padding: 0; font-size: inherit; color: #d7dadd; }
+
+/* ---------------- cards / grid ---------------- */
+.grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); margin: 18px 0; }
+.card {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; padding: 18px 19px; position: relative;
+  transition: border-color .15s ease, transform .15s ease;
+}
+.card:hover { border-color: var(--border-lit); transform: translateY(-2px); }
+.card h3 { margin: 0 0 8px; font-size: 16px; font-family: var(--mono); font-weight: 600; }
+.card h3 a { color: var(--ink); }
+.card p { margin: 0; color: var(--ink-dim); font-size: 14.5px; }
+
+/* module cards (extensions page) */
+.mod-card { display: flex; flex-direction: column; gap: 8px; }
+.mod-card .mod-target { font-family: var(--mono); font-size: 11.5px; color: var(--amber-dim); text-transform: uppercase; letter-spacing: .06em; }
+.mod-card h3 { margin: 0; }
+.mod-card p { color: var(--ink-dim); }
+
+/* ---------------- tables ---------------- */
+.table-wrap { overflow-x: auto; margin: 14px 0; border: 1px solid var(--border); border-radius: 10px; }
+table { width: 100%; border-collapse: collapse; font-size: 14.5px; min-width: 480px; }
+th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+tr:last-child td { border-bottom: none; }
+th {
+  color: var(--ink-faint); font-weight: 600; text-transform: uppercase; font-size: 11.5px;
+  letter-spacing: .06em; font-family: var(--mono); background: var(--panel2);
+}
+td code { white-space: nowrap; }
+
+/* ---------------- scope chips & callouts ---------------- */
+.chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  font-family: var(--mono);
+}
+.chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.chip.global  { color: var(--global);  background: rgba(224,104,95,0.13); }
+.chip.profile { color: var(--profile); background: rgba(126,201,102,0.13); }
+.chip.game    { color: var(--game);    background: rgba(90,164,232,0.13); }
+.chip.default { color: #b7bcc2;        background: rgba(107,114,128,0.22); }
+
+.note {
+  border-left: 3px solid var(--amber); background: var(--panel);
+  border-radius: 0 8px 8px 0; padding: 13px 17px; margin: 18px 0; color: var(--ink-dim);
+  font-size: 15px;
+}
+.note strong { color: var(--ink); }
+
+/* ---------------- steps ---------------- */
+ol.steps { counter-reset: s; list-style: none; padding-left: 0; margin: 18px 0; }
+ol.steps > li {
+  counter-increment: s; position: relative; padding: 3px 0 20px 46px; margin: 0;
+}
+ol.steps > li::before {
+  content: counter(s); position: absolute; left: 0; top: 0;
+  width: 30px; height: 30px; border-radius: 6px;
+  background: rgba(255,180,84,0.1); border: 1px solid rgba(255,180,84,0.3); color: var(--amber);
+  display: grid; place-items: center; font-weight: 600; font-size: 13.5px; font-family: var(--mono);
+}
+ol.steps > li:not(:last-child)::after {
+  content: ""; position: absolute; left: 14px; top: 30px; bottom: 2px; width: 1px;
+  background: var(--border);
+}
+
+/* ---------------- screenshots — HUD-bracketed terminal frame ---------------- */
+figure.shot { margin: 26px 0; text-align: center; position: relative; }
+figure.shot .frame {
+  position: relative; display: inline-block; max-width: 100%;
+  border: 1px solid var(--border); border-radius: 12px; padding: 8px;
+  background: linear-gradient(180deg, var(--panel2), var(--field));
+}
+figure.shot .frame::before {
+  content: "\25CF   \25CF   \25CF";
+  position: absolute; top: -1px; left: 14px; letter-spacing: 3px; font-size: 8px;
+  color: var(--border-lit); background: var(--panel2); padding: 4px 6px 0;
+  border-radius: 0 0 6px 6px;
+}
+figure.shot img {
+  max-width: 100%; height: auto; display: block; border-radius: 7px;
+  box-shadow: 0 20px 50px rgba(0,0,0,.55);
+}
+figure.shot.splash .frame { max-width: 380px; }
+figure.shot figcaption {
+  color: var(--ink-faint); font-size: 13px; margin-top: 12px; font-family: var(--mono);
+}
+
+kbd {
+  font-family: var(--mono); font-size: .82em; background: var(--panel2);
+  border: 1px solid var(--border-lit); border-bottom-width: 2px;
+  border-radius: 6px; padding: 2px 8px; color: var(--ink);
+}
+
+/* command-block: the 5-part launch assembly diagram */
+.assembly {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  font-family: var(--mono); font-size: 13px; margin: 18px 0;
+  padding: 16px; background: var(--field); border: 1px solid var(--border); border-radius: 10px;
+}
+.assembly span {
+  padding: 6px 11px; border-radius: 6px; border: 1px solid var(--border-lit);
+  background: var(--panel);
+}
+.assembly span.cmd { color: var(--amber); border-color: var(--amber-dim); background: rgba(255,180,84,0.08); font-weight: 600; }
+.assembly span.arrow { border: none; background: none; padding: 0 2px; color: var(--ink-faint); }
+
+/* on-this-page pill nav */
+.pagenav { display: flex; flex-wrap: wrap; gap: 6px; font-family: var(--mono); font-size: 12.5px; }
+.pagenav a {
+  padding: 5px 11px; border: 1px solid var(--border); border-radius: 999px; color: var(--ink-dim);
+}
+.pagenav a:hover { border-color: var(--amber-dim); color: var(--amber); text-decoration: none; }
+
+@media (max-width: 620px) {
+  .hero h1 { font-size: 38px; }
+  .hero .tag { font-size: 16.5px; }
+  .nav-brand span.name { display: none; }
+  footer { flex-direction: column; }
+}
