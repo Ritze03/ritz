@@ -62,11 +62,13 @@
 
 <section id="splash">
   <h2>the launch splash</h2>
-  <p>ritz shows one of two different keyboard-only, always-on-top windows depending on
-  whether it already knows the game: a one-time <strong>naming wizard</strong> the very
-  first time it sees an AppID, or the <strong>countdown splash</strong> on every launch
-  after that. They're separate screens shown on separate launches, not steps of one
-  session.</p>
+  <p>ritz shows one of three different always-on-top windows, depending on whether it
+  already knows the game and whether it can resolve an AppID at all: a one-time
+  <strong>naming wizard</strong> the first time it sees a known AppID, the
+  <strong>countdown splash</strong> on every launch after that, or — if no AppID can be
+  resolved — a setup screen that writes nothing and always cancels the launch, prompting
+  you to fix the shortcut's Steam launch options. They're separate screens shown on
+  separate launches, not steps of one session.</p>
 
   <h3>first launch: the new-game wizard</h3>
   <p>The first time ritz sees a game it has no config for, it runs this 3-step wizard
@@ -99,7 +101,6 @@
   <figure class="shot">
     <div class="frame"><img src="assets/screenshots/splash-launching-game.png" alt="The normal countdown splash: game name, profile, and a 1.7s countdown to launch"></div>
   </figure>
-
   <div class="table-wrap">
   <table>
     <tr><th>Key</th><th>Action</th></tr>
@@ -109,6 +110,9 @@
     <tr><td><em>timeout</em></td><td>Launches automatically after the splash timeout.</td></tr>
   </table>
   </div>
+  <p>The splash shows the game name, its assigned profile, and the countdown. It's
+  keyboard-first, so it works inside gamescope/Big-Picture flows, but every button is
+  also clickable with a mouse.</p>
 </section>
 
 <section id="gui">
@@ -118,9 +122,13 @@
   </figure>
   <p>Run <code>ritz</code> (or press <kbd>E</kbd> on the splash). The window has three columns:</p>
   <ul>
-    <li><strong>Navigator (left).</strong> Lists <em>General Settings</em>,
-      <em>Global Profile</em>, your <em>Profiles</em>, and your <em>Games</em>. Selecting
-      one chooses the <em>scope</em> you're editing.</li>
+    <li><strong>Navigator (left).</strong> A 3-tab bar — <em>Profiles</em> /
+      <em>IDE Mode</em> / <em>Settings</em> — sits at the top. The <em>Settings</em> tab
+      opens General Settings directly. The <em>Profiles</em> tab is the only one that
+      shows a tree below it, listing <em>Global Profile</em>, your <em>Profiles</em>,
+      and your <em>Games</em>; selecting one there chooses the <em>scope</em> you're
+      editing. The <em>IDE Mode</em> tab opens a separate module-authoring surface —
+      see the <a href="extensions.html#ide">IDE Mode reference →</a>.</li>
     <li><strong>Modules (middle-left).</strong> The module tree for the selected scope —
       grouped by author or folder, with built-ins under their own node.</li>
     <li><strong>Options (center).</strong> The selected module's fields. The bottom band
@@ -187,8 +195,10 @@
     <li><strong>Reload Extensions / Reload Configs</strong> (<kbd>Ctrl</kbd>+<kbd>R</kbd>) —
       re-read modules and config from disk without restarting.</li>
     <li><strong>Re-Export Modules and Plugins</strong> — restore the bundled modules,
-      without overwriting on-disk copies you've already edited (use after upgrading ritz).</li>
-    <li><strong>Config Cleanup</strong> — remove stored values for variables that no
+      <strong>overwriting</strong> any on-disk copy that differs from the bundled
+      version — including ones you've edited yourself (use after upgrading ritz, but
+      back up any customized bundled module first).</li>
+    <li><strong>Clean Up Configs</strong> — remove stored values for variables that no
       longer exist in any module (e.g. after a module rename or update), across all scopes.</li>
   </ul>
 </section>
