@@ -37,6 +37,13 @@
         "Type": "integer",
         "Variable": "max_frame_latency",
         "Options": { "min": 0, "max": 16, "step": 1 }
+      },
+      {
+        "Name": "Latency Sleep",
+        "Description": "dxvk.latencySleep — enables DXVK's low-latency frame-pacing sleep (similar to Nvidia Reflex) to reduce input latency.",
+        "Type": "selection",
+        "Variable": "latency_sleep",
+        "Options": ["Auto", "True", "False"]
       }
     ],
     "Display": [
@@ -53,6 +60,14 @@
         "Type": "toggle",
         "Variable": "hdr",
         "Default": false
+      },
+      {
+        "Name": "Present Interval (Vsync)",
+        "Description": "dxgi.syncInterval / d3d9.presentInterval — force this game's present/vsync interval. Off = uncapped (may tear), On = normal vsync.",
+        "Type": "selection",
+        "DisplayOptions": ["Game Default", "Off", "On"],
+        "Options": ["", "0", "1"],
+        "Variable": "present_interval"
       }
     ]
   },
@@ -64,7 +79,9 @@
         { "Requires": "fps_limit", "Type": "append", "Separator": "; ", "Value": "dxvk.maxFrameRate = {fps_limit}" },
         { "Requires": "gpl", "Type": "append", "Separator": "; ", "Value": "dxvk.enableGraphicsPipelineLibrary = {gpl}" },
         { "Requires": "max_frame_latency", "Type": "append", "Separator": "; ", "Value": "dxgi.maxFrameLatency = {max_frame_latency}; d3d9.maxFrameLatency = {max_frame_latency}" },
-        { "Requires": "tear_free", "Type": "append", "Separator": "; ", "Value": "dxvk.tearFree = {tear_free}" }
+        { "Requires": "tear_free", "Type": "append", "Separator": "; ", "Value": "dxvk.tearFree = {tear_free}" },
+        { "Requires": "latency_sleep", "Type": "append", "Separator": "; ", "Value": "dxvk.latencySleep = {latency_sleep}" },
+        { "Requires": "present_interval", "Type": "append", "Separator": "; ", "Value": "dxgi.syncInterval = {present_interval}; d3d9.presentInterval = {present_interval}" }
       ]
     },
     {

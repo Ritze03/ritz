@@ -151,7 +151,7 @@ pub const COL_WARN: Color32 = Color32::from_rgb(0xE1, 0xA8, 0x54);
 /// Error — the reason an action is refused.
 ///
 /// **Exactly [`COL_GLOBAL`]'s red, on purpose.** That red is already the app's
-/// established danger colour (`docs/ui/STYLING-GUIDE.md`, "Why the Global/danger
+/// established danger colour (`superdoc/ui/STYLING-GUIDE.md`, "Why the Global/danger
 /// overlap" — Delete, Cancel, `danger_button`), so an error introducing a
 /// *second* red would be a distinction with no meaning. This alias exists so
 /// call sites can say which of the two roles they mean, and so the pair can

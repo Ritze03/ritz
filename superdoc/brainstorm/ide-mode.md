@@ -313,7 +313,7 @@ renames in the scratch preview."
   notice / validation errors instead of shipping visible dead space.
 - **MEDIUM** — four unit tests (gui.rs:5621, 5722-5736, 5809) must be deleted or rewritten when
   `NavSel::ModuleEditor` goes.
-- **LOW** — `docs/features/settings-gui.md` "Layout: four panels per frame" (~:43-64) and the
+- **LOW** — `superdoc/features/settings-gui.md` "Layout: four panels per frame" (~:43-64) and the
   preview footer note (~:397) go stale the moment IDE mode lands and must be updated in the same
   commit, per project doc discipline.
 - **LOW** — the "Previewing against: `{game}`" string (gui.rs:1431) contradicts round-1 answer 4
@@ -473,7 +473,7 @@ rationale live in [`../features/settings-gui.md`](../features/settings-gui.md), 
   > on-disk body under the new identity and the draft's body edits stay pending — so a
   > re-seed would discard them. Those four fields are now updated **in place**. The
   > stale-field list above is still exactly right; only the mechanism changed. See
-  > `docs/features/settings-gui.md`, "Rename / identity migration", step (6).
+  > `superdoc/features/settings-gui.md`, "Rename / identity migration", step (6).
 - **The `icon_cache` label-poisoning trap does not exist.** The plan warns that a dirty
   glyph must never be appended to the label string because it would poison
   `IconCenterCache`. `IconCenterCache` keys on the *leading char of the icon string* plus
@@ -660,7 +660,7 @@ corrections to *this* plan are recorded here.
   > objection rather than overriding it. Config mode is unchanged and still renders them
   > inline under its header (`render_editor_status_lines`), which is why
   > `StatusLine` carries both a `config_color` and a `severity`. See
-  > `docs/features/settings-gui.md`, "IDE-mode diagnostics band".
+  > `superdoc/features/settings-gui.md`, "IDE-mode diagnostics band".
   *Follow-ups from the click-through, same day:* the band took the columns' own
   `theme::PANEL` fill (the `PANEL2` toolbar look was tried and rejected — it read as
   bolted on), grew to two rows / 60pt to stop reading as a cramped strip next to Config

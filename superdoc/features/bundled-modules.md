@@ -10,13 +10,13 @@ page is the "what does each shipped module do" reference.
 
 | Module | Manifest | Targets | Option categories |
 | --- | --- | --- | --- |
-| AMD | `resources/extensions/default/amd.json` | AMD RADV Vulkan driver | RADV_PERFTEST flags (NGGC, SAM), Mesa Anti-Lag layer, Vulkan present-mode override, RADV_DEBUG nohiz workaround, experimental user-mode submission queue |
-| DXVK | `resources/extensions/default/dxvk.json` | DXVK (D3D8/9/10/11 → Vulkan) | FPS limit, HUD overlay, graphics pipeline library, frame latency, tearing/HDR |
-| VKD3D | `resources/extensions/default/vkd3d.json` | VKD3D-Proton (D3D12 → Vulkan) | FPS limit, a dozen `VKD3D_CONFIG` flags (descriptor heap, ray tracing, PSO retention, etc.) plus a raw-flags passthrough, present mode |
+| AMD | `resources/extensions/default/amd.json` | AMD RADV Vulkan driver | RADV_PERFTEST flags (NGGC, SAM), Mesa Anti-Lag layer, Vulkan present-mode override, RADV_DEBUG nohiz workaround, experimental user-mode submission queue, Mesa shader cache max size |
+| DXVK | `resources/extensions/default/dxvk.json` | DXVK (D3D8/9/10/11 → Vulkan) | FPS limit, HUD overlay, graphics pipeline library, frame latency, latency sleep, present interval (vsync), tearing/HDR |
+| VKD3D | `resources/extensions/default/vkd3d.json` | VKD3D-Proton (D3D12 → Vulkan) | FPS limit, 13 `VKD3D_CONFIG` flags (descriptor heap, ray tracing, PSO retention, force host-cached, small VRAM ReBAR, etc.) plus a raw-flags passthrough, present mode |
 | Proton | `resources/extensions/default/proton.json` | Proton compatibility layer | Sync backend (NTSync/FSYNC), renderer overrides (WineD3D, D3D8/10/11), display (Wayland, HDR, integer scaling), GPU (NVAPI, GPU-hiding), compatibility toggles, debug logging |
-| Gamescope | `resources/extensions/default/gamescope.json` | Gamescope compositor | Enable/backend/scaler, output & internal resolution, refresh rate, sync & input flags, FSR upscaling — emits a command wrapper |
+| Gamescope | `resources/extensions/default/gamescope.json` | Gamescope compositor | Enable/backend/scaler, output & internal resolution, refresh rate, sync & input flags, realtime scheduling (`--rt`), upscaling filter (`--filter`: linear/nearest/fsr/nis/pixel) with sharpness — emits a command wrapper |
 | Misc | `resources/extensions/default/misc.json` | Steam runtime / GameMode / desktop env | Clear LD_PRELOAD/VK_INSTANCE_LAYERS, force X11 SDL backend, keyboard layout, GameMode wrapper |
-| PulseAudio | `resources/extensions/default/pulse.json` | PulseAudio / PipeWire-pulse | Client latency, output sink routing, `media.role=game` tagging |
+| PulseAudio | `resources/extensions/default/pulse.json` | PulseAudio / PipeWire-pulse | Client latency (`PULSE_LATENCY_MSEC`), native PipeWire quantum/rate latency (`PIPEWIRE_LATENCY`), output sink routing, SDL audio backend override (`SDL_AUDIODRIVER`), `media.role=game` tagging |
 | Scripts | `resources/extensions/default/scripts/scripts.json` | User shell commands | Pre-launch (blocking), post-spawn (background), post-exit (blocking) command hooks |
 | Game Launch Args | `resources/extensions/built-in/custom-args/custom-args.json` | The game's own argv | Uncapped list of free-text launch arguments, appended verbatim after the game command |
 | Custom Env | `resources/extensions/built-in/custom-env/custom-env.json` | Process environment (chain-wide) | Uncapped list of free-form `NAME=VALUE` env var pairs |
@@ -38,10 +38,20 @@ page is the "what does each shipped module do" reference.
   "one step per choice" mechanic anywhere in this codebase to copy). RADV Debug is a
   separate one-toggle section (`nohiz`) writing its own `RADV_DEBUG` env var —
   deliberately not merged into `RADV_PERFTEST`, since it's a different variable.
+  Shader Cache is a one-field integer-range section (`shader_cache_max_size`, 0-32,
+  default 0 = leave Mesa's own 1GB default untouched) writing `MESA_SHADER_CACHE_MAX_SIZE`
+  via a single `set` builder step templated as `{shader_cache_max_size}G` — the `G`
+  suffix is appended in the template since Mesa's override format wants a bare
+  gigabyte number with a `G` suffix, not a plain integer.
 - **DXVK / VKD3D** — Both target Vulkan translation layers for different D3D versions and
   share a shape: an `ENV_VARS` block with `Builder` entries keyed off UI `Variable`s.
-  VKD3D's `Config Flags` group is the largest single options surface in the bundle (11
-  toggles plus a raw string passthrough that appends extra `VKD3D_CONFIG` flags verbatim).
+  VKD3D's `Config Flags` group is the largest single options surface in the bundle (13
+  toggles — including `force_host_cached` and `small_vram_rebar`, promoted from the raw
+  passthrough on 2026-07-31 — plus a raw string passthrough that appends extra
+  `VKD3D_CONFIG` flags verbatim). Note: `small_vram_rebar` could not be confirmed as a
+  documented upstream `VKD3D_CONFIG` flag (not present in the vkd3d-proton README or
+  CHANGELOG as of this writing) — added per explicit request, description flags this
+  caveat for users.
 - **Proton** — Purely a flat set of `PROTON_*` / `WINE_*` toggles, one env var each, no
   `Builder` composition needed since none of them combine into a single variable.
 - **Gamescope** — The only module besides Misc/Scripts that emits a `WRAPPERS` entry

@@ -18,7 +18,7 @@ launch"/"after launch"/"on exit" box without ritz needing to know what the comma
     but may not have execed the real game yet).
   - `OnGameReady` — fires once the supervise loop's process-name poll finds a match
     (or `READY_TIMEOUT` elapses), the same signal that drives backend
-    `on_game_ready`. See `docs/features/process-supervisor.md` for what "ready" means.
+    `on_game_ready`. See `superdoc/features/process-supervisor.md` for what "ready" means.
   - `PostExit` — fires after the supervise loop returns the child's exit code, right
     before backend `post_exit` cleanup, on every exit path.
   *Why these four and not more:* they map 1:1 onto the only points in
@@ -58,7 +58,7 @@ launch"/"after launch"/"on exit" box without ritz needing to know what the comma
   in particular needs "no entries" to be empty, not the literal word `false`.
 - **Errors are logged, never fatal.** `crates/ritz-app/src/hooks.rs:run_stage` catches
   every hook's `Result` and prints to stderr instead of propagating.
-  *Why:* see `docs/features/process-supervisor.md` — a misbehaving extension script
+  *Why:* see `superdoc/features/process-supervisor.md` — a misbehaving extension script
   must not abort or crash the game the user is trying to play.
 - **`ScriptBuilders` are a separate, non-lifecycle mechanism** for computing launch
   command content, not for side effects. Declared as a list of

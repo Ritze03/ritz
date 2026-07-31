@@ -4807,7 +4807,7 @@ impl GuiApp {
 /// not just at that one call site.
 ///
 /// *Why this exists as its own helper:* IDE mode (see
-/// `docs/brainstorm/ide-mode.md`, S3) will need the clamp to NOT bind in its
+/// `superdoc/brainstorm/ide-mode.md`, S3) will need the clamp to NOT bind in its
 /// wide preview layout — one helper means one place to add that condition
 /// later instead of three. `Mode` doesn't exist yet, so that condition is
 /// deliberately not added here.
@@ -8716,7 +8716,7 @@ impl GuiApp {
                     // Cog reused verbatim from the old General Settings tree row.
                     // `theme::DIM` (not `COL_DEFAULT`): `COL_DEFAULT` already carries
                     // a specific, unrelated meaning in the scope palette ("no
-                    // override anywhere" — see `docs/ui/STYLING-GUIDE.md`), and
+                    // override anywhere" — see `superdoc/ui/STYLING-GUIDE.md`), and
                     // reusing it here for tab identity would be a confusing double
                     // duty. `DIM` reads as deliberately neutral rather than
                     // disabled, and — unlike `FAINT`, which the *unselected* icon
@@ -10090,7 +10090,7 @@ const TAB_TEXT_SIZE: f32 = 11.0;
 ///   tint formula `SEL`/`SELBD` are hand-expanded from, applied to whichever
 ///   color this tab owns — rounded on **all four corners** at the same `8.0`
 ///   radius every other rounded container in the app uses
-///   (`CornerRadius::same(8)`, per `docs/ui/STYLING-GUIDE.md`);
+///   (`CornerRadius::same(8)`, per `superdoc/ui/STYLING-GUIDE.md`);
 /// - **ink**: glyph in `accent`, label in full-brightness `TEXT`.
 ///
 /// *Why per-tab color only on selected, not unselected too:* unselected tabs
@@ -10147,7 +10147,7 @@ fn nav_category_tab(
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         // All four corners, matching the app-wide 8px rounding convention (see
-        // `docs/ui/STYLING-GUIDE.md`, "Corner rounding is CornerRadius::same(8)
+        // `superdoc/ui/STYLING-GUIDE.md`, "Corner rounding is CornerRadius::same(8)
         // everywhere").
         let rounding = egui::CornerRadius::same(8);
         if selected {

@@ -118,23 +118,33 @@
         "Type": "toggle",
         "Variable": "expose_wayland",
         "Requires": "enabled"
+      },
+      {
+        "Name": "Realtime Scheduling (--rt)",
+        "Description": "Use SCHED_RR realtime scheduling for the compositor (--rt).",
+        "Type": "toggle",
+        "Variable": "realtime_sched",
+        "Default": false,
+        "Requires": "enabled"
       }
     ],
-    "FSR": [
+    "Upscaling": [
       {
-        "Name": "Enable FSR",
-        "Description": "Enable FSR upscaling.",
-        "Type": "toggle",
-        "Variable": "fsr_enabled",
+        "Name": "Filter",
+        "Description": "Output upscaling/scaling filter (--filter).",
+        "Type": "selection",
+        "DisplayOptions": ["Off", "Linear", "Nearest", "FSR", "NIS", "Pixel"],
+        "Options": ["", "linear", "nearest", "fsr", "nis", "pixel"],
+        "Variable": "filter",
         "Requires": "enabled"
       },
       {
-        "Name": "FSR Sharpness",
-        "Description": "FSR sharpness, 0 is sharpest.",
+        "Name": "Sharpness",
+        "Description": "Sharpness applied with the FSR or NIS filter, 0 is sharpest.",
         "Type": "integer",
         "Options": { "min": 0, "max": 20, "step": 1 },
         "Variable": "fsr_sharpness",
-        "Requires": "enabled AND fsr_enabled"
+        "Requires": "enabled"
       }
     ]
   },
@@ -155,7 +165,8 @@
         { "Requires": "immediate_flips", "Value": "--immediate-flips" },
         { "Requires": "force_grab_cursor", "Value": "--force-grab-cursor" },
         { "Requires": "expose_wayland", "Value": "--expose-wayland" },
-        { "Requires": "fsr_enabled", "Value": "--filter fsr" },
+        { "Requires": "realtime_sched", "Value": "--rt" },
+        { "Requires": "filter", "Value": "--filter {filter}" },
         { "Requires": "fsr_sharpness", "Value": "--sharpness {fsr_sharpness}" },
         { "Requires": "mouse_sensitivity", "Value": "--mouse-sensitivity {mouse_sensitivity}" },
         { "Requires": "fullscreen", "Value": "-f" }

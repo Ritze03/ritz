@@ -121,7 +121,7 @@ derivation, not just the hex.
 band held one or two warnings. 60a56b3 added three lints that all rank as `Warning`,
 so an ordinary draft could paint the whole band danger-red — a screen with nothing
 refused reading exactly like a screen with Save blocked. See
-`docs/features/settings-gui.md`, "Diagnostics band".
+`superdoc/features/settings-gui.md`, "Diagnostics band".
 
 *Why `Provenance::Game` is special-cased at call sites:* when editing a value at the
 layer that's currently open, `resolve::Provenance` reports it as `Provenance::Game`

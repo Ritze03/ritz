@@ -918,7 +918,7 @@ button calling the same handler, and **Ctrl+E** used to open the editor for
 Mode owns module authoring — the Edit button because a second door into the editor
 from a read-only view was confusing, Ctrl+E because it was keyed off `selected_ext`,
 an index that only exists because the Config-mode `ext_list` column exists (see
-`docs/brainstorm/ide-mode.md`, which staged it as "removed for now, not ported"). The
+`superdoc/brainstorm/ide-mode.md`, which staged it as "removed for now, not ported"). The
 keybinding may be revisited once IDE Mode has its own notion of a selected module.
 
 - **Entering / leaving** — `GuiApp::focus_module(id)` sets `focused_module = Some(id)`,
@@ -1934,7 +1934,7 @@ warnings. It stopped being tolerable when 60a56b3 added three lints that all ran
 `Warning`: a draft with a few undeclared references painted the whole band danger-red, so
 a screen where **nothing** was refused read exactly like a screen where Save was blocked.
 Fixed 2026-07-19 (issue #39) the way that note always pointed at — as real palette tokens
-in `theme.rs`, where palette decisions belong. See `docs/ui/STYLING-GUIDE.md`,
+in `theme.rs`, where palette decisions belong. See `superdoc/ui/STYLING-GUIDE.md`,
 "Diagnostic severity colours", for the two hex values and why they are those values.
 
 The band's **tally row** ("3 warnings", "1 error · 2 warnings") is coloured by the worst

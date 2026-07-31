@@ -2,7 +2,7 @@
 
 **Mandatory working rule for agents, linked (force-loaded) from the repo-root `CLAUDE.md`.**
 
-The `docs/` folder is the project's shared memory. It is only useful while it stays true, so
+The `superdoc/` folder is the project's shared memory. It is only useful while it stays true, so
 maintaining it is part of doing the work — not an afterthought. A doc that lies is worse than
 no doc, because the next agent trusts it.
 
@@ -23,7 +23,7 @@ If you add or change something the docs describe, **update the doc in the same c
 change (the same discipline good changelog hygiene follows). In particular:
 
 - **New** feature, module, component, config option, or capability → update the relevant
-  `features/` / `architecture/` doc, and add a line to the `docs/README.md` index if you
+  `features/` / `architecture/` doc, and add a line to the `superdoc/README.md` index if you
   created a new page.
 - **Renamed / removed** things → fix every mention, including any `@`-reference or link in
   `CLAUDE.md`.
@@ -55,7 +55,7 @@ The doc is where it survives.
 
 - **`@path`** — force-loads the file into *every* session's context. Reserved for the
   must-always-know set: everything in `claude-instructions/` plus `meta/TERMINOLOGY.md`.
-- **plain path** (`` `docs/…` ``) — an optional, on-demand read. Everything else.
+- **plain path** (`` `superdoc/…` ``) — an optional, on-demand read. Everything else.
 
 When you add a doc, pick the right one: does *every* task need it in context, or only tasks
 that touch that area? **Default to a plain link** — force-loading spends context budget on

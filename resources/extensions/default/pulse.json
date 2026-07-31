@@ -13,6 +13,12 @@
         "Type": "integer",
         "Variable": "latency_msec",
         "Options": { "min": 0, "max": 500, "step": 10 }
+      },
+      {
+        "Name": "PipeWire Latency (quantum/rate)",
+        "Description": "PIPEWIRE_LATENCY — e.g. 256/48000 (256 samples @ 48kHz ≈ 5.3ms). The actual latency knob for native PipeWire clients — PULSE_LATENCY_MSEC only affects PipeWire's PulseAudio-compat layer. Empty = leave default.",
+        "Type": "string",
+        "Variable": "pipewire_latency"
       }
     ],
     "Routing": [
@@ -21,6 +27,15 @@
         "Description": "PULSE_SINK — name of the sink to send this game's audio to (e.g. a headset). Use `pactl list short sinks` to find names. Empty = default output.",
         "Type": "string",
         "Variable": "sink"
+      },
+      {
+        "Name": "SDL Audio Driver",
+        "Description": "SDL_AUDIODRIVER — force which audio backend SDL2 games use. Useful when a game picks the wrong one and has no/broken audio.",
+        "Type": "selection",
+        "DisplayOptions": ["Auto (Default)", "PipeWire", "PulseAudio", "ALSA"],
+        "Options": ["", "pipewire", "pulseaudio", "alsa"],
+        "Variable": "sdl_audiodriver",
+        "Default": ""
       }
     ],
     "Properties": [
@@ -43,6 +58,16 @@
       "Name": "PULSE_SINK",
       "Requires": "sink",
       "Builder": [{ "Requires": "sink", "Type": "set", "Value": "{sink}" }]
+    },
+    {
+      "Name": "SDL_AUDIODRIVER",
+      "Requires": "sdl_audiodriver",
+      "Builder": [{ "Requires": "sdl_audiodriver", "Type": "set", "Value": "{sdl_audiodriver}" }]
+    },
+    {
+      "Name": "PIPEWIRE_LATENCY",
+      "Requires": "pipewire_latency",
+      "Builder": [{ "Requires": "pipewire_latency", "Type": "set", "Value": "{pipewire_latency}" }]
     },
     {
       "Name": "PULSE_PROP",

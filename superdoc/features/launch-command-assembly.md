@@ -128,7 +128,7 @@ handlers (`lsfg-vk`, `hypr-monctl`) this is *not* one of, and
 
 ## Related links
 
-- `docs/features/extension-system.md` — how `ENV_VARS`, `WRAPPERS`, `GAME_ENV_VARS`, and
+- `superdoc/features/extension-system.md` — how `ENV_VARS`, `WRAPPERS`, `GAME_ENV_VARS`, and
   `GAME_LAUNCH_ARGS` blocks are declared per extension and resolved/gated by `Requires`
   and variables before reaching the builder.
-- `docs/architecture/overview.md` — where this fits in the overall data flow.
+- `superdoc/architecture/overview.md` — where this fits in the overall data flow.

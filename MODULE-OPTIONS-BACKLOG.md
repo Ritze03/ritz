@@ -5,8 +5,8 @@ written yet — each row awaits sign-off. ⭐ = recommended (High-value). All ve
 against current upstream (source/README/docs) at research time.
 
 ## DXVK
-- ⭐ `dxgi.syncInterval` / `d3d9.presentInterval` — Off/On/Game — force vsync per-game — High
-- ⭐ `dxvk.latencySleep` — Auto/True/False — Reflex/low-latency — High
+- ✅ IMPLEMENTED 2026-07-31: ~~`dxgi.syncInterval` / `d3d9.presentInterval` — Off/On/Game — force vsync per-game — High~~
+- ✅ IMPLEMENTED 2026-07-31: ~~`dxvk.latencySleep` — Auto/True/False — Reflex/low-latency — High~~
 - `dxgi.hideNvidiaGpu` / `hideAmdGpu` — Auto/T/F — vendor spoof (fixes vendor-detect crashes) — High
 - `DXVK_LOG_LEVEL` / `DXVK_LOG_PATH` — none…debug — silence log spam — Med
 - `dxvk.maxMemoryBudget` — MB — VRAM cap for low-VRAM GPUs — Med
@@ -16,7 +16,9 @@ against current upstream (source/README/docs) at research time.
 - ⭐ `VKD3D_VULKAN_DEVICE` — int index — GPU select (hybrid/multi-GPU) — High
 - ⭐ `VKD3D_FILTER_DEVICE_NAME` — substring — GPU select by name (stable across driver updates) — High
 - `VKD3D_SHADER_CACHE_PATH` — path / 0 — relocate/disable cache — Med
-- `force_host_cached`, `small_vram_rebar` — toggles — promote from raw_config passthrough — Med
+- ✅ IMPLEMENTED 2026-07-31: ~~`force_host_cached`, `small_vram_rebar` — toggles — promote from raw_config passthrough — Med~~
+  (`small_vram_rebar` could not be confirmed as a real upstream `VKD3D_CONFIG` flag at
+  implementation time — added per explicit request, description flags this caveat)
 
 ## Proton
 - ⭐ `WINE_FULLSCREEN_FSR` (+ `_STRENGTH` 0–5, `_CUSTOM_MODE` WxH) — FSR upscaling — High (GE-only, no-op on stock Valve)
@@ -29,8 +31,8 @@ against current upstream (source/README/docs) at research time.
 - ⭐ `--mangoapp` — toggle — built-in perf overlay — High
 - ⭐ `--hdr-enabled` — toggle — HDR output — High
 - ⭐ `-b`/`--borderless` — toggle — borderless window — High
-- `--filter nis` — fold FSR toggle into filter dropdown (Off/Linear/Nearest/FSR/NIS/Pixel) — NIS upscaler — High
-- `--rt` — realtime sched — Med
+- ✅ IMPLEMENTED 2026-07-31: ~~`--filter nis` — fold FSR toggle into filter dropdown (Off/Linear/Nearest/FSR/NIS/Pixel) — NIS upscaler — High~~
+- ✅ IMPLEMENTED 2026-07-31: ~~`--rt` — realtime sched — Med~~
 - `--framerate-limit` — ⚠️ worker claimed DIVISOR of refresh, not absolute FPS — VERIFY before wiring — Med
 - `--nested-unfocused-refresh` — Hz — battery/fps cap when unfocused — Med
 - `--prefer-vk-device` — vendor:device — pin compositor GPU (multi-GPU) — Med
@@ -39,7 +41,9 @@ against current upstream (source/README/docs) at research time.
 - ⭐ `RADV_TEX_ANISO` — off/2/4/8/16 — force anisotropic filtering — High
 - ⭐ `RADV_PERFTEST=pswave32` / `gewave32` (+ `cswave32`) — append flags — wave32 perf — High/Med
 - `RADV_DEBUG=zerovram` — toggle — fix flicker/glitch games (new RADV_DEBUG env entry needed) — Med
-- `MESA_VK_WSI_PRESENT_MODE` — fifo/mailbox/immediate/relaxed — force present mode (tearing caveat) — Med
+  (note: `RADV_DEBUG=nohiz` was implemented 2026-07-31 as a separate, non-backlog-sourced
+  addition — a distinct RADV_DEBUG flag from zerovram, which is still pending)
+- ✅ IMPLEMENTED 2026-07-31: ~~`MESA_VK_WSI_PRESENT_MODE` — fifo/mailbox/immediate/relaxed — force present mode (tearing caveat) — Med~~
 - `mesa_glthread=true` — toggle — OpenGL-game FPS (ROUTED HERE, not misc) — Med
 
 ## Misc
@@ -49,9 +53,9 @@ against current upstream (source/README/docs) at research time.
 - `OBS_VKCAPTURE`, `SDL_JOYSTICK_HIDAPI` — streaming / controller fix — Niche
 
 ## Pulse
-- ⭐ `PIPEWIRE_LATENCY` — e.g. `256/48000` — the knob that ACTUALLY works on PipeWire (PULSE_LATENCY_MSEC
-  only hits pulse-compat path); pair the two in one Latency section — High
-- ⭐ `SDL_AUDIODRIVER` — pipewire/pulseaudio/alsa — fix wrong/no-audio backend — High
+- ✅ IMPLEMENTED 2026-07-31: ~~`PIPEWIRE_LATENCY` — e.g. `256/48000` — the knob that ACTUALLY works on PipeWire (PULSE_LATENCY_MSEC
+  only hits pulse-compat path); pair the two in one Latency section — High~~
+- ✅ IMPLEMENTED 2026-07-31: ~~`SDL_AUDIODRIVER` — pipewire/pulseaudio/alsa — fix wrong/no-audio backend — High~~
 - `ALSOFT_DRIVERS` — backend list — OpenAL backend fix — Med
 - `PULSE_SOURCE` — mic name — symmetry with PULSE_SINK — Med
 

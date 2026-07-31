@@ -70,6 +70,16 @@
         "Variable": "userq",
         "Default": false
       }
+    ],
+    "Shader Cache": [
+      {
+        "Name": "Shader Cache Max Size (GB)",
+        "Description": "Overrides MESA_SHADER_CACHE_MAX_SIZE (max on-disk shader cache size). Mesa's own default is 1GB when left at 0. Set 1-32 to cap the cache at that many gigabytes.",
+        "Type": "integer",
+        "Variable": "shader_cache_max_size",
+        "Default": 0,
+        "Options": { "min": 0, "max": 32, "step": 1 }
+      }
     ]
   },
   "ENV_VARS": [
@@ -107,6 +117,11 @@
       "Builder": [
         { "Requires": "nohiz", "Type": "set", "Value": "nohiz" }
       ]
+    },
+    {
+      "Name": "MESA_SHADER_CACHE_MAX_SIZE",
+      "Requires": "shader_cache_max_size",
+      "Builder": [{ "Requires": "shader_cache_max_size", "Type": "set", "Value": "{shader_cache_max_size}G" }]
     }
   ]
 }

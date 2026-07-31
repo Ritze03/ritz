@@ -76,7 +76,7 @@ amend the entry here.
 - **"Global Profile" (UI label for the global scope)** — as of 2026-07-19, the settings
   GUI's nav tree and edit-context banner display the **global** scope layer (see Scope,
   above) under the label "Global Profile" instead of its old label "Global Settings"
-  (`docs/brainstorm/ide-mode.md`, decision 9 — naming consistency with "Profiles" in the
+  (`superdoc/brainstorm/ide-mode.md`, decision 9 — naming consistency with "Profiles" in the
   nav, since it's still the base layer under everything). **This is a pure UI label —
   do not read it as the Profile term defined above.** The global scope is not, and does
   not become, a `crates/ritz-core/src/config.rs:Preset`: it has no `Parent`, is not
