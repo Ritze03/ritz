@@ -350,6 +350,68 @@ renames in the scratch preview."
 
 ## Applied
 
+### 2026-07-31 — issue #41: Config-mode MODULES tree lock keys off `unsaved_drafts`, not `drafts`
+
+**The bug:** enter IDE mode, focus (not even edit) more than one module, switch to
+Profiles — the Config-mode MODULES tree (`ext_list`, `gui.rs`'s `tree_live`) locked and
+**stayed locked permanently**, with no route back short of re-entering IDE mode and
+manually closing every stray draft, or restarting the app.
+
+**Why: the multi-draft model (S4a above) vs. the tree lock's original assumption.**
+`drafts: IndexMap<PathBuf, ModuleDraft>` is deliberately **insert-if-absent, never
+clear** (S4a, "Insert-if-absent, never clear" doc comment on `ensure_draft`) — merely
+*focusing* a module in IDE mode inserts a clean draft for it via `sync_focused_draft`,
+called every frame. That's by design: the whole point of multi-draft is "switch to
+another module, copy something, go back and paste it" (the user's own words, see
+"Multi-draft editing" above), so a draft opened once must survive being looked away
+from.
+
+The Config-mode tree's lock (`let tree_live = self.drafts.is_empty()`) predates that
+model. It was written when leaving IDE mode always meant "the one single draft is gone"
+— true back when there was only ever one `Option<ModuleDraft>` slot, and still true for
+`NavCategory::Ide` itself, whose own tree deliberately **never locks** (see "Multi-draft
+editing" above — "the tree never locks in IDE mode... a per-row dirty dot... shows
+unsaved state instead of gating navigation"). But `self.drafts.is_empty()` checks the
+*whole accumulated map*, and leaving IDE mode for Profiles or General Settings was never
+designed to empty that map:
+
+- `select_nav_category(GamesProfiles)` calls `close_focused_draft`, which drops
+  **exactly the focused draft** and leaves every other open draft alone — deliberately,
+  per `nav_category_drops_draft`'s doc comment (issue #35): "asking `any_unsaved` made a
+  background draft... raise a prompt for a click that would never have touched it."
+- `select_nav_category(GeneralSettings)` clears `focused_module` and leaves **every**
+  draft in the map — also deliberately (S4a's "Coming back from IDE mode" comment).
+
+So once more than one module was ever focused in a session, `self.drafts.is_empty()`
+could never go back to `true` through either exit — the Config-mode tree was gated on a
+set the rest of the multi-draft design explicitly keeps non-empty on purpose.
+
+**The fix (direction (i) from the two the scout who diagnosed this offered — narrow the
+gate, don't sweep the map):** `tree_live` now reads
+`self.unsaved_drafts.is_empty()`, the same "genuinely at risk of being lost" predicate
+`nav_category_drops_draft`/`close_needs_confirm`/the Config-mode **left nav**'s own lock
+already use (`superdoc/features/settings-gui.md`, "Locked trees while editing").
+`unsaved_drafts` is refreshed on every relevant mutation (`refresh_unsaved_drafts`,
+including inside `close_focused_draft`) and only ever contains a draft with real
+unsaved work (`ModuleDraft::has_unsaved_work`) — a clean background draft, however many
+of them accumulated, no longer holds the tree locked. A genuinely *dirty* background
+draft still does — nothing is silently discarded — and stays resolvable exactly the way
+it already was: re-enter IDE mode and Save/Discard it, or focus it and Close.
+
+**Why not direction (ii) (sweep every clean background draft on exit instead):**
+rejected — it would have meant `select_nav_category`'s `GamesProfiles`/`GeneralSettings`
+arms start mutating `self.drafts` beyond the one entry each is documented to touch,
+directly re-opening the exact two `nav_category_drops_draft` guarantees issue #35 (see
+the entry above) went to some trouble to establish: `GeneralSettings` "keeps every
+draft", and `GamesProfiles` "drops exactly one draft... and nothing else". Narrowing the
+*gate* instead of widening the *sweep* leaves both of those invariants, and every test
+that pins them, untouched.
+
+Fix and tests: `crates/ritz-app/src/gui.rs` (`tree_live` at the `ext_list` panel);
+`leaving_ide_for_profiles_reenables_the_config_tree_after_multiple_focuses` and
+`a_dirty_background_draft_keeps_the_config_tree_locked_after_leaving_ide` in the same
+file's test module.
+
 ### 2026-07-19 — S4b: delete `NavSel::ModuleEditor` and its machinery
 
 Pure refactor, zero intended behaviour change. Deleted the enum variant S4a's "Deliberately

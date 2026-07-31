@@ -1105,13 +1105,18 @@ keybinding may be revisited once IDE Mode has its own notion of a selected modul
     **Do not re-attempt this by bumping egui again**; the fix has to come from winit or the
     compositor, or from a non-xdg close path.
 - **Locked trees while editing** — the nav-away guard above is now a *backstop*, not the
-  normal path: while a draft exists the **MODULES tree** is wrapped
-  in `ui.add_enabled_ui(module_draft.is_none(), …)`, so it greys out and can't swap the
-  module out mid-edit; while the draft holds **unsaved work** the **left nav** (Profiles /
-  Games / General / Global) is likewise disabled, so a stray click can't silently discard
-  unsaved edits. *Why the left nav is only locked then:* it retargets the editor's live
-  launch preview, which is useful — the lock exists to protect unsaved edits, not to pin
-  the preview. Exit stays Close / Save (or Ctrl+S).
+  normal path. **Both trees key their lock on `unsaved_drafts`, never on `drafts`
+  itself** — this distinction matters and is corrected as of 2026-07-31, issue #41 (see
+  that entry, and `superdoc/brainstorm/ide-mode.md`'s "Why" note, for the bug this
+  replaced): the **left nav** (Profiles / Games / General / Global,
+  `render_nav_panel`'s `Mode::Config` arm) is wrapped in
+  `ui.add_enabled_ui(self.unsaved_drafts.is_empty(), …)`, and the Config-mode **MODULES
+  tree** (`ext_list`'s `tree_live`) now uses the identical predicate,
+  `self.unsaved_drafts.is_empty()`. *Why the left nav is only locked then:* it retargets
+  the editor's live launch preview, which is useful — the lock exists to protect unsaved
+  edits, not to pin the preview. Exit stays Close / Save (or Ctrl+S), or — since drafts
+  are multi-draft (S4a) — simply re-focusing a different module in IDE mode, which drops
+  nothing.
 - **Keybinds** (handled at the top of `GuiApp::ui`, before panels render) — **Ctrl+S**
   triggers Save when the editor is open and `ModuleDraft::save_enabled` holds (same gate
   as the button), a no-op otherwise; **Ctrl+R** hot-reloads extensions and configs
