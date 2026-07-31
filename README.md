@@ -34,8 +34,8 @@ cd ritz
 # 2. Build it (Linux only) — this takes a few minutes the first time
 cargo build --release
 
-# 3. Install the binary system-wide
-sudo install -Dm755 target/release/ritz /usr/bin/ritz
+# 3. Symlink it system-wide (updates automatically after every rebuild)
+sudo ln -sf "$(pwd)/target/release/ritz" /usr/bin/ritz
 
 # 4. In Steam: right-click the game → Properties → Launch Options:
 ritz %command%
@@ -59,6 +59,20 @@ Run **`ritz`** with no arguments anytime to open the settings GUI.
 > **Non-Steam games** (or anything outside Steam): use
 > `RITZ_APPID=<your-id> ritz %command%` so Ritz can give it a stable identity. Running
 > `ritz %command%` on an unknown game walks you through setting this up.
+
+### Updating
+
+Since step 3 symlinks `/usr/bin/ritz` straight into the repo's build output, updating is
+just:
+
+```sh
+cd ritz && git pull && cargo build --release
+```
+
+No reinstall step needed — the symlink always resolves to the freshly built binary.
+
+- If you move or delete the cloned repo directory, `/usr/bin/ritz` becomes a dangling
+  symlink and stops working. Re-run the symlink command (step 3) from the new location.
 
 ## Usage
 
