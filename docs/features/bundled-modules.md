@@ -10,7 +10,7 @@ page is the "what does each shipped module do" reference.
 
 | Module | Manifest | Targets | Option categories |
 | --- | --- | --- | --- |
-| AMD | `resources/extensions/default/amd.json` | AMD RADV Vulkan driver | RADV_PERFTEST flags (NGGC, SAM), Mesa Anti-Lag layer, experimental user-mode submission queue |
+| AMD | `resources/extensions/default/amd.json` | AMD RADV Vulkan driver | RADV_PERFTEST flags (NGGC, SAM), Mesa Anti-Lag layer, Vulkan present-mode override, RADV_DEBUG nohiz workaround, experimental user-mode submission queue |
 | DXVK | `resources/extensions/default/dxvk.json` | DXVK (D3D8/9/10/11 → Vulkan) | FPS limit, HUD overlay, graphics pipeline library, frame latency, tearing/HDR |
 | VKD3D | `resources/extensions/default/vkd3d.json` | VKD3D-Proton (D3D12 → Vulkan) | FPS limit, a dozen `VKD3D_CONFIG` flags (descriptor heap, ray tracing, PSO retention, etc.) plus a raw-flags passthrough, present mode |
 | Proton | `resources/extensions/default/proton.json` | Proton compatibility layer | Sync backend (NTSync/FSYNC), renderer overrides (WineD3D, D3D8/10/11), display (Wayland, HDR, integer scaling), GPU (NVAPI, GPU-hiding), compatibility toggles, debug logging |
@@ -26,9 +26,18 @@ page is the "what does each shipped module do" reference.
 
 ## Notes per module
 
-- **AMD** — All options gate behind an `enabled` toggle (`Requires: "enabled"`) and build
-  the `RADV_PERFTEST` env var incrementally via a `Builder` list; a separate `clear`
-  toggle can reset it first before appending flags.
+- **AMD** — RADV Perftest options gate behind an `enabled` toggle (`Requires: "enabled"`)
+  and build the `RADV_PERFTEST` env var incrementally via a `Builder` list; a separate
+  `clear` toggle can reset it first before appending flags. The Vulkan present-mode
+  override (`MESA_VK_WSI_PRESENT_MODE`) is a `selection` field with an empty-string
+  "no override" choice as its default (falsy per `resolve_field`, so the var is left
+  untouched) and a single `set` builder step templated as `{present_mode}` — the same
+  single-step-templated-value shape DXVK's `tear_free`/`gpl` selections use, not a
+  per-choice builder-step-per-option shape (the `Requires` grammar only supports
+  variable truthiness, not equality against a specific choice, so there is no
+  "one step per choice" mechanic anywhere in this codebase to copy). RADV Debug is a
+  separate one-toggle section (`nohiz`) writing its own `RADV_DEBUG` env var —
+  deliberately not merged into `RADV_PERFTEST`, since it's a different variable.
 - **DXVK / VKD3D** — Both target Vulkan translation layers for different D3D versions and
   share a shape: an `ENV_VARS` block with `Builder` entries keyed off UI `Variable`s.
   VKD3D's `Config Flags` group is the largest single options surface in the bundle (11

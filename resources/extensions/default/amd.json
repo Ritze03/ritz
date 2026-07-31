@@ -43,6 +43,23 @@
         "Type": "toggle",
         "Variable": "anti_lag",
         "Default": false
+      },
+      {
+        "Name": "Vulkan Present Mode",
+        "Description": "Overrides the Vulkan swapchain present mode regardless of what the game requested (MESA_VK_WSI_PRESENT_MODE). fifo = capped vsync, relaxed = vsync that drops sync on a missed frame, mailbox = uncapped without tearing (triple-buffer-like), immediate = uncapped, may tear.",
+        "Type": "selection",
+        "DisplayOptions": ["No Override", "FIFO (Capped VSync)", "Relaxed (Adaptive VSync)", "Mailbox (Uncapped, No Tearing)", "Immediate (Uncapped, May Tear)"],
+        "Options": ["", "fifo", "relaxed", "mailbox", "immediate"],
+        "Variable": "present_mode"
+      }
+    ],
+    "RADV Debug": [
+      {
+        "Name": "Disable Hi-Z (nohiz)",
+        "Description": "Adds nohiz to RADV_DEBUG (disables Hi-Z depth-compression). Not a performance toggle — a known workaround for specific rendering glitches (flickering/blocky shadow artifacts) in some DXVK/VKD3D titles on RADV; only useful if you're seeing that exact symptom.",
+        "Type": "toggle",
+        "Variable": "nohiz",
+        "Default": false
       }
     ],
     "Experimental": [
@@ -75,6 +92,20 @@
       "Requires": "anti_lag",
       "Builder": [
         { "Requires": "anti_lag", "Type": "append", "Separator": ":", "Value": "VK_LAYER_MESA_anti_lag" }
+      ]
+    },
+    {
+      "Name": "MESA_VK_WSI_PRESENT_MODE",
+      "Requires": "present_mode",
+      "Builder": [
+        { "Requires": "present_mode", "Type": "set", "Value": "{present_mode}" }
+      ]
+    },
+    {
+      "Name": "RADV_DEBUG",
+      "Requires": "nohiz",
+      "Builder": [
+        { "Requires": "nohiz", "Type": "set", "Value": "nohiz" }
       ]
     }
   ]

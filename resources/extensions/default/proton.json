@@ -50,6 +50,20 @@
         "Type": "toggle",
         "Variable": "no_d3d10",
         "Default": false
+      },
+      {
+        "Name": "Local Shader Cache",
+        "Description": "Set PROTON_LOCAL_SHADER_CACHE=1 (use a per-game shader cache instead of Steam's shared cache; avoids eviction by other games' shaders at the cost of extra disk usage and a first-launch shader recompile).",
+        "Type": "toggle",
+        "Variable": "local_shader_cache",
+        "Default": false
+      },
+      {
+        "Name": "DXVK Low Latency (CachyOS-Proton)",
+        "Description": "Set PROTON_DXVK_LOWLATENCY=1 (enables DXVK's low-latency submission mode to reduce input latency). Only takes effect on Proton-CachyOS builds — no effect on vanilla Proton, Proton Experimental, or GE-Proton.",
+        "Type": "toggle",
+        "Variable": "dxvk_lowlatency",
+        "Default": false
       }
     ],
     "Display": [
@@ -118,6 +132,13 @@
         "Description": "Set PROTON_HEAP_DELAY_FREE=1 (delay freeing memory to work around use-after-free crashes).",
         "Type": "toggle",
         "Variable": "heap_delay_free",
+        "Default": false
+      },
+      {
+        "Name": "Force Large Address Aware",
+        "Description": "Set PROTON_FORCE_LARGE_ADDRESS_AWARE=1 (forces the LARGE_ADDRESS_AWARE PE flag on 32-bit games so they can address up to 4GB RAM instead of 2GB; helps with out-of-memory crashes in older 32-bit titles).",
+        "Type": "toggle",
+        "Variable": "force_large_address_aware",
         "Default": false
       }
     ],
@@ -292,6 +313,39 @@
       "Builder": [
         {
           "Requires": "heap_delay_free",
+          "Type": "set",
+          "Value": "1"
+        }
+      ]
+    },
+    {
+      "Name": "PROTON_FORCE_LARGE_ADDRESS_AWARE",
+      "Requires": "force_large_address_aware",
+      "Builder": [
+        {
+          "Requires": "force_large_address_aware",
+          "Type": "set",
+          "Value": "1"
+        }
+      ]
+    },
+    {
+      "Name": "PROTON_LOCAL_SHADER_CACHE",
+      "Requires": "local_shader_cache",
+      "Builder": [
+        {
+          "Requires": "local_shader_cache",
+          "Type": "set",
+          "Value": "1"
+        }
+      ]
+    },
+    {
+      "Name": "PROTON_DXVK_LOWLATENCY",
+      "Requires": "dxvk_lowlatency",
+      "Builder": [
+        {
+          "Requires": "dxvk_lowlatency",
           "Type": "set",
           "Value": "1"
         }
