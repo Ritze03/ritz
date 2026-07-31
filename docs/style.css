@@ -96,6 +96,42 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 @media (prefers-reduced-motion: reduce) {
   .hero > * { animation: none !important; }
   .cursor { animation: none !important; }
+  .hero .logo-wrap img { animation: none !important; }
+}
+
+/* ---------------- nodding logo ---------------- */
+/* Clones the app's splash-screen logo animation (crates/ritz-app/src/splash.rs,
+   paint_logo_anim): a continuous, looping nod/tilt, not a one-shot entrance.
+   Ping-pong period 3.8s (two 1.9s smoothstep-eased swings). Horizontal translate and
+   rotation follow the smoothstep ease `e`; vertical translate follows a separate
+   parabolic "dip" curve `s = 1 - (2e-1)^2` that peaks at each swing's midpoint — the
+   two curves are genuinely different shapes, so the 21 stops below are numerically
+   sampled from the real formulas (5% steps) rather than expressed as one CSS easing
+   function. Amplitudes scaled from the app's k = logo_px/300 (0.4 at the app's 120px)
+   to this site's 128px logo: k = 128/300 ≈ 0.4267. Rotation pivots 78% down the logo
+   (near its base), matching the app's pivot point, via transform-origin below. */
+@keyframes logo-nod {
+  0%   { transform: translate(-9.81px, -3.84px) rotate(-4.50deg); }
+  5%   { transform: translate(-9.26px, -2.40px) rotate(-4.25deg); }
+  10%  { transform: translate(-7.77px, 1.09px)  rotate(-3.56deg); }
+  15%  { transform: translate(-5.57px, 5.12px)  rotate(-2.56deg); }
+  20%  { transform: translate(-2.90px, 8.23px)  rotate(-1.33deg); }
+  25%  { transform: translate(0.00px, 9.39px)   rotate(0.00deg); }
+  30%  { transform: translate(2.90px, 8.23px)   rotate(1.33deg); }
+  35%  { transform: translate(5.57px, 5.12px)   rotate(2.56deg); }
+  40%  { transform: translate(7.77px, 1.09px)   rotate(3.56deg); }
+  45%  { transform: translate(9.26px, -2.40px)  rotate(4.25deg); }
+  50%  { transform: translate(9.81px, -3.84px)  rotate(4.50deg); }
+  55%  { transform: translate(9.26px, -2.40px)  rotate(4.25deg); }
+  60%  { transform: translate(7.77px, 1.09px)   rotate(3.56deg); }
+  65%  { transform: translate(5.57px, 5.12px)   rotate(2.56deg); }
+  70%  { transform: translate(2.90px, 8.23px)   rotate(1.33deg); }
+  75%  { transform: translate(0.00px, 9.39px)   rotate(0.00deg); }
+  80%  { transform: translate(-2.90px, 8.23px)  rotate(-1.33deg); }
+  85%  { transform: translate(-5.57px, 5.12px)  rotate(-2.56deg); }
+  90%  { transform: translate(-7.77px, 1.09px)  rotate(-3.56deg); }
+  95%  { transform: translate(-9.26px, -2.40px) rotate(-4.25deg); }
+  100% { transform: translate(-9.81px, -3.84px) rotate(-4.50deg); }
 }
 
 /* ---------------- terminal-tab top nav ---------------- */
@@ -146,6 +182,8 @@ footer a { color: var(--ink-dim); }
 .hero .logo-wrap img {
   width: 100%; height: 100%; display: block;
   filter: drop-shadow(0 0 44px rgba(91,139,240,0.32)) drop-shadow(0 12px 28px rgba(0,0,0,.6));
+  transform-origin: 50% 78%;
+  animation: logo-nod 3.8s linear .7s infinite;
 }
 .hero .kicker {
   display: inline-flex; align-items: center; gap: 0;
