@@ -62,14 +62,45 @@
 
 <section id="splash">
   <h2>the launch splash</h2>
-  <figure class="shot splash">
-    <div class="frame"><img src="assets/splashscreen.png" alt="ritz launch splash: game name, profile, countdown, and Q/W/E buttons"></div>
+  <p>ritz shows one of three different always-on-top windows, depending on whether it
+  already knows the game and whether it can resolve an AppID at all: a one-time
+  <strong>naming wizard</strong> the first time it sees a known AppID, the
+  <strong>countdown splash</strong> on every launch after that, or — if no AppID can be
+  resolved — a setup screen that writes nothing and always cancels the launch, prompting
+  you to fix the shortcut's Steam launch options. They're separate screens shown on
+  separate launches, not steps of one session.</p>
+
+  <h3>first launch: the new-game wizard</h3>
+  <p>The first time ritz sees a game it has no config for, it runs this 3-step wizard
+  instead of the countdown splash — and it's the whole wizard, there's no 4th step:</p>
+  <div class="shot-gallery">
+    <figure class="shot">
+      <div class="frame"><img src="assets/screenshots/splash-new-game-detected.png" alt="New Game detected screen: AppID shown, a text field pre-filled with a guessed name, Cancel/Confirm buttons"></div>
+      <figcaption>1 · name it</figcaption>
+    </figure>
+    <figure class="shot">
+      <div class="frame"><img src="assets/screenshots/splash-new-game-profile-selection.png" alt="Choose a profile screen: pinned profiles as numbered cards (1-7), plus a Use Default button"></div>
+      <figcaption>2 · choose a profile</figcaption>
+    </figure>
+    <figure class="shot">
+      <div class="frame"><img src="assets/screenshots/splash-new-game-ready-to-launch.png" alt="Ready to Launch screen: the new game's name and chosen profile, with Cancel/Launch/Edit buttons and no countdown"></div>
+      <figcaption>3 · confirm</figcaption>
+    </figure>
+  </div>
+  <ol class="steps">
+    <li><strong>Name</strong> — confirm/edit the game's display name (pre-filled from Steam where possible).</li>
+    <li><strong>Profile</strong> — pick a pinned profile with one key, or use the default.</li>
+    <li><strong>Confirm</strong> — a static "Ready to Launch!" screen, deliberately with
+      <em>no</em> countdown (auto-launching on a timer here would risk saving a wrong
+      guessed name) — review and launch, or jump into the editor first.</li>
+  </ol>
+
+  <h3>every launch after that: the countdown splash</h3>
+  <p>Once a game is known, ritz shows this instead — a small splash with the game name,
+  its assigned profile, and a countdown that launches automatically when it hits zero:</p>
+  <figure class="shot">
+    <div class="frame"><img src="assets/screenshots/splash-launching-game.png" alt="The normal countdown splash: game name, profile, and a 1.7s countdown to launch"></div>
   </figure>
-  <p>When you launch a configured game, a small splash appears and counts down. (Ritz
-  actually dispatches to one of three screens here — this countdown splash for a known
-  game, the new-game wizard below for a game it's never seen, or, if it can't resolve
-  any AppID at all, a setup screen that writes nothing and always cancels the launch,
-  prompting you to fix the shortcut's Steam launch options.)</p>
   <div class="table-wrap">
   <table>
     <tr><th>Key</th><th>Action</th></tr>
@@ -82,21 +113,12 @@
   <p>The splash shows the game name, its assigned profile, and the countdown. It's
   keyboard-first, so it works inside gamescope/Big-Picture flows, but every button is
   also clickable with a mouse.</p>
-
-  <h3>first launch: the new-game wizard</h3>
-  <p>The first time ritz sees a game it has no config for, it runs a short wizard instead
-  of the splash:</p>
-  <ol class="steps">
-    <li><strong>Name</strong> — confirm/edit the game's display name (pre-filled from Steam where possible).</li>
-    <li><strong>Profile</strong> — pick a pinned profile with one key, or use the default.</li>
-    <li><strong>Confirm</strong> — review and launch (or jump into the editor first).</li>
-  </ol>
 </section>
 
 <section id="gui">
   <h2>the settings window</h2>
   <figure class="shot">
-    <div class="frame"><img src="assets/gui.png" alt="ritz settings GUI showing the navigator, module tree, AMD options, and launch-command preview"></div>
+    <div class="frame"><img src="assets/screenshots/example-game-config.png" alt="ritz settings GUI showing the navigator, module tree, the Misc module's options with scope colors, and the launch-command preview"></div>
   </figure>
   <p>Run <code>ritz</code> (or press <kbd>E</kbd> on the splash). The window has three columns:</p>
   <ul>

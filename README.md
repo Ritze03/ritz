@@ -14,7 +14,7 @@ and driven by simple JSON modules you can edit or extend.
 
 📖 **[Full documentation & guides »](https://ritze03.github.io/ritz/)**
 
-<img src="docs/assets/gui.png" width="820" alt="Ritz settings GUI — module editor with live launch-command preview">
+<img src="docs/assets/screenshots/example-game-config.png" width="820" alt="ritz settings GUI showing the navigator, module tree, the Misc module's options with scope colors, and the launch-command preview">
 
 </div>
 
@@ -45,7 +45,7 @@ Launch the game. The first time Ritz sees it, a short wizard asks for a **name**
 optional **profile**, then the game starts. From then on you get a splash screen on every
 launch:
 
-<div align="center"><img src="docs/assets/splashscreen.png" width="380" alt="Ritz launch splash with countdown and Q/W/E keys"></div>
+<div align="center"><img src="docs/assets/screenshots/splash-launching-game.png" width="380" alt="Ritz launch splash with countdown and Q/W/E keys"></div>
 
 | Key | Action |
 |-----|--------|
@@ -89,9 +89,11 @@ Functionality ships as JSON **modules** (extensions). The bundled set:
 | **DXVK** | D3D→Vulkan: FPS limit, HUD, GPL/async pipelines, frame latency, tear-free, HDR. |
 | **VKD3D** | D3D12→Vulkan: FPS limit, `VKD3D_CONFIG` flags (descriptor heap, DXR, …), present mode. |
 | **Misc** | Common env/compat: clear `LD_PRELOAD`/`VK_INSTANCE_LAYERS`, force X11 SDL, keyboard layout, GameMode (`gamemoderun`). |
+| **PulseAudio** | Audio tuning for PulseAudio/PipeWire-pulse: client latency (`PULSE_LATENCY_MSEC`), native PipeWire quantum/rate latency (`PIPEWIRE_LATENCY`), output sink routing, SDL audio driver override, `media.role=game` tagging. |
 | **Game Launch Args** | Free-form arguments appended after the game command. |
-| **Custom Env** | Free-form environment variables (chain-wide and game-only). |
-| **Scripts** | Run your own commands at lifecycle points (pre-launch, post-launch, post-exit). Multiple commands per stage; pre/post-exit run in order, post-launch runs them in parallel. |
+| **Custom Env** | Free-form chain-wide environment variables (`ENV_VARS`). |
+| **Custom Game Env** | Free-form environment variables applied only to the game process (`GAME_ENV_VARS`). |
+| **Scripts** | Run your own commands at lifecycle points — pre-launch (blocks before the game starts, commands run in order), post-spawn (backgrounded, commands run in parallel), on-game-ready (fires once the real game process is detected), and post-exit (blocks after the game exits, commands run in order). The bundled module's UI wires pre-launch, post-spawn, and post-exit; on-game-ready is available to custom modules via the same `Hooks` block. |
 | **LSFG-VK** | Lossless Scaling frame generation backend (writes `conf.toml`, activation delay). |
 | **Hypr-Monctl** | Per-game display vibrance via a Hyprland plugin (only loads on Hyprland). |
 
