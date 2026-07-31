@@ -3333,11 +3333,28 @@ impl GuiApp {
                         .show(ui, |ui| {
                             ui.add_space(4.0);
                             self.render_ext_errors_banner(ui);
-                            // The MODULES tree is inert (and greyed) while the
-                            // module editor is open, so a stray click can't swap
-                            // the module out from under an in-progress edit. Exit
-                            // is via Close / Save (or Ctrl+S) only.
-                            let tree_live = self.drafts.is_empty();
+                            // The MODULES tree locks only while a genuinely
+                            // *dirty* draft is open somewhere (issue #41 — was
+                            // `self.drafts.is_empty()`, which locks on ANY open
+                            // draft, clean or not). `drafts` is insert-if-absent
+                            // and never clears a clean entry on its own (S4a), so
+                            // gating on "any draft exists" meant merely
+                            // *focusing* a module in IDE mode — which inserts a
+                            // clean draft via `sync_focused_draft` every frame —
+                            // permanently locked this tree with no route back
+                            // short of re-entering IDE mode and closing every
+                            // stray draft by hand, since `GamesProfiles`/
+                            // `GeneralSettings` only ever drop the *focused*
+                            // draft (`close_focused_draft`), by design (see
+                            // `nav_category_drops_draft`). `unsaved_drafts` is
+                            // the already-established "real risk of losing work"
+                            // predicate — the sibling nav-category tree lock
+                            // (`nav_live` a little further down, guarding
+                            // `render_nav_tree`) uses exactly this set for the
+                            // same reason. A stray click still can't discard
+                            // unsaved edits; it just no longer locks forever
+                            // over a draft that has nothing to lose.
+                            let tree_live = self.unsaved_drafts.is_empty();
                             ui.add_enabled_ui(tree_live, |ui| {
                                 // `render_ext_tree` now takes its data source as
                                 // parameters (S3a) so S3b can reuse it against
@@ -3361,8 +3378,10 @@ impl GuiApp {
                                     // No dirty markers in Config mode: this tree
                                     // renders `cur_specs`, which has no
                                     // manifest-path alignment to key the set on,
-                                    // and the column locks whenever a draft
-                                    // exists anyway. Config mode is unchanged.
+                                    // and the column only locks while a
+                                    // genuinely unsaved draft is open somewhere
+                                    // (`tree_live` above). Config mode is
+                                    // unchanged.
                                     &[],
                                 );
                                 self.selected_ext = tree_selected;
@@ -12449,6 +12468,80 @@ mod tests {
             NavCategory::GamesProfiles,
             app.focused_draft_unsaved()
         ));
+    }
+
+    /// **Issue #41.** Focusing several modules in one IDE session, then leaving
+    /// for Profiles, must not permanently lock the Config-mode MODULES tree
+    /// (`tree_live` at the `ext_list` panel). `select_nav_category` only ever
+    /// drops the *focused* draft (`close_focused_draft`); every other draft
+    /// opened earlier in the session survives in `self.drafts` by design (S4a,
+    /// "insert-if-absent, never clear"). The tree's lock predicate must key off
+    /// `unsaved_drafts`, not `drafts`, or it can never re-enable once more than
+    /// one module was ever focused.
+    ///
+    /// Verified to fail before the fix: `self.drafts.is_empty()` stayed `false`
+    /// (2 clean drafts survive `GamesProfiles`), so `tree_live` would have been
+    /// `false` — locked — with no route back short of re-entering IDE mode.
+    #[test]
+    fn leaving_ide_for_profiles_reenables_the_config_tree_after_multiple_focuses() {
+        let mut app = test_app();
+        app.mode = Mode::Ide;
+        let alpha = insert_draft(&mut app, "Ritze", "Alpha", "/x/alpha.json");
+        let beta = insert_draft(&mut app, "Ritze", "Beta", "/x/beta.json");
+        // Simulate focusing both modules in turn during the session (neither
+        // edited — both drafts stay clean).
+        app.focused_module = Some(alpha);
+        app.refresh_unsaved_drafts();
+        app.focused_module = Some(beta.clone());
+        app.refresh_unsaved_drafts();
+        assert_eq!(app.drafts.len(), 2, "premise: both drafts accumulated");
+        assert!(app.unsaved_drafts.is_empty(), "premise: neither is dirty");
+
+        app.select_nav_category(NavCategory::GamesProfiles);
+
+        // The old, buggy predicate (`drafts.is_empty()`) would still read
+        // `false` here — one clean draft (Alpha) is left behind on purpose.
+        assert!(
+            !app.drafts.is_empty(),
+            "sanity: the surviving background draft is intentional (S4a)"
+        );
+        // The fixed predicate must read `true`: nothing is genuinely at risk,
+        // so the MODULES tree must not stay locked.
+        assert!(
+            app.unsaved_drafts.is_empty(),
+            "the Config-mode tree must re-enable: no draft is actually dirty"
+        );
+    }
+
+    /// The converse of the above: a genuinely dirty *background* draft (not the
+    /// one that was focused when leaving IDE mode) must keep the Config-mode
+    /// tree locked rather than being silently discarded or silently ignored.
+    /// It stays resolvable — the user can re-enter IDE mode and Save/Discard it
+    /// — but the tree must not pretend nothing is at risk.
+    #[test]
+    fn a_dirty_background_draft_keeps_the_config_tree_locked_after_leaving_ide() {
+        let mut app = test_app();
+        app.mode = Mode::Ide;
+        insert_draft(&mut app, "Ritze", "Alpha", "/x/alpha.json");
+        let beta = insert_draft(&mut app, "Ritze", "Beta", "/x/beta.json");
+        // Dirty Alpha, but focus (and later leave from) Beta, which stays clean.
+        app.drafts.get_mut(&PathBuf::from("/x/alpha.json")).unwrap().ext.meta.version =
+            "9.9".to_string();
+        app.focused_module = Some(beta);
+        app.refresh_unsaved_drafts();
+        assert!(app.unsaved_drafts.contains(&PathBuf::from("/x/alpha.json")));
+
+        // Leaving via `GamesProfiles` drops only the focused (clean) draft.
+        app.select_nav_category(NavCategory::GamesProfiles);
+
+        assert!(
+            app.drafts.contains_key(&PathBuf::from("/x/alpha.json")),
+            "the dirty background draft must survive, not be silently discarded"
+        );
+        assert!(
+            !app.unsaved_drafts.is_empty(),
+            "the Config-mode tree must stay locked while real unsaved work exists"
+        );
     }
 
     /// The dialog's list and the destruction are one answer, per destination.
