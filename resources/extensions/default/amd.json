@@ -77,7 +77,6 @@
         "Description": "Overrides MESA_SHADER_CACHE_MAX_SIZE (max on-disk shader cache size). Mesa's own default is 1GB when left at 0. Set 1-32 to cap the cache at that many gigabytes.",
         "Type": "integer",
         "Variable": "shader_cache_max_size",
-        "Default": 0,
         "Options": { "min": 0, "max": 32, "step": 1 }
       }
     ]

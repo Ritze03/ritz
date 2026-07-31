@@ -101,6 +101,21 @@ cheaper than a builder entry per combination. Gating is checked at three nesting
 the whole `EnvVarSpec`, each individual `EnvBuilderEntry`, and each `WrapperSpec` /
 `ArgSpec`.
 
+**Self-gated optional numeric/string fields must omit `Default`.** A common pattern is a
+UI field whose own `Variable` name is also the `Requires` gate on its env var/wrapper/arg
+block (e.g. `latency_msec` gating `PULSE_LATENCY_MSEC`, `fps_limit` gating
+`VKD3D_FRAME_RATE`) — "off until the user sets a value". For `Integer`/`Float` fields this
+only works with **no `Default` key at all**: per
+`crates/ritz-core/src/resolve.rs:resolve_one`, a field is `enabled` whenever its resolved
+raw value is `Some(non-null)`, and a numeric `Default` (even `0`) makes that `Some` from
+the start, so the self-gate is always satisfied and the block emits unconditionally. This
+bit `MESA_SHADER_CACHE_MAX_SIZE` in `amd.json` (`Default: 0` on `shader_cache_max_size`,
+fixed 2026-07-31) — see `resources/extensions/default/pulse.json`'s `latency_msec` or
+`vkd3d.json`'s `fps_limit` for the correct no-`Default` shape. (`String`/`Selection`
+fields are safe with `Default: ""` since `resolve_field` additionally requires a
+non-empty value to be truthy; `Toggle` fields are unaffected since their truthiness is
+the bool value itself, not mere presence.)
+
 **Env assembly with Set / Append / Unset.** For each env var name, builder entries fold
 into one accumulator (`crates/ritz-core/src/builder.rs:build_env_block`) using
 `crates/ritz-core/src/schema.rs:EnvOp`:
