@@ -26,9 +26,9 @@ pub type AuthorsMap = IndexMap<String, ExtMap>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum InheritanceDisplayMode {
     /// One arrow per level, hue/value shifted darker the deeper the ancestor.
-    #[default]
     Color,
     /// Numeric labels (1, 2, …) per depth; single arrow when only one level contributes.
+    #[default]
     Numbers,
     /// Plain green arrows only — stacked in the nav tree, single in the module tree.
     ArrowsOnly,
@@ -42,14 +42,18 @@ fn default_true() -> bool {
     true
 }
 
+fn default_mono_ui() -> bool {
+    false
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeneralConfig {
     #[serde(rename = "SplashTimeoutSecs", default = "default_splash")]
     pub splash_timeout_secs: u64,
     #[serde(rename = "DefaultPreset", default)]
     pub default_preset: Option<String>,
-    /// Render the whole UI in the monospace font (default) vs proportional sans.
-    #[serde(rename = "MonoUi", default = "default_true")]
+    /// Render the whole UI in the monospace font vs proportional sans (default).
+    #[serde(rename = "MonoUi", default = "default_mono_ui")]
     pub mono_ui: bool,
     /// Touch mode: allow dragging content to scroll (off by default).
     #[serde(rename = "TouchMode", default)]
@@ -76,13 +80,13 @@ impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
             splash_timeout_secs: default_splash(),
-            default_preset: None,
-            mono_ui: true,
+            default_preset: Some("Default".to_string()),
+            mono_ui: false,
             touch_mode: false,
             full_width: false,
             editor_close_launches: true,
-            dynamic_preview: false,
-            inheritance_display: InheritanceDisplayMode::Color,
+            dynamic_preview: true,
+            inheritance_display: InheritanceDisplayMode::Numbers,
             show_field_inheritance: true,
         }
     }
