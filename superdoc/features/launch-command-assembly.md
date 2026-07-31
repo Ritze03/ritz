@@ -124,7 +124,8 @@ handlers (`lsfg-vk`, `hypr-monctl`) this is *not* one of, and
 - Normal launch: `crates/ritz-app/src/main.rs:cmd_launch` parses `%command%`, shows the
   splash (optionally the editor), resolves the extension set, and hands off to
   `crates/ritz-app/src/supervisor.rs` to run the assembled `ExecPlan`.
-- **Dry run**: `ritz --print %command%` routes to
+- **Dry run**: `ritz --print %command%` (outside real Steam, which sets `$SteamAppId`
+  for you, use `RITZ_APPID=<id> ritz --print %command%` instead) routes to
   `crates/ritz-app/src/main.rs:cmd_print`, which parses the command, loads context,
   resolves the game, builds the `LaunchCommand`, and prints diagnostics (`AppId`,
   `Game`, extension count, active `Preset`) to stderr followed by the fully assembled

@@ -63,7 +63,7 @@
     <div class="card"><h3>01 · one launch option</h3><p>Set <code>ritz %command%</code> once in Steam's launch options. Everything else is configured in the GUI.</p></div>
     <div class="card"><h3>02 · layered scopes</h3><p>Settings cascade <span class="chip global">global</span> → <span class="chip profile">profile</span> → <span class="chip game">game</span>, each overriding the last.</p></div>
     <div class="card"><h3>03 · JSON modules</h3><p>Every feature — Gamescope, AMD, Proton, DXVK, VKD3D, and more — is a small JSON manifest. Edit the bundled ones or drop in your own.</p></div>
-    <div class="card"><h3>04 · live preview</h3><p>The GUI shows the exact assembled launch command as you toggle options, or dry-run it with <code>ritz --print</code>.</p></div>
+    <div class="card"><h3>04 · live preview</h3><p>The GUI shows the exact assembled launch command as you toggle options, or dry-run it with <code>ritz --print</code> (outside real Steam, pair it with <code>RITZ_APPID=&lt;ID&gt;</code>).</p></div>
   </div>
 </section>
 
@@ -95,7 +95,9 @@ cd ritz</code></pre>
 
   <div class="note"><strong>Settings window:</strong> run <code>ritz</code> with no
   arguments any time to open the full GUI. <strong>Dry run:</strong>
-  <code>ritz --print %command%</code> prints the assembled command without launching.</div>
+  <code>ritz --print %command%</code> prints the assembled command without launching.
+  Real Steam sets <code>$SteamAppId</code> for you; testing by hand outside Steam
+  needs <code>RITZ_APPID=&lt;ID&gt; ritz --print %command%</code> instead.</div>
 
   <h3>non-Steam games</h3>
   <p>For non-Steam shortcuts (or anything ritz can't identify from Steam), give it a

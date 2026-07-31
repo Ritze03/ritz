@@ -73,7 +73,9 @@ Run **`ritz`** with no arguments anytime to open the settings GUI.
   Couch*). Assign one to a game, or set a default profile for all games. Pin up to 10
   profiles for one-key selection in the new-game wizard.
 - **Dry run.** `ritz --print %command%` prints the fully assembled command without
-  launching — handy for checking what a config actually does.
+  launching — handy for checking what a config actually does. Real Steam sets
+  `$SteamAppId` for you; running it by hand outside Steam needs an explicit id:
+  `RITZ_APPID=<ID> ritz --print %command%`.
 
 ## Modules
 
