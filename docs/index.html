@@ -81,8 +81,8 @@ cd ritz</code></pre>
     <li><strong>Build it</strong> (Linux only) — takes a few minutes the first time
       <pre><code>cargo build --release</code></pre>
     </li>
-    <li><strong>Install the binary system-wide</strong>
-      <pre><code>sudo install -Dm755 target/release/ritz /usr/bin/ritz</code></pre>
+    <li><strong>Symlink it system-wide</strong> — updates automatically after every rebuild
+      <pre><code>sudo ln -sf "$(pwd)/target/release/ritz" /usr/bin/ritz</code></pre>
     </li>
     <li><strong>Set the Steam launch option</strong> — right-click the game →
       <em>Properties</em> → <em>Launch Options</em>
@@ -98,6 +98,12 @@ cd ritz</code></pre>
   <code>ritz --print %command%</code> prints the assembled command without launching.
   Real Steam sets <code>$SteamAppId</code> for you; testing by hand outside Steam
   needs <code>RITZ_APPID=&lt;ID&gt; ritz --print %command%</code> instead.</div>
+
+  <div class="note"><strong>Updating:</strong> <code>cd ritz &amp;&amp; git pull &amp;&amp;
+  cargo build --release</code> — nothing else needed, the symlink always points at the
+  freshly built binary. Caveat: if you move or delete the cloned repo,
+  <code>/usr/bin/ritz</code> is left dangling — re-run the symlink command from the new
+  location.</div>
 
   <h3>non-Steam games</h3>
   <p>For non-Steam shortcuts (or anything ritz can't identify from Steam), give it a
