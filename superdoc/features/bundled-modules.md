@@ -12,7 +12,7 @@ page is the "what does each shipped module do" reference.
 | --- | --- | --- | --- |
 | AMD | `resources/extensions/default/amd.json` | AMD RADV Vulkan driver | RADV_PERFTEST flags (NGGC, SAM), Mesa Anti-Lag layer, Vulkan present-mode override, RADV_DEBUG nohiz workaround, experimental user-mode submission queue, Mesa shader cache max size |
 | DXVK | `resources/extensions/default/dxvk.json` | DXVK (D3D8/9/10/11 → Vulkan) | FPS limit, HUD overlay, graphics pipeline library, frame latency, latency sleep, present interval (vsync), tearing/HDR |
-| VKD3D | `resources/extensions/default/vkd3d.json` | VKD3D-Proton (D3D12 → Vulkan) | FPS limit, 13 `VKD3D_CONFIG` flags (descriptor heap, ray tracing, PSO retention, force host-cached, small VRAM ReBAR, etc.) plus a raw-flags passthrough, present mode |
+| VKD3D | `resources/extensions/default/vkd3d.json` | VKD3D-Proton (D3D12 → Vulkan) | FPS limit, 12 `VKD3D_CONFIG` flags (descriptor heap, ray tracing, PSO retention, force host-cached, etc.) plus a raw-flags passthrough, present mode |
 | Proton | `resources/extensions/default/proton.json` | Proton compatibility layer | Sync backend (NTSync/FSYNC), renderer overrides (WineD3D, D3D8/10/11), display (Wayland, HDR, integer scaling), GPU (NVAPI, GPU-hiding), compatibility toggles, debug logging |
 | Gamescope | `resources/extensions/default/gamescope.json` | Gamescope compositor | Enable/backend/scaler, output & internal resolution, refresh rate, sync & input flags, realtime scheduling (`--rt`), upscaling filter (`--filter`: linear/nearest/fsr/nis/pixel) with sharpness — emits a command wrapper |
 | Misc | `resources/extensions/default/misc.json` | Steam runtime / GameMode / desktop env | Clear LD_PRELOAD/VK_INSTANCE_LAYERS, force X11 SDL backend, keyboard layout, GameMode wrapper |
@@ -45,13 +45,12 @@ page is the "what does each shipped module do" reference.
   gigabyte number with a `G` suffix, not a plain integer.
 - **DXVK / VKD3D** — Both target Vulkan translation layers for different D3D versions and
   share a shape: an `ENV_VARS` block with `Builder` entries keyed off UI `Variable`s.
-  VKD3D's `Config Flags` group is the largest single options surface in the bundle (13
-  toggles — including `force_host_cached` and `small_vram_rebar`, promoted from the raw
-  passthrough on 2026-07-31 — plus a raw string passthrough that appends extra
-  `VKD3D_CONFIG` flags verbatim). Note: `small_vram_rebar` could not be confirmed as a
-  documented upstream `VKD3D_CONFIG` flag (not present in the vkd3d-proton README or
-  CHANGELOG as of this writing) — added per explicit request, description flags this
-  caveat for users.
+  VKD3D's `Config Flags` group is the largest single options surface in the bundle (12
+  toggles — including `force_host_cached`, promoted from the raw passthrough on
+  2026-07-31 — plus a raw string passthrough that appends extra `VKD3D_CONFIG` flags
+  verbatim). `small_vram_rebar` was added on 2026-07-31 as an unconfirmed flag and
+  removed on 2026-08-01 — never verified against upstream vkd3d-proton, use the raw-flags
+  passthrough if a similar flag is confirmed later.
 - **Proton** — Purely a flat set of `PROTON_*` / `WINE_*` toggles, one env var each, no
   `Builder` composition needed since none of them combine into a single variable.
 - **Gamescope** — The only module besides Misc/Scripts that emits a `WRAPPERS` entry
