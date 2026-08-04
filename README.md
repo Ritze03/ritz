@@ -103,6 +103,8 @@ Functionality ships as JSON **modules** (extensions). The bundled set:
 | **DXVK** | D3D→Vulkan: FPS limit, HUD, GPL/async pipelines, frame latency, tear-free, HDR. |
 | **VKD3D** | D3D12→Vulkan: FPS limit, `VKD3D_CONFIG` flags (descriptor heap, DXR, …), present mode. |
 | **Misc** | Common env/compat: clear `LD_PRELOAD`/`VK_INSTANCE_LAYERS`, force X11 SDL, keyboard layout, GameMode (`gamemoderun`). |
+| **Taskset** | Pin the game to specific CPU cores — a `taskset -c` list like `0-7` or `0,2,4,6-11`. |
+| **MangoHud** | Single toggle that runs the game through the `mangohud` wrapper. Overlay contents are configured in GOverlay / `MangoHud.conf`, not in Ritz. |
 | **PulseAudio** | Audio tuning for PulseAudio/PipeWire-pulse: client latency (`PULSE_LATENCY_MSEC`), native PipeWire quantum/rate latency (`PIPEWIRE_LATENCY`), output sink routing, SDL audio driver override, `media.role=game` tagging. |
 | **Game Launch Args** | Free-form arguments appended after the game command. |
 | **Custom Env** | Free-form chain-wide environment variables (`ENV_VARS`). |

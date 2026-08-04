@@ -14,8 +14,10 @@ page is the "what does each shipped module do" reference.
 | DXVK | `resources/extensions/default/dxvk.json` | DXVK (D3D8/9/10/11 → Vulkan) | FPS limit, HUD overlay, graphics pipeline library, frame latency, latency sleep, present interval (vsync), tearing/HDR |
 | VKD3D | `resources/extensions/default/vkd3d.json` | VKD3D-Proton (D3D12 → Vulkan) | FPS limit, 12 `VKD3D_CONFIG` flags (descriptor heap, ray tracing, PSO retention, force host-cached, etc.) plus a raw-flags passthrough, present mode |
 | Proton | `resources/extensions/default/proton.json` | Proton compatibility layer | Sync backend (NTSync/FSYNC), renderer overrides (WineD3D, D3D8/10/11), display (Wayland, HDR, integer scaling), GPU (NVAPI, GPU-hiding), compatibility toggles, debug logging |
-| Gamescope | `resources/extensions/default/gamescope.json` | Gamescope compositor | Enable/backend/scaler, output & internal resolution, refresh rate, sync & input flags, realtime scheduling (`--rt`), upscaling filter (`--filter`: linear/nearest/fsr/nis/pixel) with sharpness — emits a command wrapper |
+| Gamescope | `resources/extensions/default/gamescope.json` | Gamescope compositor | Enable/backend/scaler, output & internal resolution, refresh rate, sync & input flags, realtime scheduling (`--rt`), upscaling filter (`--filter`: linear/nearest/fsr/nis/pixel) with sharpness, MangoApp overlay (`--mangoapp`) — emits a command wrapper |
 | Misc | `resources/extensions/default/misc.json` | Steam runtime / GameMode / desktop env | Clear LD_PRELOAD/VK_INSTANCE_LAYERS, force X11 SDL backend, keyboard layout, GameMode wrapper |
+| MangoHud | `resources/extensions/default/mangohud.json` | MangoHud performance overlay | Single enable toggle — emits the `mangohud` command wrapper |
+| Taskset | `resources/extensions/default/taskset.json` | CPU affinity | Single CPU-list string — emits a `taskset -c <list>` wrapper |
 | PulseAudio | `resources/extensions/default/pulse.json` | PulseAudio / PipeWire-pulse | Client latency (`PULSE_LATENCY_MSEC`), native PipeWire quantum/rate latency (`PIPEWIRE_LATENCY`), output sink routing, SDL audio backend override (`SDL_AUDIODRIVER`), `media.role=game` tagging |
 | Scripts | `resources/extensions/default/scripts/scripts.json` | User shell commands | Pre-launch (blocking), post-spawn (background), post-exit (blocking) command hooks |
 | Game Launch Args | `resources/extensions/built-in/custom-args/custom-args.json` | The game's own argv | Uncapped list of free-text launch arguments, appended verbatim after the game command |
@@ -53,11 +55,25 @@ page is the "what does each shipped module do" reference.
   passthrough if a similar flag is confirmed later.
 - **Proton** — Purely a flat set of `PROTON_*` / `WINE_*` toggles, one env var each, no
   `Builder` composition needed since none of them combine into a single variable.
-- **Gamescope** — The only module besides Misc/Scripts that emits a `WRAPPERS` entry
-  instead of (or in addition to) `ENV_VARS`; its `CommandSyntax` (`gamescope {OPTIONS} --`)
-  wraps the game command, with `Priority: 100` controlling wrapper ordering.
+- **Gamescope** — One of the modules that emits a `WRAPPERS` entry instead of (or in
+  addition to) `ENV_VARS`; its `CommandSyntax` (`gamescope {OPTIONS} --`) wraps the game
+  command, with `Priority: 100` controlling wrapper ordering.
 - **Misc** — A grab-bag of Steam-runtime env clears, SDL/XKB overrides, and a `gamemoderun`
   wrapper (`Priority: 200`) for feral GameMode.
+- **MangoHud** — A single `enabled` toggle emitting a bare `mangohud` wrapper
+  (`Priority: 300`, so it sits right of gamescope/gamemoderun and closest to the game).
+  *Why only a toggle:* MangoHud's own configuration surface (layout, metrics, colors) is
+  already covered by GOverlay and `MangoHud.conf`; mirroring dozens of `MANGOHUD_CONFIG`
+  keys into Ritz UI fields would duplicate a better tool with no gain. *Why a wrapper and
+  not `MANGOHUD=1`:* the wrapper script covers OpenGL (via `LD_PRELOAD`) as well as
+  Vulkan, whereas the env var only enables the Vulkan layer.
+- **Taskset** — A single `string` field whose emptiness *is* the on/off switch
+  (`Requires: "cores"` — an empty string is falsy per `resolve_field`), so there's no
+  separate enable toggle. The CPU list is interpolated straight into `CommandSyntax`
+  (`taskset -c {cores}`) rather than through a `Builder`; `build_wrappers` interpolates
+  the rendered syntax too, so a `Builder` would buy nothing here. `Priority: 400` puts it
+  rightmost — innermost, closest to the game — but affinity is inherited by children, so
+  anything it wraps is pinned too.
 - **Scripts** — Configures three lifecycle `Hooks` (`PreLaunch`, `PostSpawn`, `PostExit`)
   wired to `resources/extensions/default/scripts/pre.sh`, `post.sh`, `exit.sh`, with
   `PostSpawn` marked `Background: true` so it doesn't block game start. Each hook's UI

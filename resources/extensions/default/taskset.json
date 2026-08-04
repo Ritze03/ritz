@@ -1,0 +1,25 @@
+{
+  "Extension": {
+    "Name": "Taskset",
+    "Author": "Ritze",
+    "Version": "1.0",
+    "Description": "Pin the game to specific CPU cores via `taskset`."
+  },
+  "UI": {
+    "General": [
+      {
+        "Name": "CPU List",
+        "Description": "taskset -c — comma-separated core indexes and ranges, e.g. `0-7` or `0,2,4,6-11`. Affinity is inherited by every child process. Empty = no pinning.",
+        "Type": "string",
+        "Variable": "cores"
+      }
+    ]
+  },
+  "WRAPPERS": [
+    {
+      "CommandSyntax": "taskset -c {cores}",
+      "Requires": "cores",
+      "Priority": 400
+    }
+  ]
+}
