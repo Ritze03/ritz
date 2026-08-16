@@ -2,7 +2,7 @@
   "Extension": {
     "Name": "Gamescope",
     "Author": "Ritze",
-    "Version": "1.0",
+    "Version": "1.1",
     "Description": "Run the game inside Gamescope."
   },
   "UI": {
@@ -95,6 +95,22 @@
         "Options": { "min": 0, "max": 540, "step": 1 },
         "Variable": "refresh",
         "Requires": "enabled"
+      },
+      {
+        "Name": "Framerate Limit",
+        "Description": "--framerate-limit — simple limiter used as a divisor of the refresh rate (rounds down: 60/25 -> 30fps). 0 disables.",
+        "Type": "integer",
+        "Options": { "min": 0, "max": 20, "step": 1 },
+        "Variable": "framerate_limit",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Max Scale Factor (-m)",
+        "Description": "--max-scale — maximum scale factor applied when upscaling the game to the output.",
+        "Type": "float",
+        "Options": { "min": 1.0, "max": 16.0, "step": 0.1 },
+        "Variable": "max_scale",
+        "Requires": "enabled"
       }
     ],
     "Sync & Input": [
@@ -153,8 +169,474 @@
         "Variable": "fsr_sharpness",
         "Requires": "enabled"
       }
+    ],
+    "HDR": [
+      {
+        "Name": "HDR Output",
+        "Description": "--hdr-enabled — enable HDR output. Needs the Gamescope WSI layer for client HDR; without it an HDR client is tonemapped to SDR. Turn this on to reveal the rest of the HDR settings.",
+        "Type": "toggle",
+        "Variable": "hdr_enabled",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "HDR Client Support (env)",
+        "Description": "Not a gamescope flag — sets ENABLE_GAMESCOPE_WSI=1, DXVK_HDR=1 and PROTON_ENABLE_HDR=1 so DXVK/Proton games actually offer an HDR swapchain. Without these most Windows games stay SDR even with HDR output on.",
+        "Type": "toggle",
+        "Variable": "hdr_client_env",
+        "Requires": "enabled AND hdr_enabled"
+      },
+      {
+        "Name": "SDR Content Nits",
+        "Description": "--hdr-sdr-content-nits — luminance of SDR content in nits while HDR output is on. Default 400.",
+        "Type": "integer",
+        "Options": { "min": 1, "max": 1000, "step": 5 },
+        "Variable": "hdr_sdr_content_nits",
+        "Requires": "enabled AND hdr_enabled"
+      },
+      {
+        "Name": "SDR Gamut Wideness",
+        "Description": "--sdr-gamut-wideness — how wide the gamut for SDR content is, 0 to 1.",
+        "Type": "float",
+        "Options": { "min": 0.0, "max": 1.0, "step": 0.05 },
+        "Variable": "sdr_gamut_wideness",
+        "Requires": "enabled AND hdr_enabled"
+      },
+      {
+        "Name": "Inverse Tone Mapping (SDR to HDR)",
+        "Description": "--hdr-itm-enabled — expand SDR input into HDR. Only affects SDR content.",
+        "Type": "toggle",
+        "Variable": "hdr_itm_enabled",
+        "Requires": "enabled AND hdr_enabled"
+      },
+      {
+        "Name": "ITM Input Nits",
+        "Description": "--hdr-itm-sdr-nits — luminance in nits assumed for the SDR input of the inverse tone mapper. Default 100, max 1000.",
+        "Type": "integer",
+        "Options": { "min": 1, "max": 1000, "step": 5 },
+        "Variable": "hdr_itm_sdr_nits",
+        "Requires": "enabled AND hdr_enabled AND hdr_itm_enabled"
+      },
+      {
+        "Name": "ITM Target Nits",
+        "Description": "--hdr-itm-target-nits — target luminance of the inverse tone mapping process. Default 1000, max 10000.",
+        "Type": "integer",
+        "Options": { "min": 1, "max": 10000, "step": 50 },
+        "Variable": "hdr_itm_target_nits",
+        "Requires": "enabled AND hdr_enabled AND hdr_itm_enabled"
+      }
+    ],
+    "Nested Window": [
+      {
+        "Name": "Borderless (-b)",
+        "Description": "--borderless — make the nested gamescope window borderless.",
+        "Type": "toggle",
+        "Variable": "borderless",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Grab Keyboard (-g)",
+        "Description": "--grab — grab the keyboard for the nested window.",
+        "Type": "toggle",
+        "Variable": "grab_keyboard",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Force Windows Fullscreen",
+        "Description": "--force-windows-fullscreen — force windows inside gamescope to the size of the nested display.",
+        "Type": "toggle",
+        "Variable": "force_windows_fullscreen",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Unfocused Refresh Rate (-o)",
+        "Description": "--nested-unfocused-refresh — game refresh rate in Hz while the gamescope window is unfocused.",
+        "Type": "integer",
+        "Options": { "min": 0, "max": 540, "step": 1 },
+        "Variable": "nested_unfocused_refresh",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Display Index",
+        "Description": "--display-index — which display gamescope opens on in nested mode.",
+        "Type": "integer",
+        "Options": { "min": 0, "max": 15, "step": 1 },
+        "Variable": "display_index",
+        "Requires": "enabled"
+      }
+    ],
+    "Embedded Display (DRM)": [
+      {
+        "Name": "Preferred Outputs (-O)",
+        "Description": "--prefer-output — comma-separated connectors in order of preference, e.g. DP-1,DP-2,HDMI-A-1.",
+        "Type": "string",
+        "Variable": "prefer_output",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Force Orientation",
+        "Description": "--force-orientation — rotate the internal display.",
+        "Type": "selection",
+        "DisplayOptions": ["Default", "Normal", "Left", "Right", "Upside Down"],
+        "Options": ["", "normal", "left", "right", "upsidedown"],
+        "Variable": "force_orientation",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "DRM Mode Generation",
+        "Description": "--generate-drm-mode — algorithm used to generate the DRM mode.",
+        "Type": "selection",
+        "DisplayOptions": ["Default", "CVT", "Fixed"],
+        "Options": ["", "cvt", "fixed"],
+        "Variable": "generate_drm_mode",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Default Touch Mode",
+        "Description": "--default-touch-mode — what a touch event maps to.",
+        "Type": "selection",
+        "DisplayOptions": ["Default", "Hover", "Left Click", "Right Click", "Middle Click", "Passthrough"],
+        "Options": ["", "0", "1", "2", "3", "4"],
+        "Variable": "default_touch_mode",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Virtual Connector Strategy",
+        "Description": "--virtual-connector-strategy — how gamescope creates virtual connectors. Passed through verbatim; see the gamescope docs for the accepted values.",
+        "Type": "string",
+        "Variable": "virtual_connector_strategy",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Mura Compensation Map",
+        "Description": "--mura-map — path to a mura compensation map for the display (Steam Deck).",
+        "Type": "string",
+        "Variable": "mura_map",
+        "Requires": "enabled"
+      }
+    ],
+    "Cursor": [
+      {
+        "Name": "Cursor Image",
+        "Description": "--cursor — path to the image used as the default cursor.",
+        "Type": "string",
+        "Variable": "cursor_image",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Hide Cursor Delay (-C)",
+        "Description": "--hide-cursor-delay — hide the cursor image after this many milliseconds of inactivity.",
+        "Type": "integer",
+        "Options": { "min": 0, "max": 60000, "step": 100 },
+        "Variable": "hide_cursor_delay",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Cursor Scale Height",
+        "Description": "--cursor-scale-height — base output height the cursor is linearly scaled against.",
+        "Type": "integer",
+        "Options": { "min": 0, "max": 4320, "step": 1 },
+        "Variable": "cursor_scale_height",
+        "Requires": "enabled"
+      }
+    ],
+    "Integration": [
+      {
+        "Name": "Steam Integration (-e)",
+        "Description": "--steam — enable Steam integration (overlay, Steam input, etc.).",
+        "Type": "toggle",
+        "Variable": "steam_integration",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "XWayland Server Count",
+        "Description": "--xwayland-count — create N XWayland servers.",
+        "Type": "integer",
+        "Options": { "min": 1, "max": 4, "step": 1 },
+        "Variable": "xwayland_count",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Prefer Vulkan Device",
+        "Description": "--prefer-vk-device — Vulkan device used for compositing, as vendor:device, e.g. 1002:7300.",
+        "Type": "string",
+        "Variable": "prefer_vk_device",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Statistics Path (-T)",
+        "Description": "--stats-path — write gamescope statistics to this path.",
+        "Type": "string",
+        "Variable": "stats_path",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Keep Alive",
+        "Description": "--keep-alive — keep gamescope running even after the primary process dies.",
+        "Type": "toggle",
+        "Variable": "keep_alive",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Allow Deferred Backend",
+        "Description": "--allow-deferred-backend — let the backend init late if it can't start immediately. Minor correctness trade-offs around modifiers.",
+        "Type": "toggle",
+        "Variable": "allow_deferred_backend",
+        "Requires": "enabled"
+      }
+    ],
+    "ReShade": [
+      {
+        "Name": "ReShade Effect",
+        "Description": "--reshade-effect — name of a ReShade shader in /usr/share/gamescope/reshade/Shaders or ~/.local/share/gamescope/reshade/Shaders.",
+        "Type": "string",
+        "Variable": "reshade_effect",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "ReShade Technique Index",
+        "Description": "--reshade-technique-idx — which technique of the effect to use.",
+        "Type": "integer",
+        "Options": { "min": 0, "max": 64, "step": 1 },
+        "Variable": "reshade_technique_idx",
+        "Requires": "enabled AND reshade_effect"
+      }
+    ],
+    "VR Overlay": [
+      {
+        "Name": "Show VR Options",
+        "Description": "Reveal the SteamVR overlay settings. They only do anything with the OpenVR backend.",
+        "Type": "toggle",
+        "Variable": "vr_options",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Overlay Key",
+        "Description": "--vr-overlay-key — SteamVR overlay key.",
+        "Type": "string",
+        "Variable": "vr_overlay_key",
+        "Requires": "enabled AND vr_options"
+      },
+      {
+        "Name": "App Overlay Key",
+        "Description": "--vr-app-overlay-key — SteamVR overlay key used for child apps.",
+        "Type": "string",
+        "Variable": "vr_app_overlay_key",
+        "Requires": "enabled AND vr_options"
+      },
+      {
+        "Name": "Explicit Overlay Name",
+        "Description": "--vr-overlay-explicit-name — force the overlay name to always be this string.",
+        "Type": "string",
+        "Variable": "vr_overlay_explicit_name",
+        "Requires": "enabled AND vr_options"
+      },
+      {
+        "Name": "Default Overlay Name",
+        "Description": "--vr-overlay-default-name — fallback overlay name when there is no window title.",
+        "Type": "string",
+        "Variable": "vr_overlay_default_name",
+        "Requires": "enabled AND vr_options"
+      },
+      {
+        "Name": "Overlay Icon",
+        "Description": "--vr-overlay-icon — path to the image used as the overlay icon.",
+        "Type": "string",
+        "Variable": "vr_overlay_icon",
+        "Requires": "enabled AND vr_options"
+      },
+      {
+        "Name": "Show Immediately",
+        "Description": "--vr-overlay-show-immediately — the overlay takes focus as soon as it appears.",
+        "Type": "toggle",
+        "Variable": "vr_overlay_show_immediately",
+        "Requires": "enabled AND vr_options"
+      },
+      {
+        "Name": "Control Bar",
+        "Description": "--vr-overlay-enable-control-bar — show the SteamVR control bar.",
+        "Type": "toggle",
+        "Variable": "vr_overlay_control_bar",
+        "Requires": "enabled AND vr_options"
+      },
+      {
+        "Name": "Control Bar Keyboard Button",
+        "Description": "--vr-overlay-enable-control-bar-keyboard — show the SteamVR keyboard button on the control bar.",
+        "Type": "toggle",
+        "Variable": "vr_overlay_control_bar_keyboard",
+        "Requires": "enabled AND vr_options"
+      },
+      {
+        "Name": "Control Bar Close Button",
+        "Description": "--vr-overlay-enable-control-bar-close — show the close button on the control bar.",
+        "Type": "toggle",
+        "Variable": "vr_overlay_control_bar_close",
+        "Requires": "enabled AND vr_options"
+      },
+      {
+        "Name": "Click Stabilization",
+        "Description": "--vr-overlay-enable-click-stabilization — enable SteamVR click stabilization.",
+        "Type": "toggle",
+        "Variable": "vr_overlay_click_stabilization",
+        "Requires": "enabled AND vr_options"
+      },
+      {
+        "Name": "Modal Overlay",
+        "Description": "--vr-overlay-modal — make the overlay appear as a modal.",
+        "Type": "toggle",
+        "Variable": "vr_overlay_modal",
+        "Requires": "enabled AND vr_options"
+      },
+      {
+        "Name": "Physical Width (m)",
+        "Description": "--vr-overlay-physical-width — physical width of the overlay in metres.",
+        "Type": "float",
+        "Options": { "min": 0.1, "max": 20.0, "step": 0.1 },
+        "Variable": "vr_overlay_physical_width",
+        "Requires": "enabled AND vr_options"
+      },
+      {
+        "Name": "Physical Curvature",
+        "Description": "--vr-overlay-physical-curvature — curvature of the overlay.",
+        "Type": "float",
+        "Options": { "min": 0.0, "max": 1.0, "step": 0.01 },
+        "Variable": "vr_overlay_physical_curvature",
+        "Requires": "enabled AND vr_options"
+      },
+      {
+        "Name": "Physical Pre-Curve Pitch",
+        "Description": "--vr-overlay-physical-pre-curve-pitch — pitch applied to the overlay before curving.",
+        "Type": "float",
+        "Options": { "min": -1.0, "max": 1.0, "step": 0.01 },
+        "Variable": "vr_overlay_pre_curve_pitch",
+        "Requires": "enabled AND vr_options"
+      },
+      {
+        "Name": "Trackpad Scroll Speed",
+        "Description": "--vr-scrolls-speed — mouse scrolling speed of trackpad scroll in VR. Default 8.0.",
+        "Type": "float",
+        "Options": { "min": 0.1, "max": 32.0, "step": 0.1 },
+        "Variable": "vr_scrolls_speed",
+        "Requires": "enabled AND vr_options"
+      }
+    ],
+    "Debug": [
+      {
+        "Name": "Show Debug Options",
+        "Description": "Reveal gamescope's debug flags. They cost performance and are for diagnosing problems, not for playing.",
+        "Type": "toggle",
+        "Variable": "debug_options",
+        "Requires": "enabled"
+      },
+      {
+        "Name": "Disable Hardware Planes",
+        "Description": "--disable-layers — disable libliftoff hardware plane offloading.",
+        "Type": "toggle",
+        "Variable": "disable_layers",
+        "Requires": "enabled AND debug_options"
+      },
+      {
+        "Name": "Debug Hardware Planes",
+        "Description": "--debug-layers — log libliftoff plane decisions.",
+        "Type": "toggle",
+        "Variable": "debug_layers",
+        "Requires": "enabled AND debug_options"
+      },
+      {
+        "Name": "Debug Focus",
+        "Description": "--debug-focus — log XWM focus handling.",
+        "Type": "toggle",
+        "Variable": "debug_focus",
+        "Requires": "enabled AND debug_options"
+      },
+      {
+        "Name": "Debug X11 Events",
+        "Description": "--debug-events — log X11 events.",
+        "Type": "toggle",
+        "Variable": "debug_events",
+        "Requires": "enabled AND debug_options"
+      },
+      {
+        "Name": "Synchronous X11",
+        "Description": "--synchronous-x11 — force X11 connection synchronization.",
+        "Type": "toggle",
+        "Variable": "synchronous_x11",
+        "Requires": "enabled AND debug_options"
+      },
+      {
+        "Name": "Debug HUD",
+        "Description": "--debug-hud — paint a HUD with debug info.",
+        "Type": "toggle",
+        "Variable": "debug_hud",
+        "Requires": "enabled AND debug_options"
+      },
+      {
+        "Name": "Composite Debug Markers",
+        "Description": "--composite-debug — draw frame markers on alternating corners while compositing.",
+        "Type": "toggle",
+        "Variable": "composite_debug",
+        "Requires": "enabled AND debug_options"
+      },
+      {
+        "Name": "Force Composition",
+        "Description": "--force-composition — disable direct scan-out.",
+        "Type": "toggle",
+        "Variable": "force_composition",
+        "Requires": "enabled AND debug_options"
+      },
+      {
+        "Name": "Disable Color Management",
+        "Description": "--disable-color-management — turn off gamescope's color management.",
+        "Type": "toggle",
+        "Variable": "disable_color_management",
+        "Requires": "enabled AND debug_options"
+      },
+      {
+        "Name": "Disable XRes",
+        "Description": "--disable-xres — disable XRes for PID lookup.",
+        "Type": "toggle",
+        "Variable": "disable_xres",
+        "Requires": "enabled AND debug_options"
+      },
+      {
+        "Name": "Force HDR Support",
+        "Description": "--hdr-debug-force-support — pretend the display supports HDR. HDR clients are still output as SDR.",
+        "Type": "toggle",
+        "Variable": "hdr_debug_force_support",
+        "Requires": "enabled AND debug_options"
+      },
+      {
+        "Name": "Force HDR10 Output",
+        "Description": "--hdr-debug-force-output — force HDR10 PQ output even if the display doesn't support it. Looks very wrong if it doesn't.",
+        "Type": "toggle",
+        "Variable": "hdr_debug_force_output",
+        "Requires": "enabled AND debug_options"
+      },
+      {
+        "Name": "HDR Luminance Heatmap",
+        "Description": "--hdr-debug-heatmap — heatmap view of HDR luminance across the scene in nits.",
+        "Type": "toggle",
+        "Variable": "hdr_debug_heatmap",
+        "Requires": "enabled AND debug_options"
+      }
     ]
   },
+  "ENV_VARS": [
+    {
+      "Name": "ENABLE_GAMESCOPE_WSI",
+      "Requires": "enabled AND hdr_enabled AND hdr_client_env",
+      "Builder": [{ "Type": "set", "Value": "1" }]
+    },
+    {
+      "Name": "DXVK_HDR",
+      "Requires": "enabled AND hdr_enabled AND hdr_client_env",
+      "Builder": [{ "Type": "set", "Value": "1" }]
+    },
+    {
+      "Name": "PROTON_ENABLE_HDR",
+      "Requires": "enabled AND hdr_enabled AND hdr_client_env",
+      "Builder": [{ "Type": "set", "Value": "1" }]
+    }
+  ],
   "WRAPPERS": [
     {
       "CommandSyntax": "gamescope {OPTIONS} --",
@@ -166,6 +648,8 @@
         { "Requires": "game_width", "Value": "-w {game_width}" },
         { "Requires": "game_height", "Value": "-h {game_height}" },
         { "Requires": "refresh", "Value": "-r {refresh}" },
+        { "Requires": "framerate_limit", "Value": "--framerate-limit {framerate_limit}" },
+        { "Requires": "max_scale", "Value": "-m {max_scale}" },
         { "Requires": "scaler", "Value": "-S {scaler}" },
         { "Requires": "backend", "Value": "--backend {backend}" },
         { "Requires": "adaptive_sync", "Value": "--adaptive-sync" },
@@ -177,7 +661,71 @@
         { "Requires": "fsr_sharpness", "Value": "--sharpness {fsr_sharpness}" },
         { "Requires": "mouse_sensitivity", "Value": "--mouse-sensitivity {mouse_sensitivity}" },
         { "Requires": "fullscreen", "Value": "-f" },
-        { "Requires": "mangoapp", "Value": "--mangoapp" }
+        { "Requires": "mangoapp", "Value": "--mangoapp" },
+
+        { "Requires": "hdr_enabled", "Value": "--hdr-enabled" },
+        { "Requires": "hdr_enabled AND hdr_sdr_content_nits", "Value": "--hdr-sdr-content-nits {hdr_sdr_content_nits}" },
+        { "Requires": "hdr_enabled AND sdr_gamut_wideness", "Value": "--sdr-gamut-wideness {sdr_gamut_wideness}" },
+        { "Requires": "hdr_enabled AND hdr_itm_enabled", "Value": "--hdr-itm-enabled" },
+        { "Requires": "hdr_enabled AND hdr_itm_enabled AND hdr_itm_sdr_nits", "Value": "--hdr-itm-sdr-nits {hdr_itm_sdr_nits}" },
+        { "Requires": "hdr_enabled AND hdr_itm_enabled AND hdr_itm_target_nits", "Value": "--hdr-itm-target-nits {hdr_itm_target_nits}" },
+
+        { "Requires": "borderless", "Value": "-b" },
+        { "Requires": "grab_keyboard", "Value": "-g" },
+        { "Requires": "force_windows_fullscreen", "Value": "--force-windows-fullscreen" },
+        { "Requires": "nested_unfocused_refresh", "Value": "-o {nested_unfocused_refresh}" },
+        { "Requires": "display_index", "Value": "--display-index {display_index}" },
+
+        { "Requires": "prefer_output", "Value": "-O {prefer_output}" },
+        { "Requires": "force_orientation", "Value": "--force-orientation {force_orientation}" },
+        { "Requires": "generate_drm_mode", "Value": "--generate-drm-mode {generate_drm_mode}" },
+        { "Requires": "default_touch_mode", "Value": "--default-touch-mode {default_touch_mode}" },
+        { "Requires": "virtual_connector_strategy", "Value": "--virtual-connector-strategy {virtual_connector_strategy}" },
+        { "Requires": "mura_map", "Value": "--mura-map \"{mura_map}\"" },
+
+        { "Requires": "cursor_image", "Value": "--cursor \"{cursor_image}\"" },
+        { "Requires": "hide_cursor_delay", "Value": "-C {hide_cursor_delay}" },
+        { "Requires": "cursor_scale_height", "Value": "--cursor-scale-height {cursor_scale_height}" },
+
+        { "Requires": "steam_integration", "Value": "-e" },
+        { "Requires": "xwayland_count", "Value": "--xwayland-count {xwayland_count}" },
+        { "Requires": "prefer_vk_device", "Value": "--prefer-vk-device {prefer_vk_device}" },
+        { "Requires": "stats_path", "Value": "-T \"{stats_path}\"" },
+        { "Requires": "keep_alive", "Value": "--keep-alive" },
+        { "Requires": "allow_deferred_backend", "Value": "--allow-deferred-backend" },
+
+        { "Requires": "reshade_effect", "Value": "--reshade-effect \"{reshade_effect}\"" },
+        { "Requires": "reshade_effect AND reshade_technique_idx", "Value": "--reshade-technique-idx {reshade_technique_idx}" },
+
+        { "Requires": "vr_options AND vr_overlay_key", "Value": "--vr-overlay-key \"{vr_overlay_key}\"" },
+        { "Requires": "vr_options AND vr_app_overlay_key", "Value": "--vr-app-overlay-key \"{vr_app_overlay_key}\"" },
+        { "Requires": "vr_options AND vr_overlay_explicit_name", "Value": "--vr-overlay-explicit-name \"{vr_overlay_explicit_name}\"" },
+        { "Requires": "vr_options AND vr_overlay_default_name", "Value": "--vr-overlay-default-name \"{vr_overlay_default_name}\"" },
+        { "Requires": "vr_options AND vr_overlay_icon", "Value": "--vr-overlay-icon \"{vr_overlay_icon}\"" },
+        { "Requires": "vr_options AND vr_overlay_show_immediately", "Value": "--vr-overlay-show-immediately" },
+        { "Requires": "vr_options AND vr_overlay_control_bar", "Value": "--vr-overlay-enable-control-bar" },
+        { "Requires": "vr_options AND vr_overlay_control_bar_keyboard", "Value": "--vr-overlay-enable-control-bar-keyboard" },
+        { "Requires": "vr_options AND vr_overlay_control_bar_close", "Value": "--vr-overlay-enable-control-bar-close" },
+        { "Requires": "vr_options AND vr_overlay_click_stabilization", "Value": "--vr-overlay-enable-click-stabilization" },
+        { "Requires": "vr_options AND vr_overlay_modal", "Value": "--vr-overlay-modal" },
+        { "Requires": "vr_options AND vr_overlay_physical_width", "Value": "--vr-overlay-physical-width {vr_overlay_physical_width}" },
+        { "Requires": "vr_options AND vr_overlay_physical_curvature", "Value": "--vr-overlay-physical-curvature {vr_overlay_physical_curvature}" },
+        { "Requires": "vr_options AND vr_overlay_pre_curve_pitch", "Value": "--vr-overlay-physical-pre-curve-pitch {vr_overlay_pre_curve_pitch}" },
+        { "Requires": "vr_options AND vr_scrolls_speed", "Value": "--vr-scrolls-speed {vr_scrolls_speed}" },
+
+        { "Requires": "debug_options AND disable_layers", "Value": "--disable-layers" },
+        { "Requires": "debug_options AND debug_layers", "Value": "--debug-layers" },
+        { "Requires": "debug_options AND debug_focus", "Value": "--debug-focus" },
+        { "Requires": "debug_options AND debug_events", "Value": "--debug-events" },
+        { "Requires": "debug_options AND synchronous_x11", "Value": "--synchronous-x11" },
+        { "Requires": "debug_options AND debug_hud", "Value": "--debug-hud" },
+        { "Requires": "debug_options AND composite_debug", "Value": "--composite-debug" },
+        { "Requires": "debug_options AND force_composition", "Value": "--force-composition" },
+        { "Requires": "debug_options AND disable_color_management", "Value": "--disable-color-management" },
+        { "Requires": "debug_options AND disable_xres", "Value": "--disable-xres" },
+        { "Requires": "debug_options AND hdr_debug_force_support", "Value": "--hdr-debug-force-support" },
+        { "Requires": "debug_options AND hdr_debug_force_output", "Value": "--hdr-debug-force-output" },
+        { "Requires": "debug_options AND hdr_debug_heatmap", "Value": "--hdr-debug-heatmap" }
       ]
     }
   ]
