@@ -9745,27 +9745,41 @@ impl GuiApp {
             let field_by_var: std::collections::HashMap<&str, &UiField> =
                 spec.ui.values().flatten().map(|f| (f.variable.as_str(), f)).collect();
             let ext_res = resolution.exts.get(&spec.id());
-            let has_in = |modules: &AuthorsMap| -> bool {
-                modules.get(&spec.meta.author)
-                    .and_then(|e| e.get(&spec.meta.name))
+            fn vars_of<'a>(modules: &'a AuthorsMap, spec: &Extension) -> Option<&'a core_config::VarMap> {
+                modules.get(&spec.meta.author).and_then(|e| e.get(&spec.meta.name))
+            }
+            // A layer only earns an inheritance badge for values that actually
+            // survive to the effective config: a key present in ANY higher layer
+            // (even as `null` — present means override, see config.rs) is shadowed
+            // and contributes nothing, so it must not count. Without this, a
+            // profile setting one option stayed badged after the game overrode
+            // that same option.
+            let has_in = |modules: &AuthorsMap, higher: &[&AuthorsMap]| -> bool {
+                vars_of(modules, spec)
                     .map(|vars| vars.keys().any(|k| {
                         declared.contains(k.as_str())
                             && field_by_var.get(k.as_str())
                                 .is_none_or(|f| field_visible(f, ext_res))
+                            && !higher.iter().any(|h| vars_of(h, spec).is_some_and(|v| v.contains_key(k)))
                     }))
                     .unwrap_or(false)
             };
             const DEPTH_NUM: [&str; 6] = ["1", "2", "3", "4", "5", "5+"];
-            let push_chain_icons = |icons: &mut Vec<(&'static str, Color32)>, chain: &[Preset]| {
+            // `top` = layers above the whole chain (highest first); each chain
+            // entry is additionally shadowed by the chain entries before it.
+            let push_chain_icons = |icons: &mut Vec<(&'static str, Color32)>, chain: &[Preset], top: &[&AuthorsMap]| {
+                let higher_at = |i: usize| -> Vec<&AuthorsMap> {
+                    top.iter().copied().chain(chain[..i].iter().map(|p| &p.modules)).collect()
+                };
                 match display_mode {
                     InheritanceDisplayMode::Color => {
                         for (i, p) in chain.iter().enumerate() {
-                            if has_in(&p.modules) { icons.push((ICON_INHERIT, profile_depth_color(i))); }
+                            if has_in(&p.modules, &higher_at(i)) { icons.push((ICON_INHERIT, profile_depth_color(i))); }
                         }
                     }
                     InheritanceDisplayMode::Numbers => {
                         let contributing: Vec<usize> = chain.iter().enumerate()
-                            .filter(|(_, p)| has_in(&p.modules))
+                            .filter(|(i, p)| has_in(&p.modules, &higher_at(*i)))
                             .map(|(i, _)| i)
                             .collect();
                         if chain.len() <= 1 {
@@ -9777,24 +9791,30 @@ impl GuiApp {
                         }
                     }
                     InheritanceDisplayMode::ArrowsOnly => {
-                        if chain.iter().any(|p| has_in(&p.modules)) { icons.push((ICON_INHERIT, COL_PROFILE)); }
+                        if chain.iter().enumerate().any(|(i, p)| has_in(&p.modules, &higher_at(i))) { icons.push((ICON_INHERIT, COL_PROFILE)); }
                     }
                 }
             };
             let mut icons: Vec<(&'static str, Color32)> = Vec::new();
             match nav_sel {
                 NavSel::Game(_) => {
-                    if has_in(global_modules) { icons.push((ICON_INHERIT, COL_GLOBAL)); }
-                    push_chain_icons(&mut icons, &game_preset_chain);
-                    if has_in(game_modules) { icons.push((ICON_EDIT, COL_GAME)); }
+                    // Highest first: game → preset chain → global.
+                    let mut above: Vec<&AuthorsMap> = vec![game_modules];
+                    above.extend(game_preset_chain.iter().map(|p| &p.modules));
+                    if has_in(global_modules, &above) { icons.push((ICON_INHERIT, COL_GLOBAL)); }
+                    push_chain_icons(&mut icons, &game_preset_chain, &[game_modules]);
+                    if has_in(game_modules, &[]) { icons.push((ICON_EDIT, COL_GAME)); }
                 }
                 NavSel::Profile(_) => {
-                    if has_in(global_modules) { icons.push((ICON_INHERIT, COL_GLOBAL)); }
-                    push_chain_icons(&mut icons, &profile_parent_chain);
-                    if editing_modules.map(has_in).unwrap_or(false) { icons.push((ICON_EDIT, COL_PROFILE)); }
+                    let mut above: Vec<&AuthorsMap> = editing_modules.into_iter().collect();
+                    above.extend(profile_parent_chain.iter().map(|p| &p.modules));
+                    if has_in(global_modules, &above) { icons.push((ICON_INHERIT, COL_GLOBAL)); }
+                    let top: Vec<&AuthorsMap> = editing_modules.into_iter().collect();
+                    push_chain_icons(&mut icons, &profile_parent_chain, &top);
+                    if editing_modules.map(|m| has_in(m, &[])).unwrap_or(false) { icons.push((ICON_EDIT, COL_PROFILE)); }
                 }
                 NavSel::GlobalSettings => {
-                    if has_in(global_modules) { icons.push((ICON_EDIT, COL_GLOBAL)); }
+                    if has_in(global_modules, &[]) { icons.push((ICON_EDIT, COL_GLOBAL)); }
                 }
                 NavSel::GeneralSettings => {}
             }

@@ -692,6 +692,16 @@ loaded schema *and* its `Requires` gate currently evaluates visible
 (`field_visible`) — a stored value behind a closed gate, or for a since-removed
 variable, doesn't light up the icon.
 
+**Shadowed layers get no badge (2026-09-22).** A lower layer only earns its
+inheritance icon for variables that actually survive to the effective config: if
+*every* variable it sets for that module is also present in a higher layer, it
+contributes nothing and is skipped. *Why "present" and not "different":* the storage
+convention (`crates/ritz-core/src/config.rs` module doc) is that a key present at a
+scope — **including a `null`, which means "explicitly disabled"** — is an override, so
+presence is exactly the shadowing test. Before this, a profile setting one option kept
+showing its inheritance arrow/number after the game overrode that same option, which
+read as "something is still coming from the profile" when nothing was.
+
 ## Module editor (central panel)
 
 For the selected extension, `GuiApp::ui`'s central-panel closure renders a header
