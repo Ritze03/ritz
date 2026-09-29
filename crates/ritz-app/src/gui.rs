@@ -690,6 +690,9 @@ pub struct GuiApp {
     pending_close: bool,
     /// The open Fork / Create-new module dialog, if any.
     module_dialog: Option<ModuleDialog>,
+    /// Where the inheritance preview is shown, if at all (opened from the
+    /// "Launch command preview" link).
+    inheritance_preview: InheritancePreview,
     /// "Also purge stored config" checkbox state for the pending Delete-module
     /// confirmation.
     delete_module_purge: bool,
@@ -1437,6 +1440,7 @@ impl GuiApp {
             unsaved_drafts: std::collections::HashSet::new(),
             pending_close: false,
             module_dialog: None,
+            inheritance_preview: InheritancePreview::Closed,
             delete_module_purge: false,
             carryover_report: None,
             icon_cache: IconCenterCache::new(),
@@ -3636,7 +3640,15 @@ impl GuiApp {
                     self.render_about(ui);
                     return;
                 }
-                ui.label(theme::header_label("Launch command preview"));
+                // Deliberately low-key for now: the header itself is the link
+                // (FAINT, underlines on hover) rather than a new button.
+                if ui
+                    .add(egui::Link::new(theme::header_label("Launch command preview")))
+                    .on_hover_text("Preview how each inheritance layer shapes this command")
+                    .clicked()
+                {
+                    self.inheritance_preview = InheritancePreview::Modal;
+                }
                 // The "Previewing against: {game}" line that used to sit here is
                 // gone (S4a): the preview resolves against the scratch layer, so
                 // naming the ambient game contradicted a settled decision.
@@ -3772,6 +3784,8 @@ impl GuiApp {
         }
 
         self.render_module_dialog(ctx);
+
+        self.render_inheritance_preview(ctx, &game_specs);
 
         if self.poll_detect(ctx) {
             changed = true;
@@ -9547,6 +9561,280 @@ impl GuiApp {
     }
 }
 
+/// Where the inheritance preview is shown. `Window` is its own OS window (an
+/// immediate egui viewport), so it can stay open beside the editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InheritancePreview {
+    Closed,
+    Modal,
+    Window,
+}
+
+/// One column of the inheritance preview: the effective state *after* this layer
+/// is stacked on everything below it.
+struct InheritanceStage {
+    label: String,
+    color: Color32,
+    /// What this layer itself stores — decides which cells get highlighted.
+    own: AuthorsMap,
+    res: Resolution,
+    command: String,
+}
+
+impl GuiApp {
+    /// The layers behind the launch preview, lowest priority first:
+    /// Global Profile → profile chain (root … direct) → game. On a Profile screen
+    /// the edited profile is the top layer and there is no game layer — the same
+    /// layers the launch preview itself resolves through.
+    ///
+    /// *Why cumulative re-resolves and not one resolution with provenance:*
+    /// provenance only names the layer that *won*; the preview has to show what
+    /// the launch looked like at every step, including values later overridden.
+    fn inheritance_stages(&self, specs: &[Extension]) -> Vec<InheritanceStage> {
+        let global = &self.global_config;
+        let profile_screen = matches!(self.nav_sel, NavSel::Profile(_));
+        let (direct, game) = if profile_screen {
+            (self.editing_preset_buf.as_ref(), None)
+        } else {
+            // Live edit buffer when it's the applied profile — mirrors
+            // `resolve_specs_for_game`.
+            let direct = match (&self.editing_preset_buf, &self.preset) {
+                (Some(buf), Some(applied)) if buf.name == applied.name => Some(buf),
+                _ => self.preset.as_ref(),
+            };
+            (direct, Some(&self.game_config))
+        };
+        // [direct, parent, grandparent, …] — index doubles as the depth colour.
+        let mut chain: Vec<Preset> = direct.cloned().into_iter().collect();
+        if let Some(pn) = direct.and_then(|p| p.parent.as_ref()) {
+            chain.extend(collect_parent_presets(&self.paths, pn));
+        }
+
+        let stage = |label: String, color, own: &AuthorsMap, res: Resolution| {
+            let command = context::assemble_launch(specs, &res, &self.game_command)
+                .map(|lc| lc.to_string())
+                .unwrap_or_else(|e| format!("<error: {e}>"));
+            InheritanceStage { label, color, own: own.clone(), res, command }
+        };
+
+        let mut stages = vec![stage(
+            "Global Profile".into(),
+            COL_GLOBAL,
+            &global.modules,
+            resolve::resolve(specs, None, None, Some(global)),
+        )];
+        let mut merged = Preset::default();
+        for (depth, p) in chain.iter().enumerate().rev() {
+            merge_modules(&mut merged.modules, &p.modules);
+            stages.push(stage(
+                p.name.clone(),
+                profile_depth_color(depth),
+                &p.modules,
+                resolve::resolve(specs, None, Some(&merged), Some(global)),
+            ));
+        }
+        if let Some(g) = game {
+            stages.push(stage(
+                g.game.name.clone(),
+                COL_GAME,
+                &g.config.modules.authors,
+                resolve::resolve(specs, Some(g), Some(&merged), Some(global)),
+            ));
+        }
+        stages
+    }
+
+    /// The inheritance preview: an in-window modal, or popped out into its own
+    /// OS window. Config mode only — it opens from Config mode's launch band.
+    fn render_inheritance_preview(&mut self, ctx: &egui::Context, specs: &[Extension]) {
+        if self.inheritance_preview == InheritancePreview::Closed {
+            return;
+        }
+        let stages = self.inheritance_stages(specs);
+        let mono = self.general_config.mono_ui;
+        let mut next = self.inheritance_preview;
+
+        if self.inheritance_preview == InheritancePreview::Window {
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("inheritance_preview"),
+                egui::ViewportBuilder::default()
+                    .with_title("Inheritance Preview")
+                    .with_inner_size([1100.0, 700.0]),
+                |ctx, _class| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE
+                            .fill(theme::PANEL)
+                            .inner_margin(egui::Margin::same(16)))
+                        .show(ctx, |ui| inheritance_preview_body(ui, specs, &stages, mono));
+                    if ctx.input(|i| i.viewport().close_requested()) {
+                        next = InheritancePreview::Closed;
+                    }
+                },
+            );
+            self.inheritance_preview = next;
+            return;
+        }
+
+        // Modal backdrop (mirrors the confirm dialog).
+        let screen = ctx.content_rect();
+        egui::Area::new(egui::Id::new("inheritance_preview_backdrop"))
+            .order(egui::Order::Middle)
+            .fixed_pos(egui::Pos2::ZERO)
+            .interactable(true)
+            .show(ctx, |ui| {
+                ui.painter().rect_filled(screen, 0.0, egui::Color32::from_black_alpha(160));
+                ui.allocate_response(screen.size(), egui::Sense::click_and_drag());
+            });
+        egui::Window::new("Inheritance Preview")
+            .order(egui::Order::Foreground)
+            .collapsible(false)
+            .resizable(false)
+            .fixed_size(screen.size() * 0.85 - egui::vec2(32.0, 64.0))
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add(theme::secondary_button("Close")).clicked() {
+                            next = InheritancePreview::Closed;
+                        }
+                        if ui.add(theme::secondary_button("Pop Out")).clicked() {
+                            next = InheritancePreview::Window;
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+                inheritance_preview_body(ui, specs, &stages, mono);
+            });
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            next = InheritancePreview::Closed;
+        }
+        self.inheritance_preview = next;
+    }
+}
+
+/// Columns = layers (lowest priority left), rows = every field any layer sets.
+/// A cell shows the field's effective value after that layer; the layer's own
+/// values are drawn in its scope colour. Below: the launch command per layer.
+fn inheritance_preview_body(
+    ui: &mut egui::Ui,
+    specs: &[Extension],
+    stages: &[InheritanceStage],
+    mono: bool,
+) {
+    let sets = |own: &AuthorsMap, spec: &Extension, var: &str| {
+        own.get(&spec.meta.author)
+            .and_then(|e| e.get(&spec.meta.name))
+            .is_some_and(|v| v.contains_key(var))
+    };
+    ui.label(
+        egui::RichText::new(
+            "Each column is the result after that layer is applied, lowest priority on \
+             the left. Values a layer sets itself are shown in its colour.",
+        )
+        .color(theme::DIM)
+        .small(),
+    );
+    ui.add_space(8.0);
+    egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+        let mut any = false;
+        egui::Grid::new("inheritance_grid")
+            .num_columns(stages.len() + 1)
+            .spacing([24.0, 6.0])
+            .min_col_width(110.0)
+            .show(ui, |ui| {
+                ui.label("");
+                for st in stages {
+                    ui.label(egui::RichText::new(&st.label).color(st.color).strong());
+                }
+                ui.end_row();
+                for spec in specs {
+                    let fields: Vec<&UiField> = spec
+                        .fields()
+                        .filter(|f| stages.iter().any(|st| sets(&st.own, spec, &f.variable)))
+                        .collect();
+                    if fields.is_empty() {
+                        continue;
+                    }
+                    any = true;
+                    ui.add_space(6.0);
+                    ui.end_row();
+                    ui.label(theme::section_label(&spec.meta.name));
+                    ui.end_row();
+                    let id = spec.id();
+                    for f in fields {
+                        ui.label(
+                            egui::RichText::new(f.name.as_deref().unwrap_or(&f.variable))
+                                .color(theme::DIM),
+                        );
+                        for st in stages {
+                            let ext = st.res.exts.get(&id);
+                            let text = ext
+                                .and_then(|e| e.fields.get(&f.variable))
+                                .map(display_resolved)
+                                .unwrap_or_default();
+                            let rt = egui::RichText::new(text).monospace();
+                            let rt = if sets(&st.own, spec, &f.variable) {
+                                rt.color(st.color).strong()
+                            } else if !field_visible(f, ext) {
+                                // Stored but gated off by `Requires` at this stage.
+                                rt.color(theme::FAINT)
+                            } else {
+                                rt.color(theme::TEXT)
+                            };
+                            ui.label(rt);
+                        }
+                        ui.end_row();
+                    }
+                }
+            });
+        if !any {
+            ui.label(
+                egui::RichText::new("No layer sets any value for these modules.")
+                    .color(theme::DIM),
+            );
+        }
+
+        ui.add_space(16.0);
+        ui.label(theme::header_label("Launch command per layer"));
+        ui.add_space(4.0);
+        let sep = icon_sep(mono);
+        for st in stages {
+            ui.label(
+                egui::RichText::new(format!("{ICON_INHERIT}{sep}{}", st.label))
+                    .color(st.color)
+                    .small(),
+            );
+            egui::Frame::NONE
+                .fill(theme::FIELD)
+                .stroke(egui::Stroke::new(1.0, theme::BORDER))
+                .corner_radius(egui::CornerRadius::same(8))
+                .inner_margin(egui::Margin::symmetric(13, 11))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.add(egui::Label::new(command_job(&st.command)).wrap());
+                });
+            ui.add_space(6.0);
+        }
+    });
+}
+
+/// A resolved field as one short cell string: toggles and disabled values read
+/// ON/OFF, lists join with ", ", everything else is its stored value.
+fn display_resolved(rf: &resolve::ResolvedField) -> String {
+    match &rf.raw {
+        Some(serde_json::Value::Bool(b)) => if *b { "ON" } else { "OFF" }.into(),
+        _ if !rf.enabled => "OFF".into(),
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(a)) => a
+            .iter()
+            .map(|v| v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))
+            .collect::<Vec<_>>()
+            .join(", "),
+        Some(v) => v.to_string(),
+        None => String::new(),
+    }
+}
+
 /// Convert a Preset into a fake GameConfig so it can be passed as the "game" layer
 /// to `resolve::resolve`, making its values show as Provenance::Game in the GUI.
 fn preset_as_fake_game(preset: &Preset) -> GameConfig {
@@ -11592,6 +11880,7 @@ mod tests {
             unsaved_drafts: std::collections::HashSet::new(),
             pending_close: false,
             module_dialog: None,
+            inheritance_preview: InheritancePreview::Closed,
             delete_module_purge: false,
             carryover_report: None,
             icon_cache: IconCenterCache::new(),

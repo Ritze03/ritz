@@ -1896,6 +1896,39 @@ which highlights every `%command%` token in the accent color. See
 [launch-command-assembly.md](launch-command-assembly.md) for what `assemble_launch`
 does with the resolved fields.
 
+### Inheritance preview (`GuiApp::render_inheritance_preview`, 2026-09-29)
+
+The footer's **"Launch command preview"** header is itself a link (`egui::Link` over
+`theme::header_label` — stays `FAINT`, underlines on hover). Clicking it opens the
+inheritance preview as an in-window **modal** (same backdrop + centred `egui::Window`
+pattern as the confirm dialog; Close or Esc dismisses it). The modal's **Pop Out**
+button moves it into its own OS window (`ctx.show_viewport_immediate`, id
+`inheritance_preview`); closing that window closes the preview. State:
+`GuiApp::inheritance_preview` (`InheritancePreview::{Closed, Modal, Window}`).
+
+What it shows (`GuiApp::inheritance_stages` → `inheritance_preview_body`):
+
+- **Columns = layers, lowest priority on the left:** Global Profile → profile chain
+  (root … direct profile) → game. On a Profile screen the edited profile is the top
+  layer and there is no game column — the same layers the launch preview resolves
+  through. Scope colours: `COL_GLOBAL`, `profile_depth_color(depth)` per chain link
+  (same depth colours as the module tree), `COL_GAME`.
+- **Rows = every field any layer sets**, grouped by module. Each cell is the field's
+  *effective* value after that layer is stacked on everything below it; cells the
+  layer sets itself are drawn in its colour, bold. A value stored behind a closed
+  `Requires` gate is `FAINT`.
+- **Launch command per layer** below the grid (`assemble_launch` per stage).
+
+*Why it exists:* the module-tree badges only say *that* a layer contributes, not
+*what* survives — an overridden profile value (see "Shadowed layers get no badge"
+above) was confusing to reason about. The preview makes the stacking explicit (user
+request, 2026-09-29, from a drawio mockup: one column per layer, set-here values
+highlighted). *Why re-resolve per stage instead of reading provenance:* provenance only
+names the layer that *won*; the preview has to show intermediate states, including
+values a later layer overrides. *Why only behind the header link for now:* the user
+asked for it to stay low-key until the feature settles. Config mode only — IDE mode's
+launch band resolves a scratch layer, not a real inheritance chain.
+
 ## IDE-mode preview column (`GuiApp::render_ide_preview_panel`)
 
 The right-hand `ide_preview` `SidePanel` in `Mode::Ide`: a WYSIWYG render of the module
