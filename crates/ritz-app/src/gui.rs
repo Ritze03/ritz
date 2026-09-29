@@ -15467,4 +15467,436 @@ mod tests {
             "every preview lint is a Warning today; none may be refusing an action"
         );
     }
+
+    // ── Inheritance preview data layer (2026-09-29) ─────────────────────────
+    //
+    // `inheritance_stages` is the one place in the GUI that re-resolves the whole
+    // scope chain N times, once per layer, instead of reading a single
+    // resolution's provenance (see its doc comment for why). That makes it easy
+    // to get the *order* or the *cumulative merge* subtly wrong in a way no
+    // render test would catch — a column showing the right value for the wrong
+    // layer still looks plausible on screen. These tests pin the data layer only;
+    // rendering (`inheritance_preview_body`) is untouched.
+
+    /// Minimal stand-ins for the four modules the user's real profile chain
+    /// touches, with just enough fields (and one `ENV_VARS` block, so the
+    /// per-stage `command` is not the empty string) for resolution to be
+    /// meaningful. Ids come out as `Ritze::<Name>::1.0`.
+    fn inh_specs() -> Vec<Extension> {
+        let misc: Extension = serde_json::from_value(json!({
+            "Extension": { "Author": "Ritze", "Name": "Misc", "Version": "1.0" },
+            "UI": { "General": [
+                { "Type": "toggle", "Variable": "clear_ld_preload", "Default": false },
+                { "Type": "string", "Variable": "kbd_layout" }
+            ]},
+            // Keeps `command` non-trivial and layer-dependent.
+            "ENV_VARS": [{
+                "Name": "XKB_DEFAULT_LAYOUT",
+                "Requires": "kbd_layout",
+                "Builder": [{ "Type": "set", "Value": "{kbd_layout}" }]
+            }]
+        }))
+        .unwrap();
+        let amd: Extension = serde_json::from_value(json!({
+            "Extension": { "Author": "Ritze", "Name": "AMD", "Version": "1.0" },
+            "UI": { "General": [
+                { "Type": "toggle", "Variable": "enabled", "Default": false },
+                { "Type": "toggle", "Variable": "clear", "Default": false },
+                { "Type": "toggle", "Variable": "sam", "Default": false }
+            ]}
+        }))
+        .unwrap();
+        let gs: Extension = serde_json::from_value(json!({
+            "Extension": { "Author": "Ritze", "Name": "Gamescope", "Version": "1.0" },
+            "UI": { "General": [
+                { "Type": "toggle", "Variable": "fullscreen", "Default": false },
+                { "Type": "selection", "Variable": "scaler",
+                  "Options": ["auto", "stretch", "fit"] },
+                { "Type": "toggle", "Variable": "adaptive_sync", "Default": false },
+                { "Type": "toggle", "Variable": "immediate_flips", "Default": false }
+            ]}
+        }))
+        .unwrap();
+        let lsfg: Extension = serde_json::from_value(json!({
+            "Extension": { "Author": "Ritze", "Name": "LSFG-VK", "Version": "1.0" },
+            "UI": { "General": [
+                { "Type": "toggle", "Variable": "enabled", "Default": false },
+                { "Type": "selection", "Variable": "multiplier",
+                  "Options": ["2", "3", "4"] }
+            ]}
+        }))
+        .unwrap();
+        vec![misc, amd, gs, lsfg]
+    }
+
+    /// One `Preset` from a flat list of `(ext, var, value)` triples, all authored
+    /// by `Ritze`.
+    fn inh_preset(
+        name: &str,
+        parent: Option<&str>,
+        vals: &[(&str, &str, serde_json::Value)],
+    ) -> Preset {
+        let mut p = Preset {
+            name: name.to_string(),
+            parent: parent.map(str::to_string),
+            ..Default::default()
+        };
+        for (ext, var, v) in vals {
+            p.set_value("Ritze", ext, var, v.clone());
+        }
+        p
+    }
+
+    /// The user's real chain shape, on disk in a per-test scratch dir:
+    /// global(`kbd_layout`) → Default → Casual → Casual-GS → Casual-GS-FG → game.
+    ///
+    /// *Why a real temp dir and not a stub:* `inheritance_stages` walks the
+    /// parent chain through `collect_parent_presets(&self.paths, …)`, which loads
+    /// `profiles/<name>.json` off disk. There is no injection seam, so the
+    /// ancestors only exist if they are actually written out. Never touches
+    /// `~/.config/ritz`.
+    fn inheritance_app(tag: &str) -> (GuiApp, Vec<Extension>, PathBuf) {
+        let base = std::env::temp_dir().join(format!(
+            "ritz-gui-test-inh-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let specs = inh_specs();
+        let mut app = test_app();
+        app.paths = Paths { base: base.clone() };
+        app.all_specs = specs.clone();
+        app.cur_specs = specs.clone();
+
+        app.global_config.set_value("Ritze", "Misc", "kbd_layout", json!("de"));
+
+        let default = inh_preset("Default", None, &[("Misc", "clear_ld_preload", json!(true))]);
+        let casual = inh_preset(
+            "Casual",
+            Some("Default"),
+            &[
+                ("AMD", "enabled", json!(true)),
+                ("AMD", "clear", json!(true)),
+                ("AMD", "sam", json!(true)),
+                ("Gamescope", "fullscreen", json!(true)),
+            ],
+        );
+        let casual_gs = inh_preset(
+            "Casual-GS",
+            Some("Casual"),
+            &[
+                ("Gamescope", "fullscreen", json!(true)),
+                ("Gamescope", "scaler", json!("stretch")),
+                ("Gamescope", "adaptive_sync", json!(true)),
+                ("Gamescope", "immediate_flips", json!(true)),
+            ],
+        );
+        let casual_gs_fg = inh_preset(
+            "Casual-GS-FG",
+            Some("Casual-GS"),
+            &[
+                ("Gamescope", "immediate_flips", json!(false)),
+                ("Gamescope", "adaptive_sync", json!(false)),
+                ("LSFG-VK", "enabled", json!(true)),
+                ("LSFG-VK", "multiplier", json!("2")),
+            ],
+        );
+        for p in [&default, &casual, &casual_gs, &casual_gs_fg] {
+            app.paths.save_preset(p).unwrap();
+        }
+        app.all_presets = vec![
+            "Default".into(),
+            "Casual".into(),
+            "Casual-GS".into(),
+            "Casual-GS-FG".into(),
+        ];
+
+        app.game_config = GameConfig::new("42", "Test Game");
+        app.game_config.config.modules.preset = Some("Casual-GS-FG".to_string());
+        app.game_config.set_value("Ritze", "LSFG-VK", "multiplier", json!("4"));
+        // `null` = explicitly disabled at the game layer, not "inherit".
+        app.game_config.set_value("Ritze", "AMD", "sam", serde_json::Value::Null);
+        app.preset = Some(casual_gs_fg);
+
+        (app, specs, base)
+    }
+
+    /// `display_resolved` of one variable in one stage, by extension *name*.
+    fn inh_cell(stage: &InheritanceStage, specs: &[Extension], ext: &str, var: &str) -> String {
+        let spec = specs.iter().find(|s| s.meta.name == ext).expect("spec by name");
+        display_resolved(&stage.res.exts[&spec.id()].fields[var])
+    }
+
+    /// Does `own` (the map that drives the "set here" highlight) record this var?
+    fn inh_own_has(stage: &InheritanceStage, ext: &str, var: &str) -> bool {
+        stage
+            .own
+            .get("Ritze")
+            .and_then(|e| e.get(ext))
+            .is_some_and(|v| v.contains_key(var))
+    }
+
+    /// Column order and colour are the whole readability contract of the
+    /// preview: lowest-priority layer leftmost, game last, profiles tinted by
+    /// depth so a profile keeps the colour it has in the nav tree.
+    #[test]
+    fn inheritance_stages_game_screen_orders_layers_low_to_high() {
+        let (app, specs, base) = inheritance_app("order");
+        let stages = app.inheritance_stages(&specs);
+
+        let labels: Vec<&str> = stages.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["Global Profile", "Default", "Casual", "Casual-GS", "Casual-GS-FG", "Test Game"],
+        );
+        assert_eq!(stages[0].color, COL_GLOBAL);
+        assert_eq!(stages[5].color, COL_GAME);
+        // Depth 0 is the *direct* profile, so the root is the dimmest.
+        assert_eq!(stages[1].color, profile_depth_color(3), "Default (root)");
+        assert_eq!(stages[2].color, profile_depth_color(2), "Casual");
+        assert_eq!(stages[3].color, profile_depth_color(1), "Casual-GS");
+        assert_eq!(stages[4].color, profile_depth_color(0), "Casual-GS-FG (direct)");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Each column is the effective state *after* that layer is stacked on
+    /// everything below it — so a value set low down must keep showing in every
+    /// column to its right until some layer actually overrides it. This is the
+    /// property a non-cumulative implementation (resolving each preset alone)
+    /// would silently break.
+    #[test]
+    fn inheritance_stages_values_carry_forward_until_overridden() {
+        let (app, specs, base) = inheritance_app("carry");
+        let stages = app.inheritance_stages(&specs);
+        let col = |i: usize, ext, var| inh_cell(&stages[i], &specs, ext, var);
+        let row = |ext: &'static str, var: &'static str| {
+            (0..6).map(|i| col(i, ext, var)).collect::<Vec<_>>()
+        };
+
+        // Set at Casual-GS, flipped back off at Casual-GS-FG, inherited by the game.
+        assert_eq!(
+            row("Gamescope", "immediate_flips"),
+            ["OFF", "OFF", "OFF", "ON", "OFF", "OFF"]
+        );
+        assert_eq!(
+            row("Gamescope", "adaptive_sync"),
+            ["OFF", "OFF", "OFF", "ON", "OFF", "OFF"]
+        );
+        // A selection with no value in any layer below reads OFF, not "".
+        assert_eq!(row("LSFG-VK", "multiplier"), ["OFF", "OFF", "OFF", "OFF", "2", "4"]);
+        // The global layer reaches all the way to the right.
+        assert_eq!(row("Misc", "kbd_layout"), ["de", "de", "de", "de", "de", "de"]);
+        // `clear_ld_preload` starts at the root profile, not at global.
+        assert_eq!(row("Misc", "clear_ld_preload"), ["OFF", "ON", "ON", "ON", "ON", "ON"]);
+        // AMD.sam: on from Casual, then explicitly *disabled* (`null`) by the game.
+        assert_eq!(row("AMD", "sam"), ["OFF", "OFF", "ON", "ON", "ON", "OFF"]);
+        // Carried, never overridden.
+        assert_eq!(
+            row("Gamescope", "scaler"),
+            ["OFF", "OFF", "OFF", "stretch", "stretch", "stretch"]
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `own` must be the layer's *own* storage, not its effective state —
+    /// otherwise every cell right of the layer that set a value would also get
+    /// the bold "set here" highlight, and the preview would stop telling the user
+    /// which layer to go to in order to change it.
+    #[test]
+    fn inheritance_stages_own_marks_only_values_set_at_that_layer() {
+        let (app, specs, base) = inheritance_app("own");
+        let stages = app.inheritance_stages(&specs);
+        let (global, default, casual, casual_gs, fg, game) =
+            (&stages[0], &stages[1], &stages[2], &stages[3], &stages[4], &stages[5]);
+
+        assert!(inh_own_has(global, "Misc", "kbd_layout"));
+        assert!(!inh_own_has(global, "Misc", "clear_ld_preload"));
+        assert!(inh_own_has(default, "Misc", "clear_ld_preload"));
+
+        assert!(inh_own_has(casual, "AMD", "sam"), "Casual is where AMD.sam is set");
+        assert!(
+            !inh_own_has(casual, "Gamescope", "scaler"),
+            "Casual does not set scaler — a higher layer setting it must not light \
+             Casual's cell up"
+        );
+        assert!(inh_own_has(casual_gs, "Gamescope", "scaler"));
+        assert!(
+            !inh_own_has(casual_gs, "AMD", "sam"),
+            "Casual-GS only inherits AMD.sam from Casual"
+        );
+        assert!(inh_own_has(fg, "LSFG-VK", "multiplier"));
+
+        // A `null` (explicitly disabled) override still counts as "set here":
+        // the game layer is where the user turned it off.
+        assert!(inh_own_has(game, "AMD", "sam"), "null is a stored value, not an absence");
+        assert_eq!(
+            game.own["Ritze"]["AMD"]["sam"],
+            serde_json::Value::Null,
+            "and it is stored as null, not as false"
+        );
+        assert!(inh_own_has(game, "LSFG-VK", "multiplier"));
+        assert!(!inh_own_has(game, "Gamescope", "scaler"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// On a Profile screen there is no game in play, so the edited profile is the
+    /// top layer and the game column must be absent — showing the ambient game's
+    /// overrides there would claim they apply to the profile.
+    #[test]
+    fn inheritance_stages_profile_screen_has_no_game_column_and_edited_profile_on_top() {
+        let (mut app, specs, base) = inheritance_app("profile-screen");
+        let casual_gs = app.paths.load_preset("Casual-GS").unwrap().unwrap();
+        app.nav_sel = NavSel::Profile("Casual-GS".to_string());
+        app.editing_preset_buf = Some(casual_gs);
+
+        let stages = app.inheritance_stages(&specs);
+        let labels: Vec<&str> = stages.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(labels, ["Global Profile", "Default", "Casual", "Casual-GS"]);
+        assert_eq!(stages[3].color, profile_depth_color(0), "edited profile is depth 0");
+        assert_eq!(stages[0].color, COL_GLOBAL);
+        // Casual-GS-FG sits *above* Casual-GS, so its values must not appear.
+        assert_eq!(inh_cell(&stages[3], &specs, "Gamescope", "immediate_flips"), "ON");
+        assert_eq!(inh_cell(&stages[3], &specs, "LSFG-VK", "multiplier"), "OFF");
+        // …and neither may the ambient game's LSFG-VK override.
+        assert!(
+            stages.iter().all(|s| inh_cell(s, &specs, "LSFG-VK", "multiplier") != "4"),
+            "the ambient game's override leaked into a Profile-screen preview"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The preview's rightmost column is a claim: "this is what will actually
+    /// launch". If it drifts from the launch preview's own assembly the whole
+    /// feature is misinformation, so pin them to the same string.
+    #[test]
+    fn inheritance_stages_final_matches_launch_preview() {
+        let (app, specs, base) = inheritance_app("final");
+        let stages = app.inheritance_stages(&specs);
+
+        let expected =
+            context::assemble_launch(&specs, &app.resolve_specs_for_game(&specs), &app.game_command)
+                .map(|lc| lc.to_string())
+                .unwrap_or_else(|e| format!("<error: {e}>"));
+
+        assert_eq!(stages.last().unwrap().command, expected);
+        assert!(
+            expected.contains("XKB_DEFAULT_LAYOUT=de"),
+            "premise: the fixture assembles a non-empty command, got {expected:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The preview has to show what the editor currently shows, not what is on
+    /// disk: while a profile is being edited its column must come from
+    /// `editing_preset_buf`, exactly as `resolve_specs_for_game` does it.
+    #[test]
+    fn inheritance_stages_use_unsaved_profile_edit_buffer() {
+        let (mut app, specs, base) = inheritance_app("dirty-buf");
+        // Same name as the applied profile → it *is* the live edit of it.
+        let mut buf = app.preset.clone().unwrap();
+        buf.set_value("Ritze", "Gamescope", "scaler", json!("fit"));
+        buf.set_value("Ritze", "LSFG-VK", "multiplier", json!("3"));
+        app.editing_preset_buf = Some(buf);
+
+        let stages = app.inheritance_stages(&specs);
+        assert_eq!(stages[4].label, "Casual-GS-FG");
+        assert_eq!(
+            inh_cell(&stages[4], &specs, "Gamescope", "scaler"),
+            "fit",
+            "the unsaved edit must win over the Casual-GS value it shadows"
+        );
+        assert_eq!(inh_cell(&stages[4], &specs, "LSFG-VK", "multiplier"), "3");
+        // Layers below are unaffected, and the game still overrides on top.
+        assert_eq!(inh_cell(&stages[3], &specs, "Gamescope", "scaler"), "stretch");
+        assert_eq!(inh_cell(&stages[5], &specs, "LSFG-VK", "multiplier"), "4");
+        assert_eq!(inh_cell(&stages[5], &specs, "Gamescope", "scaler"), "fit");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Every shape `display_resolved` has to flatten into one narrow cell.
+    ///
+    /// Driven through a real `resolve::resolve` rather than hand-built
+    /// `ResolvedField`s so the `enabled`/`raw` pairing under test is the one
+    /// resolution actually produces — notably: an unset selection is
+    /// `raw: None, enabled: false`, which renders "OFF", *not* the empty string
+    /// the `None` arm suggests when read in isolation.
+    #[test]
+    fn display_resolved_formats() {
+        let spec: Extension = serde_json::from_value(json!({
+            "Extension": { "Author": "Ritze", "Name": "Fmt", "Version": "1.0" },
+            "UI": { "General": [
+                { "Type": "toggle", "Variable": "on", "Default": true },
+                { "Type": "toggle", "Variable": "off", "Default": false },
+                { "Type": "selection", "Variable": "unset", "Options": ["a", "b"] },
+                { "Type": "selection", "Variable": "picked", "Options": ["a", "b"] },
+                { "Type": "string", "Variable": "text" },
+                { "Type": "integer", "Variable": "num", "Options": {"min": 0, "max": 10} },
+                { "Type": "multi_string", "Variable": "list" },
+                { "Type": "multi_string", "Variable": "empty_list" }
+            ]}
+        }))
+        .unwrap();
+        let mut g = GameConfig::new("42", "G");
+        g.set_value("Ritze", "Fmt", "picked", json!("b"));
+        g.set_value("Ritze", "Fmt", "text", json!("hello world"));
+        g.set_value("Ritze", "Fmt", "num", json!(7));
+        g.set_value("Ritze", "Fmt", "list", json!(["a", "b", "c"]));
+        g.set_value("Ritze", "Fmt", "empty_list", json!([]));
+
+        let specs = [spec.clone()];
+        let res = resolve::resolve(&specs, Some(&g), None, None);
+        let f = &res.exts[&spec.id()].fields;
+        let d = |v: &str| display_resolved(&f[v]);
+
+        assert_eq!(d("on"), "ON");
+        assert_eq!(d("off"), "OFF");
+        assert_eq!(d("unset"), "OFF", "no value anywhere → not enabled → OFF");
+        assert_eq!(d("picked"), "b");
+        assert_eq!(d("text"), "hello world");
+        assert_eq!(d("num"), "7", "numbers print bare, not quoted");
+        assert_eq!(d("list"), "a, b, c");
+        assert_eq!(d("empty_list"), "OFF", "an empty list is not enabled");
+    }
+
+    /// A parent cycle is user-creatable (the guard lives in the editor, not on
+    /// load) and the preview walks the chain itself, so it must terminate: the
+    /// walk in `collect_parent_presets` stops on the first repeated node.
+    ///
+    /// Asserts termination, a bounded column count, and no panic — the exact
+    /// *shape* of the degenerate chain is not a contract worth pinning.
+    #[test]
+    fn inheritance_stages_survive_parent_cycle() {
+        let (mut app, specs, base) = inheritance_app("cycle");
+        let a = inh_preset("A", Some("B"), &[("AMD", "enabled", json!(true))]);
+        let b = inh_preset("B", Some("A"), &[("AMD", "clear", json!(true))]);
+        app.paths.save_preset(&a).unwrap();
+        app.paths.save_preset(&b).unwrap();
+        app.game_config.config.modules.preset = Some("A".to_string());
+        app.preset = Some(a);
+        app.editing_preset_buf = None;
+
+        let stages = app.inheritance_stages(&specs);
+
+        assert!(stages.len() >= 3, "global + the chain walk + the game: {}", stages.len());
+        // The walk yields ["Global Profile", "A", "B", "A", <game>] — the direct
+        // profile shows up twice, since `collect_parent_presets` only stops after
+        // it revisits a node. Cosmetic, cycle-only, and not asserted here.
+        assert!(stages.len() < 16, "a cycle must not blow the column count up");
+        assert_eq!(stages[0].label, "Global Profile");
+        assert_eq!(stages.last().unwrap().label, "Test Game");
+        // Whatever the walk yields, both cycle members' values are in effect by
+        // the last column.
+        assert_eq!(inh_cell(stages.last().unwrap(), &specs, "AMD", "enabled"), "ON");
+        assert_eq!(inh_cell(stages.last().unwrap(), &specs, "AMD", "clear"), "ON");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
