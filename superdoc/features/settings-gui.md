@@ -1901,33 +1901,81 @@ does with the resolved fields.
 The footer's **"Launch command preview"** header is itself a link (`egui::Link` over
 `theme::header_label` — stays `FAINT`, underlines on hover). Clicking it opens the
 inheritance preview as an in-window **modal** (same backdrop + centred `egui::Window`
-pattern as the confirm dialog; Close or Esc dismisses it). The modal's **Pop Out**
-button moves it into its own OS window (`ctx.show_viewport_immediate`, id
-`inheritance_preview`); closing that window closes the preview. State:
-`GuiApp::inheritance_preview` (`InheritancePreview::{Closed, Modal, Window}`).
+pattern as the confirm dialog; the backdrop swallows clicks; Close or Esc dismisses it).
+The modal's **Pop Out** button moves it into its own OS window
+(`ctx.show_viewport_immediate`, id `inheritance_preview`), which carries the same
+right-aligned toolbar with **Pop In** (back to the modal) and **Close**; closing the OS
+window also closes the preview. State: `GuiApp::inheritance_preview`
+(`InheritancePreview::{Closed, Modal, Window}`). Sizing is content-driven
+(`preview_content_size`): the modal clamps to content up to 85% of the window; the
+pop-out's initial size comes from the column count (label column + 150px per layer,
+clamped). Each fresh open (Closed → Modal) bumps `GuiApp::inheritance_open_seq`, which
+salts the scroll-area ids, so the table always opens at the top; Pop Out / Pop In keep
+the counter.
 
 What it shows (`GuiApp::inheritance_stages` → `inheritance_preview_body`):
 
 - **Columns = layers, lowest priority on the left:** Global Profile → profile chain
   (root … direct profile) → game. On a Profile screen the edited profile is the top
   layer and there is no game column — the same layers the launch preview resolves
-  through. Scope colours: `COL_GLOBAL`, `profile_depth_color(depth)` per chain link
-  (same depth colours as the module tree), `COL_GAME`.
-- **Rows = every field any layer sets**, grouped by module. Each cell is the field's
-  *effective* value after that layer is stacked on everything below it; cells the
-  layer sets itself are drawn in its colour, bold. A value stored behind a closed
-  `Requires` gate is `FAINT`.
-- **Launch command per layer** below the grid (`assemble_launch` per stage).
+  through. Colours: `COL_GLOBAL`, **every profile plain `COL_PROFILE`**, `COL_GAME`.
+  *Why no depth colours* (user request, 2026-09-29: "dont use the colored inheritance
+  style. Just keep the profiles green"): left-to-right position already encodes depth;
+  `profile_depth_color` stays in the module tree only.
+- **A real table** (user, 2026-09-29: "it's basically floating cells, since there are no
+  separating lines… they would need some kind of spacing in between the columns"):
+  hand-laid in `inheritance_preview_body` — fixed column widths, `BORDER` hairlines
+  between every row and column, an 8px-rounded `FIELD` frame around it, 10px cell
+  padding (`INH_PAD`). The header row (`PANEL2`) sits outside the body's vertical
+  `ScrollArea`, so it stays **pinned**. Columns are sized to fit the available width
+  (never below `INH_COL_MIN`), so there is **no horizontal scroll** and header/body
+  cannot drift apart; a value too long for its cell is clipped and shown in full on
+  hover. Module names are full-width `PANEL` group-header rows (`theme::section_label`).
+  *Why hand-laid:* `egui::Grid` has no borders, pinned header or per-cell interaction
+  (and `Ui::add_space` asserts inside one); `egui_extras` is not a dependency.
+- **Rows = every field some layer stores a value for** (`inheritance_rows`), grouped by
+  module. Each cell is the field's *effective* value after that layer is stacked on
+  everything below it. *Why not "only fields that change somewhere":* a stored value
+  equal to the one it inherits changes nothing, but hiding its row would hide a setting
+  the user really has on disk — it shows, unhighlighted.
+- **Highlight = changed from the column to its left** (`inheritance_row_cells`): scope
+  colour text on a `tint(scope, 24)` cell fill. The first column (Global Profile) is
+  diffed against the extension defaults (`GuiApp::inheritance_base`, i.e.
+  `resolve(specs, None, None, None)`). Unchanged cells are `TEXT`. A value behind a
+  closed `Requires` gate at that stage is `FAINT` — or, if it also changed there, the
+  change fill with the scope colour at reduced alpha, so "gated" never reads as "turned
+  off". *Why a diff, not "set at this layer"* (user, 2026-09-29): "This view is to tell
+  the user not what is being inherited, but rather what changes on each step of his
+  inheritance chain." A layer re-stating its inherited value is no step; a `null` that
+  flips ON→OFF is.
+- **Click to navigate.** Every value cell is clickable (pointer cursor, hover fill).
+  The body returns a `PreviewNav { target: NavTarget, field }` instead of mutating the
+  app (it renders inside the viewport closure); `GuiApp::apply_preview_nav` applies it
+  through `GuiApp::apply_nav_target` — the **same** function the nav tree's
+  Global/Profile/Game clicks now call — then stores `GuiApp::pending_field_focus =
+  (ext id, variable)`. Next frame, after `cur_specs` is rebuilt for the new screen,
+  `GuiApp::ui` points `selected_ext` at that module; `render_module_settings_body`
+  scrolls the field's row to the centre (`ui.scroll_to_rect`) and clears the target (or
+  clears it anyway once the module has rendered, if the field is gated off; a module not
+  on the new screen drops it immediately). A **modal auto-closes** on click — it would
+  cover the page it just opened; a **popped-out window stays open** (user request) and
+  re-resolves from the new page. Clicking a **column header** switches to that layer's
+  page without a field. The **field-name column is not a nav target**: it spans every
+  layer, so there is no single page it would mean. While any draft has unsaved edits the click is ignored
+  (and the modal stays open), mirroring the nav tree's `nav_live` lock — navigating
+  away drops the draft.
+- **Launch command per layer** below the table (`assemble_launch` per stage), labelled
+  in the column's colour, in its own scroll area.
 
 *Why it exists:* the module-tree badges only say *that* a layer contributes, not
 *what* survives — an overridden profile value (see "Shadowed layers get no badge"
 above) was confusing to reason about. The preview makes the stacking explicit (user
-request, 2026-09-29, from a drawio mockup: one column per layer, set-here values
-highlighted). *Why re-resolve per stage instead of reading provenance:* provenance only
-names the layer that *won*; the preview has to show intermediate states, including
-values a later layer overrides. *Why only behind the header link for now:* the user
-asked for it to stay low-key until the feature settles. Config mode only — IDE mode's
-launch band resolves a scratch layer, not a real inheritance chain.
+request, 2026-09-29, from a drawio mockup: one column per layer). *Why re-resolve per
+stage instead of reading provenance:* provenance only names the layer that *won*; the
+preview has to show intermediate states, including values a later layer overrides.
+*Why only behind the header link for now:* the user asked for it to stay low-key until
+the feature settles. Config mode only — IDE mode's launch band resolves a scratch
+layer, not a real inheritance chain.
 
 ## IDE-mode preview column (`GuiApp::render_ide_preview_panel`)
 
