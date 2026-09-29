@@ -27,6 +27,10 @@ use crate::icon_center::IconCenterCache;
 
 use crate::theme::{self, COL_GAME, COL_GLOBAL, COL_PROFILE, ICON_DIRTY, ICON_EDIT, ICON_INHERIT};
 
+/// Info glyph (Font Awesome "info-circle", same icon font as the other
+/// `theme::ICON_*` glyphs) leading a short explanatory note.
+const ICON_INFO: &str = "\u{f05a}";
+
 /// Width of the app's left column, in points.
 ///
 /// Named because three places have to agree on it: the `SidePanel::left("nav")`
@@ -702,6 +706,11 @@ pub struct GuiApp {
     /// [`GuiApp::render_module_settings_body`] once `cur_specs` has caught up with
     /// the new screen and the field actually renders.
     pending_field_focus: Option<(String, String)>,
+    /// `(extension id, text)` — a one-line note above the module settings saying
+    /// why a preview click landed where it did (the clicked field is hidden by a
+    /// `Requires`). Belongs to that one navigation: cleared by the next
+    /// [`GuiApp::apply_nav_target`] and whenever another module is selected.
+    focus_note: Option<(String, String)>,
     /// "Also purge stored config" checkbox state for the pending Delete-module
     /// confirmation.
     delete_module_purge: bool,
@@ -1452,6 +1461,7 @@ impl GuiApp {
             inheritance_preview: InheritancePreview::Closed,
             inheritance_open_seq: 0,
             pending_field_focus: None,
+            focus_note: None,
             delete_module_purge: false,
             carryover_report: None,
             icon_cache: IconCenterCache::new(),
@@ -3267,6 +3277,12 @@ impl GuiApp {
                 // Not applicable on this screen (module filtered out) — drop it
                 // rather than leave a target that can never be consumed.
                 None => self.pending_field_focus = None,
+            }
+        }
+        // The note belongs to one module; leaving it (or the screen) ends it.
+        if let Some((ext_id, _)) = &self.focus_note {
+            if self.cur_specs.get(self.selected_ext).map(|s| s.id()).as_ref() != Some(ext_id) {
+                self.focus_note = None;
             }
         }
 
@@ -7301,12 +7317,52 @@ impl GuiApp {
         show_legend: bool,
     ) -> bool {
         let mut changed = false;
-        egui::ScrollArea::vertical()
+        // A preview click on a field this page hides behind a `Requires`: retarget
+        // the reveal to the field that gates it (see `gating_field`), or, when
+        // nothing shown gates it either, to the top of the page. Either way say so.
+        let mut to_top = false;
+        if !read_only {
+            let hidden = self
+                .pending_field_focus
+                .as_ref()
+                .filter(|(e, _)| *e == spec.id())
+                .and_then(|(_, v)| spec.fields().find(|f| f.variable == *v))
+                .filter(|f| !field_visible(f, ext_res));
+            if let Some(f) = hidden {
+                let name = |f: &UiField| f.name.clone().unwrap_or_else(|| f.variable.clone());
+                let gate = gating_field(spec, ext_res, &f.variable)
+                    .and_then(|g| spec.fields().find(|x| x.variable == g));
+                let text = match gate {
+                    Some(g) => format!("{} is hidden until {} is enabled.", name(f), name(g)),
+                    None => format!("{} is hidden here \u{2014} its Requires condition isn't met.", name(f)),
+                };
+                self.focus_note = Some((spec.id(), text));
+                match gate {
+                    Some(g) => self.pending_field_focus = Some((spec.id(), g.variable.clone())),
+                    None => {
+                        self.pending_field_focus = None;
+                        to_top = true;
+                    }
+                }
+            }
+        }
+        if let Some((_, text)) = self.focus_note.as_ref().filter(|(e, _)| *e == spec.id() && !read_only) {
+            ui.label(
+                egui::RichText::new(format!("{ICON_INFO}{}{text}", icon_sep(self.general_config.mono_ui)))
+                    .color(theme::DIM)
+                    .small(),
+            );
+            ui.add_space(4.0);
+        }
+        let mut area = egui::ScrollArea::vertical()
             // Fill the panel (don't shrink to content) so the scrollbar sits at
             // the far right while the content stays capped/left-aligned.
             .auto_shrink([false, false])
-            .scroll_source(scroll_source(self.general_config.touch_mode))
-            .show(ui, |ui| {
+            .scroll_source(scroll_source(self.general_config.touch_mode));
+        if to_top {
+            area = area.vertical_scroll_offset(0.0);
+        }
+        area.show(ui, |ui| {
             ui.vertical(|ui| {
                 let max_w = body_max_width(ui, full_width);
                 ui.set_max_width(max_w);
@@ -9746,6 +9802,7 @@ impl GuiApp {
     /// `NavAction` arms), so unsaved-edit handling, `editing_preset_buf` loading
     /// and the once-per-frame `cur_specs` rebuild all behave identically.
     fn apply_nav_target(&mut self, target: &NavTarget) {
+        self.focus_note = None;
         match target {
             NavTarget::Global => {
                 self.nav_sel = NavSel::GlobalSettings;
@@ -9779,7 +9836,14 @@ impl GuiApp {
         let base = self.inheritance_base(specs);
         let mono = self.general_config.mono_ui;
         let seq = self.inheritance_open_seq;
-        let want = preview_content_size(specs, &stages);
+        let mut want = preview_content_size(specs, &stages);
+        // The body measures its own natural height each frame (see
+        // `inheritance_preview_body`); prefer that to the estimate once it exists.
+        let measured: Option<f32> =
+            ctx.data(|d| d.get_temp(egui::Id::new(("inh_natural_h", seq))));
+        if let Some(h) = measured {
+            want.y = INH_TOOLBAR_H + h;
+        }
         let mut next = self.inheritance_preview;
         let mut nav: Option<PreviewNav> = None;
 
@@ -9957,12 +10021,87 @@ fn inheritance_rows<'a>(
         .collect()
 }
 
+/// Row label and hover detail for each field of one module's table rows.
+///
+/// A field's `Name` is only unique within a UI *section*, not within a module (the
+/// Scripts module has a "Command" in both its Post-Launch and Exit sections), so
+/// two rows can read identically. Only when a name repeats among the rows shown
+/// does the label gain its section as a prefix ("Post-Launch · Command") — the
+/// common case stays uncluttered. The detail (section and variable) is always
+/// offered on hover.
+fn inh_field_labels(spec: &Extension, fields: &[&UiField]) -> Vec<(String, String)> {
+    let name = |f: &UiField| f.name.clone().unwrap_or_else(|| f.variable.clone());
+    let section = |f: &UiField| {
+        spec.ui
+            .iter()
+            .find(|(_, fs)| fs.iter().any(|x| x.variable == f.variable))
+            .map(|(s, _)| s.clone())
+            .unwrap_or_default()
+    };
+    fields
+        .iter()
+        .map(|f| {
+            let n = name(f);
+            let dup = fields.iter().filter(|o| name(o) == n).count() > 1;
+            let sec = section(f);
+            let label = if dup && !sec.is_empty() { format!("{sec} \u{b7} {n}") } else { n };
+            (label, format!("{sec} \u{b7} {}", f.variable))
+        })
+        .collect()
+}
+
+/// For a field hidden by its `Requires`, the local field to reveal instead: the
+/// first variable its gate references whose own field *is* shown, looking through
+/// gates that are themselves hidden (a couple of levels, cycle-guarded).
+///
+/// Only same-module variables count: `global:`-prefixed references are the
+/// build-phase scope, not fields on this page, and names that are no UI field
+/// have nothing to scroll to.
+///
+/// *Why:* most Gamescope / Hypr-Monctl values in real profiles sit behind an
+/// `enabled` toggle, so jumping straight to them landed on a page that did not
+/// show the field at all. The gate is the nearest thing the user can see.
+fn gating_field(
+    spec: &Extension,
+    ext_res: Option<&resolve::ExtResolution>,
+    var: &str,
+) -> Option<String> {
+    fn go(
+        spec: &Extension,
+        ext_res: Option<&resolve::ExtResolution>,
+        var: &str,
+        depth: u8,
+        seen: &mut Vec<String>,
+    ) -> Option<String> {
+        if depth == 0 || seen.iter().any(|s| s == var) {
+            return None;
+        }
+        seen.push(var.to_string());
+        let field = spec.fields().find(|f| f.variable == var)?;
+        let expr = condition::parse(field.requires.as_deref()?).ok().flatten()?;
+        let mut refs: Vec<String> = Vec::new();
+        for r in expr.referenced_vars() {
+            if !r.starts_with("global:") && !refs.contains(&r) && spec.fields().any(|f| f.variable == r) {
+                refs.push(r);
+            }
+        }
+        let shown = |r: &str| {
+            spec.fields().find(|f| f.variable == r).is_some_and(|f| field_visible(f, ext_res))
+        };
+        if let Some(r) = refs.iter().find(|r| shown(r)) {
+            return Some(r.clone());
+        }
+        refs.iter().find_map(|r| go(spec, ext_res, r, depth - 1, seen))
+    }
+    go(spec, ext_res, var, 3, &mut Vec::new())
+}
+
 /// One field's value in one resolution, as the table prints it.
-fn resolved_cell(res: &Resolution, ext_id: &str, var: &str) -> String {
+fn resolved_cell(res: &Resolution, ext_id: &str, var: &str, toggle: bool) -> String {
     res.exts
         .get(ext_id)
         .and_then(|e| e.fields.get(var))
-        .map(display_resolved)
+        .map(|rf| display_resolved(rf, toggle))
         .unwrap_or_default()
 }
 
@@ -9982,13 +10121,14 @@ fn inheritance_row_cells(
     stages: &[InheritanceStage],
     base: &Resolution,
     ext_id: &str,
-    var: &str,
+    field: &UiField,
 ) -> Vec<(String, bool)> {
-    let mut prev = resolved_cell(base, ext_id, var);
+    let (var, toggle) = (field.variable.as_str(), field.field_type == FieldType::Toggle);
+    let mut prev = resolved_cell(base, ext_id, var, toggle);
     stages
         .iter()
         .map(|st| {
-            let cur = resolved_cell(&st.res, ext_id, var);
+            let cur = resolved_cell(&st.res, ext_id, var, toggle);
             let changed = cur != prev;
             prev.clone_from(&cur);
             (cur, changed)
@@ -9996,9 +10136,13 @@ fn inheritance_row_cells(
         .collect()
 }
 
+/// Height of the modal's Close / Pop Out toolbar row plus the gap under it.
+const INH_TOOLBAR_H: f32 = 30.0;
+
 /// Roughly how big the preview wants to be, used to size the modal and the
-/// popped-out window. Only an estimate: the launch-command boxes wrap, so their
-/// height is guessed at one-and-a-bit lines each.
+/// popped-out window on the first frame. Only an estimate: the explanation and the
+/// launch-command boxes wrap, so their height is guessed. From the second frame on
+/// `render_inheritance_preview` uses the height the body actually measured.
 fn preview_content_size(specs: &[Extension], stages: &[InheritanceStage]) -> egui::Vec2 {
     let rows = inheritance_rows(specs, stages);
     let n_fields: usize = rows.iter().map(|(_, f)| f.len()).sum();
@@ -10006,7 +10150,7 @@ fn preview_content_size(specs: &[Extension], stages: &[InheritanceStage]) -> egu
         (INH_ROW_H + 10.0) + rows.len() as f32 * INH_GROUP_H + n_fields as f32 * INH_ROW_H;
     egui::vec2(
         INH_LABEL_W + INH_COL_W * stages.len().max(1) as f32,
-        44.0 + table_h + 30.0 + stages.len() as f32 * 82.0,
+        INH_TOOLBAR_H + 40.0 + table_h + 30.0 + stages.len() as f32 * 82.0,
     )
 }
 
@@ -10038,6 +10182,14 @@ fn inh_cell_text(
     over
 }
 
+/// Floor for the label column when the table has to give up width before it
+/// resorts to scrolling sideways.
+const INH_LABEL_MIN: f32 = 130.0;
+/// Room left under the table body, inside the border. The scroll viewport has
+/// square corners and the frame rounded ones; without this gap the last row's
+/// fills poke out past the bottom corners' arcs.
+const INH_BOT_PAD: f32 = 4.0;
+
 /// Columns = layers (lowest priority left), rows = every field any layer sets.
 /// A cell shows the field's effective value after that layer, highlighted when it
 /// differs from the column to its left. Below: the launch command per layer.
@@ -10045,6 +10197,13 @@ fn inh_cell_text(
 /// Returns the page/module/field a click asked for, rather than mutating the app:
 /// this renders inside an immediate-viewport closure, where `&mut GuiApp` is not
 /// available. The caller applies it.
+///
+/// Also records, in egui temp memory under `("inh_natural_h", seq)`, how tall this
+/// body would like to be (everything below the toolbar, table uncapped, command
+/// section unscrolled). [`GuiApp::render_inheritance_preview`] sizes the modal
+/// from it next frame — *why measured and not estimated:* the explanation line and
+/// the command boxes wrap, so their height depends on the width they end up at,
+/// and a fixed guess clipped the last command box in narrow modals.
 fn inheritance_preview_body(
     ui: &mut egui::Ui,
     specs: &[Extension],
@@ -10054,6 +10213,7 @@ fn inheritance_preview_body(
     seq: u64,
 ) -> Option<PreviewNav> {
     let mut nav: Option<PreviewNav> = None;
+    let y0 = ui.cursor().min.y;
     ui.label(
         egui::RichText::new(
             "Each column is the result after that layer is applied, lowest priority on \
@@ -10067,18 +10227,37 @@ fn inheritance_preview_body(
 
     let rows = inheritance_rows(specs, stages);
     let n = stages.len().max(1);
-    // Columns are sized to fit the available width, so the table never scrolls
-    // sideways and the pinned header can never drift out of alignment with the
-    // body. Too-long values are clipped and offered as a hover tooltip instead.
-    let avail_w = ui.available_width();
-    let label_w = INH_LABEL_W.min((avail_w * 0.34).max(96.0));
-    let col_w = ((avail_w - label_w - 2.0) / n as f32).clamp(INH_COL_MIN, 320.0);
-    let table_w = label_w + col_w * n as f32;
+    // Solid scrollbars: they take their own gutter instead of floating over the
+    // last column and the frame's border line. The gutter is budgeted up front
+    // (the content height is known) so a vertical bar never makes the table
+    // overflow sideways by its own width.
+    let bar_w = egui::style::ScrollStyle::solid().allocated_width();
+    let avail_w = ui.available_width() - 2.0; // the frame's stroke
     let head_h = INH_ROW_H + 10.0;
     let content_h: f32 = rows.len() as f32 * INH_GROUP_H
         + rows.iter().map(|(_, f)| f.len()).sum::<usize>() as f32 * INH_ROW_H;
     // The table takes what it needs, but leaves room for the command section.
-    let body_h = content_h.min((ui.available_height() - head_h - 150.0).max(96.0));
+    let max_body_h = (ui.available_height() - head_h - 150.0 - INH_BOT_PAD).max(96.0);
+    let needs_v = content_h > max_body_h;
+    let cols_avail = avail_w - if needs_v { bar_w } else { 0.0 };
+    // Narrow: shrink the label column first (down to a floor), then the value
+    // columns (down to `INH_COL_MIN`), and only then scroll sideways. Too-long
+    // values are clipped and offered as a hover tooltip.
+    let label_w = (cols_avail - INH_COL_MIN * n as f32).clamp(INH_LABEL_MIN, INH_LABEL_W);
+    // Floored so float rounding can never make the table a hair wider than its
+    // viewport and conjure a horizontal scrollbar out of nothing.
+    let col_w = ((cols_avail - label_w) / n as f32).floor().clamp(INH_COL_MIN, 320.0);
+    let table_w = label_w + col_w * n as f32;
+    let needs_h = table_w > cols_avail + 0.5;
+    let view_w = if needs_h {
+        avail_w
+    } else {
+        table_w + if needs_v { bar_w } else { 0.0 }
+    };
+    let bar_h = if needs_h { bar_w } else { 0.0 };
+    let body_h = content_h.min(max_body_h) + bar_h;
+    let table_nat_h = if rows.is_empty() { 0.0 } else { 2.0 + head_h + content_h + bar_h + INH_BOT_PAD };
+    let mut table_h = 0.0;
     let line = egui::Stroke::new(1.0, theme::BORDER);
 
     if rows.is_empty() {
@@ -10086,59 +10265,35 @@ fn inheritance_preview_body(
             egui::RichText::new("No layer sets any value for these modules.").color(theme::DIM),
         );
     } else {
-        egui::Frame::NONE
+        let frame = egui::Frame::NONE
             .fill(theme::FIELD)
             .stroke(line)
             .corner_radius(egui::CornerRadius::same(8))
             .show(ui, |ui| {
-                ui.set_width(table_w);
+                ui.set_width(view_w);
                 ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+                ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
 
-                // ---- Pinned header row (outside the scroll area) -------------
+                // The header is a pinned band above the body, but it is *painted
+                // after* the body: the body is one two-axis scroll area, and the
+                // header needs the horizontal offset that area used this frame to
+                // stay aligned with its columns. Reserve its rect now, fill it in
+                // below.
                 let (hr, _) =
-                    ui.allocate_exact_size(egui::vec2(table_w, head_h), egui::Sense::hover());
-                let p = ui.painter().clone();
-                p.rect_filled(hr, egui::CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 }, theme::PANEL2);
-                inh_cell_text(
-                    ui,
-                    &p,
-                    egui::Rect::from_min_size(hr.min, egui::vec2(label_w, hr.height())),
-                    "SETTING",
-                    theme::FAINT,
-                    egui::TextStyle::Small,
-                );
-                for (i, st) in stages.iter().enumerate() {
-                    let cell = egui::Rect::from_min_size(
-                        egui::pos2(hr.left() + label_w + col_w * i as f32, hr.top()),
-                        egui::vec2(col_w, hr.height()),
-                    );
-                    let resp =
-                        ui.interact(cell, ui.id().with(("inh_head", i)), egui::Sense::click());
-                    if resp.hovered() {
-                        p.rect_filled(cell, 0.0, theme::HOV);
-                    }
-                    p.vline(cell.left(), hr.y_range(), line);
-                    let over =
-                        inh_cell_text(ui, &p, cell, &st.label, st.color, egui::TextStyle::Body);
-                    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-                    let resp = if over { resp.on_hover_text(&st.label) } else { resp };
-                    if resp.clicked() {
-                        nav = Some(PreviewNav { target: st.target.clone(), field: None });
-                    }
-                }
-                p.hline(hr.x_range(), hr.bottom(), line);
+                    ui.allocate_exact_size(egui::vec2(view_w, head_h), egui::Sense::hover());
 
                 // ---- Scrolling body -----------------------------------------
-                egui::ScrollArea::vertical()
+                let x_off = egui::ScrollArea::both()
                     // Salted with the open counter so every fresh open starts at
                     // the top instead of restoring the last session's offset.
                     .id_salt(("inheritance_table", seq))
                     .max_height(body_h)
                     .auto_shrink([false, true])
-                    .show(ui, |ui| {
+                    .show_viewport(ui, |ui, viewport| {
                         ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                         let p = ui.painter().clone();
-                        for (spec, fields) in &rows {
+                        let last_group = rows.len().saturating_sub(1);
+                        for (gi, (spec, fields)) in rows.iter().enumerate() {
                             // Module group header: one shaded band across the
                             // whole table, no column separators through it.
                             let (gr, _) = ui.allocate_exact_size(
@@ -10164,7 +10319,8 @@ fn inheritance_preview_body(
                             p.hline(gr.x_range(), gr.bottom(), line);
 
                             let id = spec.id();
-                            for f in fields {
+                            let labels = inh_field_labels(spec, fields);
+                            for (fi, f) in fields.iter().enumerate() {
                                 let (rr, _) = ui.allocate_exact_size(
                                     egui::vec2(table_w, INH_ROW_H),
                                     egui::Sense::hover(),
@@ -10173,7 +10329,7 @@ fn inheritance_preview_body(
                                     rr.min,
                                     egui::vec2(label_w, rr.height()),
                                 );
-                                let name = f.name.as_deref().unwrap_or(&f.variable);
+                                let (name, detail) = &labels[fi];
                                 let over = inh_cell_text(
                                     ui,
                                     &p,
@@ -10182,19 +10338,21 @@ fn inheritance_preview_body(
                                     theme::DIM,
                                     egui::TextStyle::Body,
                                 );
-                                if over {
-                                    // The field name is deliberately *not* a nav
-                                    // target: it spans every column, so there is
-                                    // no one layer it would open. Hover still
-                                    // spells the full name out.
-                                    ui.interact(
-                                        name_cell,
-                                        ui.id().with(("inh_name", &id, &f.variable)),
-                                        egui::Sense::hover(),
-                                    )
-                                    .on_hover_text(name);
-                                }
-                                let cells = inheritance_row_cells(stages, base, &id, &f.variable);
+                                // The field name is deliberately *not* a nav
+                                // target: it spans every column, so there is no
+                                // one layer it would open. Hover spells out the
+                                // full name, its section and its variable.
+                                ui.interact(
+                                    name_cell,
+                                    ui.id().with(("inh_name", &id, &f.variable)),
+                                    egui::Sense::hover(),
+                                )
+                                .on_hover_text(if over {
+                                    format!("{name}\n{detail}")
+                                } else {
+                                    detail.clone()
+                                });
+                                let cells = inheritance_row_cells(stages, base, &id, f);
                                 for (i, (text, changed)) in cells.iter().enumerate() {
                                     let st = &stages[i];
                                     let cell = egui::Rect::from_min_size(
@@ -10203,28 +10361,29 @@ fn inheritance_preview_body(
                                     );
                                     p.vline(cell.left(), rr.y_range(), line);
                                     // Gated off by `Requires` at this stage: the
-                                    // value is stored but has no effect. Faint —
-                                    // unless it also *changed* here, in which case
-                                    // it keeps the change tint, so "faint" never
-                                    // contradicts "this is the step that changed".
+                                    // value is stored but has no effect, so it is
+                                    // drawn dimmed — clearly quieter than an
+                                    // active cell — while a *changed* one still
+                                    // keeps a whisper of its scope colour and a
+                                    // faint fill, so "dim" never reads as "did not
+                                    // change here".
                                     let gated = !field_visible(f, st.res.exts.get(&id));
-                                    let color = match (*changed, gated) {
-                                        (true, false) => st.color,
-                                        (true, true) => theme::tint(st.color, 170),
-                                        (false, true) => theme::FAINT,
-                                        (false, false) => theme::TEXT,
+                                    let (color, fill) = match (*changed, gated) {
+                                        (true, false) => (st.color, Some(theme::tint(st.color, 24))),
+                                        (true, true) => (
+                                            theme::FAINT.lerp_to_gamma(st.color, 0.4),
+                                            Some(theme::tint(st.color, 12)),
+                                        ),
+                                        (false, true) => (theme::FAINT, None),
+                                        (false, false) => (theme::TEXT, None),
                                     };
                                     let resp = ui.interact(
                                         cell,
                                         ui.id().with(("inh_cell", &id, &f.variable, i)),
                                         egui::Sense::click(),
                                     );
-                                    if *changed {
-                                        p.rect_filled(
-                                            cell.shrink(1.0),
-                                            0.0,
-                                            theme::tint(st.color, 24),
-                                        );
+                                    if let Some(fill) = fill {
+                                        p.rect_filled(cell.shrink(1.0), 0.0, fill);
                                     }
                                     if resp.hovered() {
                                         p.rect_filled(cell, 0.0, theme::HOV);
@@ -10238,8 +10397,23 @@ fn inheritance_preview_body(
                                         egui::TextStyle::Monospace,
                                     );
                                     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-                                    let resp =
-                                        if over { resp.on_hover_text(text) } else { resp };
+                                    let resp = if over || gated {
+                                        resp.on_hover_ui(|ui| {
+                                            if over {
+                                                ui.label(text);
+                                            }
+                                            if gated {
+                                                ui.label(
+                                                    egui::RichText::new(
+                                                        "Hidden by Requires at this layer",
+                                                    )
+                                                    .color(theme::DIM),
+                                                );
+                                            }
+                                        })
+                                    } else {
+                                        resp
+                                    };
                                     if resp.clicked() {
                                         nav = Some(PreviewNav {
                                             target: st.target.clone(),
@@ -10247,48 +10421,120 @@ fn inheritance_preview_body(
                                         });
                                     }
                                 }
-                                p.hline(rr.x_range(), rr.bottom(), line);
+                                // The very last row leaves its bottom edge to the
+                                // frame's border instead of doubling it up.
+                                if !(gi == last_group && fi + 1 == fields.len()) {
+                                    p.hline(rr.x_range(), rr.bottom(), line);
+                                }
                             }
                         }
-                    });
+                        viewport.min.x
+                    })
+                    .inner;
+
+                // ---- Pinned header row ---------------------------------------
+                let p = ui.painter().with_clip_rect(hr.intersect(ui.clip_rect()));
+                p.rect_filled(hr, egui::CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 }, theme::PANEL2);
+                let left = hr.left() - x_off;
+                inh_cell_text(
+                    ui,
+                    &p,
+                    egui::Rect::from_min_size(egui::pos2(left, hr.top()), egui::vec2(label_w, hr.height())),
+                    "SETTING",
+                    theme::FAINT,
+                    egui::TextStyle::Small,
+                );
+                for (i, st) in stages.iter().enumerate() {
+                    let cell = egui::Rect::from_min_size(
+                        egui::pos2(left + label_w + col_w * i as f32, hr.top()),
+                        egui::vec2(col_w, hr.height()),
+                    );
+                    let resp = ui.interact(
+                        cell.intersect(hr),
+                        ui.id().with(("inh_head", i)),
+                        egui::Sense::click(),
+                    );
+                    if resp.hovered() {
+                        p.rect_filled(cell, 0.0, theme::HOV);
+                    }
+                    p.vline(cell.left(), hr.y_range(), line);
+                    let over =
+                        inh_cell_text(ui, &p, cell, &st.label, st.color, egui::TextStyle::Body);
+                    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                    let resp = if over { resp.on_hover_text(&st.label) } else { resp };
+                    if resp.clicked() {
+                        nav = Some(PreviewNav { target: st.target.clone(), field: None });
+                    }
+                }
+                p.hline(hr.x_range(), hr.bottom(), line);
+                ui.allocate_space(egui::vec2(view_w, INH_BOT_PAD));
             });
+        table_h = frame.response.rect.height();
     }
 
     ui.add_space(14.0);
-    egui::ScrollArea::vertical()
-        .id_salt(("inheritance_commands", seq))
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            ui.label(theme::header_label("Launch command per layer"));
-            ui.add_space(4.0);
-            let sep = icon_sep(mono);
-            for st in stages {
-                ui.label(
-                    egui::RichText::new(format!("{ICON_INHERIT}{sep}{}", st.label))
-                        .color(st.color)
-                        .small(),
-                );
-                egui::Frame::NONE
-                    .fill(theme::FIELD)
-                    .stroke(egui::Stroke::new(1.0, theme::BORDER))
-                    .corner_radius(egui::CornerRadius::same(8))
-                    .inner_margin(egui::Margin::symmetric(13, 11))
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.add(egui::Label::new(command_job(&st.command)).wrap());
-                    });
-                ui.add_space(6.0);
-            }
-        });
+    // Measured before the command section takes "everything that is left": how
+    // much the body wants above it, with the table at its natural height.
+    let above_nat = (ui.cursor().min.y - y0) - table_h + table_nat_h;
+    let cmd = ui.scope(|ui| {
+        // Solid bar, so it sits in its own gutter rather than on the boxes' border.
+        ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+        egui::ScrollArea::vertical()
+            .id_salt(("inheritance_commands", seq))
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.label(theme::header_label("Launch command per layer"));
+                ui.add_space(4.0);
+                let sep = icon_sep(mono);
+                for st in stages {
+                    ui.label(
+                        egui::RichText::new(format!("{ICON_INHERIT}{sep}{}", st.label))
+                            .color(st.color)
+                            .small(),
+                    );
+                    egui::Frame::NONE
+                        .fill(theme::FIELD)
+                        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+                        .corner_radius(egui::CornerRadius::same(8))
+                        .inner_margin(egui::Margin::symmetric(13, 11))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.add(egui::Label::new(command_job(&st.command)).wrap());
+                        });
+                    ui.add_space(6.0);
+                }
+            })
+    });
+    let natural = above_nat + cmd.inner.content_size.y;
+    let key = egui::Id::new(("inh_natural_h", seq));
+    let prev: Option<f32> = ui.ctx().data(|d| d.get_temp(key));
+    ui.ctx().data_mut(|d| d.insert_temp(key, natural));
+    if prev.is_none_or(|p| (p - natural).abs() > 0.5) {
+        ui.ctx().request_repaint();
+    }
     nav
 }
 
-/// A resolved field as one short cell string: toggles and disabled values read
-/// ON/OFF, lists join with ", ", everything else is its stored value.
-fn display_resolved(rf: &resolve::ResolvedField) -> String {
+/// Text shown for a non-toggle field that has no value (unset, explicit `null`,
+/// empty list/string) — see [`display_resolved`].
+const INH_EMPTY: &str = "\u{2014}";
+
+/// A resolved field as one short cell string: toggles read ON/OFF, lists join with
+/// ", ", everything else is its stored value.
+///
+/// `toggle` is whether the field is a `Toggle`. *Why it is a parameter:* a
+/// disabled resolution used to print "OFF" for every type, so an unset Scaler or
+/// Command read "OFF" as if it were a switch someone had turned off. Only a real
+/// toggle can be off; a non-toggle with no value is "no value" (an em dash) —
+/// whether it is unset or explicitly `null`, which the preview deliberately does
+/// not tell apart (both mean "nothing set here").
+fn display_resolved(rf: &resolve::ResolvedField, toggle: bool) -> String {
     match &rf.raw {
         Some(serde_json::Value::Bool(b)) => if *b { "ON" } else { "OFF" }.into(),
-        _ if !rf.enabled => "OFF".into(),
+        _ if !rf.enabled => if toggle { "OFF" } else { INH_EMPTY }.into(),
+        // A stored empty string is enabled but says nothing — a blank cell would
+        // read as "not loaded", so it gets the same dash as an unset value.
+        Some(serde_json::Value::String(s)) if s.is_empty() => INH_EMPTY.into(),
         Some(serde_json::Value::String(s)) => s.clone(),
         Some(serde_json::Value::Array(a)) => a
             .iter()
@@ -12348,6 +12594,7 @@ mod tests {
             inheritance_preview: InheritancePreview::Closed,
             inheritance_open_seq: 0,
             pending_field_focus: None,
+            focus_note: None,
             delete_module_purge: false,
             carryover_report: None,
             icon_cache: IconCenterCache::new(),
@@ -16087,7 +16334,8 @@ mod tests {
     /// `display_resolved` of one variable in one stage, by extension *name*.
     fn inh_cell(stage: &InheritanceStage, specs: &[Extension], ext: &str, var: &str) -> String {
         let spec = specs.iter().find(|s| s.meta.name == ext).expect("spec by name");
-        display_resolved(&stage.res.exts[&spec.id()].fields[var])
+        let f = spec.fields().find(|f| f.variable == var).expect("field");
+        display_resolved(&stage.res.exts[&spec.id()].fields[var], f.field_type == FieldType::Toggle)
     }
 
     /// Does `own` (the map that drives the "set here" highlight) record this var?
@@ -16157,8 +16405,9 @@ mod tests {
             row("Gamescope", "adaptive_sync"),
             ["OFF", "OFF", "OFF", "ON", "OFF", "OFF"]
         );
-        // A selection with no value in any layer below reads OFF, not "".
-        assert_eq!(row("LSFG-VK", "multiplier"), ["OFF", "OFF", "OFF", "OFF", "2", "4"]);
+        // A selection with no value in any layer below reads "—" (no value), not
+        // "OFF" (it is not a switch) and not "".
+        assert_eq!(row("LSFG-VK", "multiplier"), ["—", "—", "—", "—", "2", "4"]);
         // The global layer reaches all the way to the right.
         assert_eq!(row("Misc", "kbd_layout"), ["de", "de", "de", "de", "de", "de"]);
         // `clear_ld_preload` starts at the root profile, not at global.
@@ -16168,7 +16417,7 @@ mod tests {
         // Carried, never overridden.
         assert_eq!(
             row("Gamescope", "scaler"),
-            ["OFF", "OFF", "OFF", "stretch", "stretch", "stretch"]
+            ["—", "—", "—", "stretch", "stretch", "stretch"]
         );
 
         let _ = std::fs::remove_dir_all(&base);
@@ -16233,7 +16482,7 @@ mod tests {
         assert_eq!(stages[0].color, COL_GLOBAL);
         // Casual-GS-FG sits *above* Casual-GS, so its values must not appear.
         assert_eq!(inh_cell(&stages[3], &specs, "Gamescope", "immediate_flips"), "ON");
-        assert_eq!(inh_cell(&stages[3], &specs, "LSFG-VK", "multiplier"), "OFF");
+        assert_eq!(inh_cell(&stages[3], &specs, "LSFG-VK", "multiplier"), "—");
         // …and neither may the ambient game's LSFG-VK override.
         assert!(
             stages.iter().all(|s| inh_cell(s, &specs, "LSFG-VK", "multiplier") != "4"),
@@ -16298,8 +16547,9 @@ mod tests {
     /// Driven through a real `resolve::resolve` rather than hand-built
     /// `ResolvedField`s so the `enabled`/`raw` pairing under test is the one
     /// resolution actually produces — notably: an unset selection is
-    /// `raw: None, enabled: false`, which renders "OFF", *not* the empty string
-    /// the `None` arm suggests when read in isolation.
+    /// `raw: None, enabled: false`, which renders "—" (em dash; "OFF" only for
+    /// toggles), *not* the empty string the `None` arm suggests when read in
+    /// isolation.
     #[test]
     fn display_resolved_formats() {
         let spec: Extension = serde_json::from_value(json!({
@@ -16309,6 +16559,8 @@ mod tests {
                 { "Type": "toggle", "Variable": "off", "Default": false },
                 { "Type": "selection", "Variable": "unset", "Options": ["a", "b"] },
                 { "Type": "selection", "Variable": "picked", "Options": ["a", "b"] },
+                { "Type": "selection", "Variable": "nulled", "Options": ["a", "b"] },
+                { "Type": "string", "Variable": "blank" },
                 { "Type": "string", "Variable": "text" },
                 { "Type": "integer", "Variable": "num", "Options": {"min": 0, "max": 10} },
                 { "Type": "multi_string", "Variable": "list" },
@@ -16318,6 +16570,8 @@ mod tests {
         .unwrap();
         let mut g = GameConfig::new("42", "G");
         g.set_value("Ritze", "Fmt", "picked", json!("b"));
+        g.set_value("Ritze", "Fmt", "nulled", serde_json::Value::Null);
+        g.set_value("Ritze", "Fmt", "blank", json!(""));
         g.set_value("Ritze", "Fmt", "text", json!("hello world"));
         g.set_value("Ritze", "Fmt", "num", json!(7));
         g.set_value("Ritze", "Fmt", "list", json!(["a", "b", "c"]));
@@ -16326,16 +16580,19 @@ mod tests {
         let specs = [spec.clone()];
         let res = resolve::resolve(&specs, Some(&g), None, None);
         let f = &res.exts[&spec.id()].fields;
-        let d = |v: &str| display_resolved(&f[v]);
+        let toggle = |v: &str| spec.fields().any(|x| x.variable == v && x.field_type == FieldType::Toggle);
+        let d = |v: &str| display_resolved(&f[v], toggle(v));
 
         assert_eq!(d("on"), "ON");
         assert_eq!(d("off"), "OFF");
-        assert_eq!(d("unset"), "OFF", "no value anywhere → not enabled → OFF");
+        assert_eq!(d("unset"), "—", "no value anywhere on a non-toggle → em dash, not OFF");
+        assert_eq!(d("nulled"), "—", "explicit null on a non-toggle is also just 'no value'");
+        assert_eq!(d("blank"), "—", "an empty string is no value either");
         assert_eq!(d("picked"), "b");
         assert_eq!(d("text"), "hello world");
         assert_eq!(d("num"), "7", "numbers print bare, not quoted");
         assert_eq!(d("list"), "a, b, c");
-        assert_eq!(d("empty_list"), "OFF", "an empty list is not enabled");
+        assert_eq!(d("empty_list"), "—", "an empty list has no value");
     }
 
     /// `inheritance_row_cells` of one variable, by extension *name*.
@@ -16347,7 +16604,8 @@ mod tests {
         var: &str,
     ) -> Vec<(String, bool)> {
         let spec = specs.iter().find(|s| s.meta.name == ext).expect("spec by name");
-        inheritance_row_cells(stages, &app.inheritance_base(specs), &spec.id(), var)
+        let f = spec.fields().find(|f| f.variable == var).expect("field");
+        inheritance_row_cells(stages, &app.inheritance_base(specs), &spec.id(), f)
     }
 
     /// The highlight rule the whole redesign turns on (2026-09-29): a cell is
@@ -16464,6 +16722,83 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    fn gate_spec() -> Extension {
+        serde_json::from_value(json!({
+            "Extension": { "Author": "Ritze", "Name": "Gate", "Version": "1.0" },
+            "UI": {
+                "Main": [
+                    { "Type": "toggle", "Variable": "enabled", "Name": "Gate Enabled", "Default": false },
+                    { "Type": "selection", "Variable": "mode", "Options": ["a", "b"],
+                      "Requires": "enabled" },
+                    { "Type": "string", "Variable": "deep", "Requires": "mode" },
+                    { "Type": "string", "Variable": "glob", "Requires": "global:x" },
+                    { "Type": "string", "Variable": "loop_a", "Requires": "loop_b" },
+                    { "Type": "string", "Variable": "loop_b", "Requires": "loop_a" },
+                    { "Type": "string", "Variable": "either", "Requires": "!enabled OR nothing" }
+                ],
+                "Other": [
+                    { "Type": "string", "Variable": "post_command", "Name": "Command" },
+                    { "Type": "string", "Variable": "exit_command", "Name": "Command" },
+                    { "Type": "string", "Variable": "solo", "Name": "Solo" }
+                ]
+            }
+        }))
+        .unwrap()
+    }
+
+    /// A preview click on a hidden field falls back to the field that gates it:
+    /// the first same-module variable of its `Requires` that is itself shown,
+    /// looking through hidden gates, skipping `global:` refs and unknown names, and
+    /// never looping.
+    #[test]
+    fn gating_field_finds_nearest_visible_gate() {
+        let spec = gate_spec();
+        let mut g = GameConfig::new("1", "G");
+        let res_of = |g: &GameConfig| resolve::resolve(std::slice::from_ref(&spec), Some(g), None, None);
+        let res = res_of(&g);
+        let er = res.exts.get(&spec.id());
+
+        // `mode` is gated by the visible `enabled`.
+        assert_eq!(gating_field(&spec, er, "mode").as_deref(), Some("enabled"));
+        // `deep` is gated by `mode`, itself hidden → look through to `enabled`.
+        assert_eq!(gating_field(&spec, er, "deep").as_deref(), Some("enabled"));
+        // A `global:` reference is not a local field.
+        assert_eq!(gating_field(&spec, er, "glob"), None);
+        // A cycle terminates, and neither end is visible.
+        assert_eq!(gating_field(&spec, er, "loop_a"), None);
+        // Un-gated and unknown fields have nothing to fall back to.
+        assert_eq!(gating_field(&spec, er, "enabled"), None);
+        assert_eq!(gating_field(&spec, er, "nope"), None);
+        // Refs that aren't UI fields ("nothing") are skipped; `enabled` still counts.
+        assert_eq!(gating_field(&spec, er, "either").as_deref(), Some("enabled"));
+
+        // Once `enabled` is on, `mode` is shown → `deep`'s nearest gate is `mode`.
+        g.set_value("Ritze", "Gate", "enabled", json!(true));
+        let res = res_of(&g);
+        assert_eq!(
+            gating_field(&spec, res.exts.get(&spec.id()), "deep").as_deref(),
+            Some("mode")
+        );
+    }
+
+    /// Rows whose field name repeats get their UI section as a prefix; unique
+    /// names stay bare. The hover detail always carries section + variable.
+    #[test]
+    fn inh_field_labels_disambiguate_duplicates_only() {
+        let spec = gate_spec();
+        let fields: Vec<&UiField> = ["post_command", "exit_command", "solo", "enabled"]
+            .iter()
+            .map(|v| spec.fields().find(|f| f.variable == *v).unwrap())
+            .collect();
+        let labels = inh_field_labels(&spec, &fields);
+        assert_eq!(labels[0].0, "Other \u{b7} Command");
+        assert_eq!(labels[1].0, "Other \u{b7} Command");
+        assert_eq!(labels[2].0, "Solo");
+        assert_eq!(labels[3].0, "Gate Enabled");
+        assert_eq!(labels[0].1, "Other \u{b7} post_command");
+        assert_ne!(labels[0].0, "Command", "the bare repeated name must not survive");
     }
 
     /// A parent cycle is user-creatable (the guard lives in the editor, not on
