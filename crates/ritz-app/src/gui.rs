@@ -9755,9 +9755,15 @@ fn inheritance_preview_body(
                     if fields.is_empty() {
                         continue;
                     }
+                    // A gap row before each section header (skipped for the first,
+                    // which already sits under the column headers). `Ui::add_space`
+                    // asserts inside a grid layout, so the gap is an empty row whose
+                    // first cell just reserves the height.
+                    if any {
+                        ui.allocate_exact_size(egui::vec2(0.0, 6.0), egui::Sense::hover());
+                        ui.end_row();
+                    }
                     any = true;
-                    ui.add_space(6.0);
-                    ui.end_row();
                     ui.label(theme::section_label(&spec.meta.name));
                     ui.end_row();
                     let id = spec.id();
