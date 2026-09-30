@@ -9990,6 +9990,29 @@ const INH_GROUP_H: f32 = 22.0;
 /// stops values from butting up against the separator lines.
 const INH_PAD: f32 = 10.0;
 
+/// The area of a table cell *between* its grid lines, snapped to whole pixels.
+///
+/// Grid lines are 1px strokes that egui snaps to the centre of the pixel row/column
+/// `round(v * ppp - 0.5)` (`Stroke::round_center_to_pixel`), i.e. they occupy the
+/// pixel *at* the cell edge, not a half-pixel either side of it. So the fill must run
+/// from the pixel after the top/left line up to (not including) the pixel of the
+/// bottom/right line. The old `cell.shrink(1.0)` also ate the pixel *before* the
+/// bottom/right line (a 1px unfilled strip inside the cell), and the unshrunk hover
+/// rect covered half of the lines it sits between.
+/// `last_col` / `last_row` edges have no line of their own (the table's border or
+/// scroll gutter follows), so they round like an ordinary rect edge instead.
+fn inh_cell_fill_rect(ppp: f32, cell: egui::Rect, last_col: bool, last_row: bool) -> egui::Rect {
+    let line_px = |v: f32| (v * ppp - 0.5).round();
+    let edge_px = |v: f32| (v * ppp).round();
+    egui::Rect::from_min_max(
+        egui::pos2((line_px(cell.left()) + 1.0) / ppp, (line_px(cell.top()) + 1.0) / ppp),
+        egui::pos2(
+            if last_col { edge_px(cell.right()) } else { line_px(cell.right()) } / ppp,
+            if last_row { edge_px(cell.bottom()) } else { line_px(cell.bottom()) } / ppp,
+        ),
+    )
+}
+
 /// Does this layer store a value for `var` itself?
 fn inh_layer_sets(own: &AuthorsMap, spec: &Extension, var: &str) -> bool {
     own.get(&spec.meta.author)
@@ -10292,6 +10315,7 @@ fn inheritance_preview_body(
                     .show_viewport(ui, |ui, viewport| {
                         ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                         let p = ui.painter().clone();
+                        let ppp = ui.ctx().pixels_per_point();
                         let last_group = rows.len().saturating_sub(1);
                         for (gi, (spec, fields)) in rows.iter().enumerate() {
                             // Module group header: one shaded band across the
@@ -10382,11 +10406,19 @@ fn inheritance_preview_body(
                                         ui.id().with(("inh_cell", &id, &f.variable, i)),
                                         egui::Sense::click(),
                                     );
+                                    // Both fills cover exactly the area between the
+                                    // grid lines (see `inh_cell_fill_rect`).
+                                    let fill_r = inh_cell_fill_rect(
+                                        ppp,
+                                        cell,
+                                        i + 1 == cells.len(),
+                                        gi == last_group && fi + 1 == fields.len(),
+                                    );
                                     if let Some(fill) = fill {
-                                        p.rect_filled(cell.shrink(1.0), 0.0, fill);
+                                        p.rect_filled(fill_r, 0.0, fill);
                                     }
                                     if resp.hovered() {
-                                        p.rect_filled(cell, 0.0, theme::HOV);
+                                        p.rect_filled(fill_r, 0.0, theme::HOV);
                                     }
                                     let over = inh_cell_text(
                                         ui,
@@ -10455,7 +10487,21 @@ fn inheritance_preview_body(
                         egui::Sense::click(),
                     );
                     if resp.hovered() {
-                        p.rect_filled(cell, 0.0, theme::HOV);
+                        // Between the left separator and the next one / the frame
+                        // border; the last column follows the header's rounded
+                        // top-right corner instead of squaring it off.
+                        let ppp = ui.ctx().pixels_per_point();
+                        let last = i + 1 == stages.len();
+                        let mut r = inh_cell_fill_rect(ppp, cell, last, false);
+                        r.min.y = hr.top();
+                        let at_edge = last && cell.right() >= hr.right() - 0.5;
+                        let radius = egui::CornerRadius {
+                            nw: 0,
+                            ne: if at_edge { 8 } else { 0 },
+                            sw: 0,
+                            se: 0,
+                        };
+                        p.rect_filled(r.intersect(hr), radius, theme::HOV);
                     }
                     p.vline(cell.left(), hr.y_range(), line);
                     let over =
@@ -16190,6 +16236,24 @@ mod tests {
     /// touches, with just enough fields (and one `ENV_VARS` block, so the
     /// per-stage `command` is not the empty string) for resolution to be
     /// meaningful. Ids come out as `Ritze::<Name>::1.0`.
+    #[test]
+    fn inh_cell_fill_rect_runs_between_the_grid_line_pixels() {
+        // A 24px row whose top/bottom grid lines sit on pixel rows 100 and 124 at 1x:
+        // the fill must cover pixel rows 101..=123, i.e. y in [101, 124) — the old
+        // `shrink(1.0)` stopped at 123 and left row 123 unfilled.
+        let cell = egui::Rect::from_min_size(egui::pos2(50.0, 100.0), egui::vec2(150.0, 24.0));
+        let r = inh_cell_fill_rect(1.0, cell, false, false);
+        assert_eq!((r.min.x, r.min.y, r.max.x, r.max.y), (51.0, 101.0, 200.0, 124.0));
+        // Last column / last row have no line of their own: they run to the edge.
+        let r = inh_cell_fill_rect(1.0, cell, true, true);
+        assert_eq!((r.max.x, r.max.y), (200.0, 124.0));
+        let r = inh_cell_fill_rect(1.0, cell.translate(egui::vec2(0.0, 0.4)), false, true);
+        assert_eq!((r.min.y, r.max.y), (101.0, 124.0));
+        // HiDPI: 2x, lines at pixels 200 / 248, interior is pixels 201..=247.
+        let r = inh_cell_fill_rect(2.0, cell, false, false);
+        assert_eq!((r.min.y, r.max.y), (100.5, 124.0));
+    }
+
     fn inh_specs() -> Vec<Extension> {
         let misc: Extension = serde_json::from_value(json!({
             "Extension": { "Author": "Ritze", "Name": "Misc", "Version": "1.0" },
