@@ -78,7 +78,9 @@
       <pre><code>git clone https://github.com/Ritze03/ritz.git
 cd ritz</code></pre>
     </li>
-    <li><strong>Build it</strong> (Linux only) — takes a few minutes the first time
+    <li><strong>Build it</strong> (Linux only) — takes a few minutes the first time.
+      Shortcut: <code>./install.sh</code> does this step and the next one for you (and
+      <code>./install.sh --update</code> / <code>--remove</code> later).
       <pre><code>cargo build --release</code></pre>
     </li>
     <li><strong>Symlink it system-wide</strong> — updates automatically after every rebuild
@@ -100,7 +102,7 @@ cd ritz</code></pre>
   needs <code>RITZ_APPID=&lt;ID&gt; ritz --print %command%</code> instead.</div>
 
   <div class="note"><strong>Updating:</strong> <code>cd ritz &amp;&amp; git pull &amp;&amp;
-  cargo build --release</code> — nothing else needed, the symlink always points at the
+  cargo build --release</code> (or <code>./install.sh --update</code>) — nothing else needed, the symlink always points at the
   freshly built binary. Caveat: if you move or delete the cloned repo,
   <code>/usr/bin/ritz</code> is left dangling — re-run the symlink command from the new
   location.</div>

@@ -31,15 +31,23 @@ Rust via [rustup.rs](https://rustup.rs/).
 git clone https://github.com/Ritze03/ritz.git
 cd ritz
 
-# 2. Build it (Linux only) — this takes a few minutes the first time
-cargo build --release
+# 2. Build + install it (Linux only) — a few minutes the first time.
+#    Enter at the menu installs; it asks symlink (default) or copy -> /usr/bin/ritz.
+./install.sh
 
-# 3. Symlink it system-wide (updates automatically after every rebuild)
-sudo ln -sf "$(pwd)/target/release/ritz" /usr/bin/ritz
-
-# 4. In Steam: right-click the game → Properties → Launch Options:
+# 3. In Steam: right-click the game → Properties → Launch Options:
 ritz %command%
 ```
+
+<details>
+<summary>Manual install (what <code>install.sh</code> does in symlink mode)</summary>
+
+```sh
+cargo build --release
+sudo ln -sf "$(pwd)/target/release/ritz" /usr/bin/ritz
+```
+
+</details>
 
 Launch the game. The first time Ritz sees it, a short wizard asks for a **name** and an
 optional **profile**, then the game starts. From then on you get a splash screen on every
@@ -60,19 +68,20 @@ Run **`ritz`** with no arguments anytime to open the settings GUI.
 > `RITZ_APPID=<your-id> ritz %command%` so Ritz can give it a stable identity. Running
 > `ritz %command%` on an unknown game walks you through setting this up.
 
-### Updating
-
-Since step 3 symlinks `/usr/bin/ritz` straight into the repo's build output, updating is
-just:
+### Updating & removing
 
 ```sh
-cd ritz && git pull && cargo build --release
+./install.sh --update   # git pull + rebuild + reinstall the same way (symlink or copy)
+./install.sh --remove   # uninstall /usr/bin/ritz — your settings in ~/.config/ritz are kept
 ```
 
-No reinstall step needed — the symlink always resolves to the freshly built binary.
+Run `./install.sh` with no arguments for an interactive menu, or `./install.sh --help` for
+all options (`--yes`, `--link`/`--copy`, `--prefix`, …).
 
-- If you move or delete the cloned repo directory, `/usr/bin/ritz` becomes a dangling
-  symlink and stops working. Re-run the symlink command (step 3) from the new location.
+- **Symlink mode** points `/usr/bin/ritz` straight at the repo's build output, so every
+  rebuild is live immediately with no root needed. If you move or delete the cloned repo,
+  the symlink dangles — re-run `./install.sh` from the new location.
+- **Copy mode** is independent of the repo; `--update` copies the new binary again.
 
 ## Usage
 
