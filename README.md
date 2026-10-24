@@ -42,6 +42,8 @@ cd ritz
 ritz %command%
 ```
 
+Steam must find `ritz` on its PATH. If `~/.local/bin` isn't on your login PATH (e.g. on Arch), use the full path instead: `~/.local/bin/ritz %command%`
+
 Launch the game. The first time Ritz sees it, a short wizard asks for a **name** and an
 optional **profile**, then the game starts. From then on you get a splash screen on every
 launch:
