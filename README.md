@@ -26,18 +26,19 @@ You need **Rust** (the `cargo` build tool) and **git**. On most distros:
 `sudo pacman -S rust git` (Arch) · `sudo apt install cargo git` (Debian/Ubuntu) · or install
 Rust via [rustup.rs](https://rustup.rs/).
 
+Easiest with [ritz-get](https://github.com/Ritze03/ritz-get): `ritz-get install ritz`.
+Or by hand:
+
 ```sh
 # 1. Get the code
 git clone https://github.com/Ritze03/ritz.git
 cd ritz
 
-# 2. Build it (Linux only) — this takes a few minutes the first time
-cargo build --release
+# 2. Build and install it (Linux only) — takes a few minutes the first time
+#    (links ~/.local/bin/ritz to the fresh build; no root needed)
+./install.sh --install
 
-# 3. Symlink it system-wide (updates automatically after every rebuild)
-sudo ln -sf "$(pwd)/target/release/ritz" /usr/bin/ritz
-
-# 4. In Steam: right-click the game → Properties → Launch Options:
+# 3. In Steam: right-click the game → Properties → Launch Options:
 ritz %command%
 ```
 
@@ -62,17 +63,16 @@ Run **`ritz`** with no arguments anytime to open the settings GUI.
 
 ### Updating
 
-Since step 3 symlinks `/usr/bin/ritz` straight into the repo's build output, updating is
-just:
+With ritz-get: `ritz-get update ritz`. By hand, `git pull` and re-run the installer:
 
 ```sh
-cd ritz && git pull && cargo build --release
+cd ritz && git pull && ./install.sh --install
 ```
 
-No reinstall step needed — the symlink always resolves to the freshly built binary.
+`~/.local/bin/ritz` is a symlink into the repo's build output, so nothing else is needed.
 
-- If you move or delete the cloned repo directory, `/usr/bin/ritz` becomes a dangling
-  symlink and stops working. Re-run the symlink command (step 3) from the new location.
+- If you move the cloned repo directory, re-run `./install.sh --install` from the new
+  location. To uninstall: `ritz-get remove ritz`, or `./install.sh --remove`.
 
 ## Usage
 

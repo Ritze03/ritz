@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Ritz
+Comment=Settings for the Ritz Steam launch wrapper
+Exec=ritz
+Categories=Game;
+Terminal=false
