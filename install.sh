@@ -33,6 +33,13 @@ check_tools() {
 # Build into build/ under a temporary name, then mv it over the final name (atomic: a running
 # program keeps its old file, and a failed build never reaches the mv, because of set -e).
 build() {
+	# rustup with no default toolchain (fresh rustup): build with stable, never touch the user's default
+	if command -v rustup >/dev/null 2>&1 && ! cargo --version >/dev/null 2>&1; then
+		d=$(rustup default 2>/dev/null) || d=
+		rustup toolchain install stable --profile minimal --no-self-update
+		[ -n "$d" ] || rustup default none || :     # rustup makes the first toolchain the default; undo that
+		export RUSTUP_TOOLCHAIN=stable
+	fi
 	cargo build --release --locked --color never
 	cp target/release/$NAME "build/.$NAME.new"
 	mv -f "build/.$NAME.new" "build/$NAME"
