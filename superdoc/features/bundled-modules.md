@@ -23,7 +23,6 @@ page is the "what does each shipped module do" reference.
 | Game Launch Args | `resources/extensions/built-in/custom-args/custom-args.json` | The game's own argv | Uncapped list of free-text launch arguments, appended verbatim after the game command |
 | Custom Env | `resources/extensions/built-in/custom-env/custom-env.json` | Process environment (chain-wide) | Uncapped list of free-form `NAME=VALUE` env var pairs |
 | Custom Game Env | `resources/extensions/built-in/custom-game-env/custom-game-env.json` | Process environment (game only) | Uncapped list of free-form `NAME=VALUE` env var pairs, game-scoped only (same shape as Custom Env, emitted into `GAME_ENV_VARS` instead of `ENV_VARS`) |
-| Hypr-Monctl | `resources/extensions/built-in/hypr-monctl/hypr-monctl.json` | Hyprland monitor color pipeline | Per-game saturation, brightness, temperature applied while the game window is focused |
 | LSFG-VK | `resources/extensions/built-in/lsfg-vk/lsfg-vk.json` | Lossless Scaling frame generation | Enable, multiplier (2x-8x), flow scale, performance mode, HDR mode, present-mode override, activation delay |
 
 ## Notes per module
@@ -94,13 +93,24 @@ page is the "what does each shipped module do" reference.
   Scripts' hooks) — no cap, and no new manifest concept needed, replacing the earlier
   fixed 16-slot (`arg_1`..`arg_16` / `env_N_name`+`env_N_value`) numbered-field
   workaround from before `multi_string`-backed lists existed.
-- **Hypr-Monctl / LSFG-VK** — These two declare a `Backend` field (`"hypr-monctl"`,
-  `"lsfg-vk"`) instead of only `ENV_VARS`/`WRAPPERS`, meaning their options are consumed by
-  a native Rust backend rather than the generic env/wrapper builder. See
-  [runtime-backends.md](runtime-backends.md) for how those backends are implemented and
-  wired to the manifest's `Variable` values. Hypr-Monctl also carries
-  `"RequiresDesktop": "Hyprland"`, gating it out of the extension list entirely on other
-  desktops (see the RequiresDesktop project memory / `AppContext::load` filter).
+- **LSFG-VK** — Declares a `Backend` field (`"lsfg-vk"`) instead of only
+  `ENV_VARS`/`WRAPPERS`, meaning its options are consumed by a native Rust backend rather
+  than the generic env/wrapper builder. See [runtime-backends.md](runtime-backends.md)
+  for how that backend is implemented and wired to the manifest's `Variable` values.
+- **No bundled module uses `RequiresDesktop`** any more. The extension-level gate
+  itself (`Extension.requires_desktop`, filtered in `AppContext::load`) is still a
+  supported feature for user modules — see [extension-system.md](extension-system.md).
+
+## Removed modules
+
+- **2026-10-29 — Hypr-Monctl removed.** Per-game display vibrance via a Hyprland plugin
+  (`hypr-monctl.json`, `backends/hypr_monctl.rs`, the bundled `plugins/hypr-monctl.so`).
+  *Why:* the upstream hypr-monctl project is dead, so ritz no longer ships or supports
+  it. No migration code: a leftover `Ritze` / `Hypr-Monctl` entry in a user's
+  `global.json` / profile / game file is simply ignored (stored values for modules that
+  aren't loaded are never read; **Clean Up Configs** will prune them), and a stale
+  `~/.config/ritz/extensions/built-in/hypr-monctl/` copy would still load as a plain
+  module with no backend — delete it by hand.
 
 ## Applied config migrations
 
@@ -137,5 +147,4 @@ wondering "what happened to the numbered slots?".
 
 - [extension-system.md](extension-system.md) — how manifests are loaded, validated, and
   turned into env vars / wrappers / launch args.
-- [runtime-backends.md](runtime-backends.md) — the Rust-side backends for Hypr-Monctl and
-  LSFG-VK.
+- [runtime-backends.md](runtime-backends.md) — the Rust-side backend for LSFG-VK.

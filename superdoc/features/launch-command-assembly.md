@@ -113,7 +113,7 @@ runtime lifecycle or external state — they only reshape one list into blocks t
 builder already produces — so folding them in here avoids a `Backend` impl that would do
 nothing but the env/argv work the builder does anyway. See
 [runtime-backends.md](runtime-backends.md) for the real, stateful `Backend`-trait
-handlers (`lsfg-vk`, `hypr-monctl`) this is *not* one of, and
+handlers (`lsfg-vk`) this is *not* one of, and
 [bundled-modules.md](bundled-modules.md) for the three list-backed modules themselves.
 
 ## Using it

@@ -1,8 +1,8 @@
 //! Bundled resources, embedded into the binary at compile time.
 //!
-//! The entire `resources/` tree (font, extensions, plugins) is baked in via
-//! `include_dir`. On startup [`bootstrap`] copies the `extensions/` and
-//! `plugins/` subtrees into the user's config directory (always overwriting
+//! The entire `resources/` tree (fonts, logos, extensions) is baked in via
+//! `include_dir`. On startup [`bootstrap`] copies the `extensions/`
+//! subtree into the user's config directory (always overwriting
 //! bundled files so updates propagate), so the binary is fully self-contained.
 
 use std::path::Path;
@@ -61,23 +61,21 @@ pub fn logo_1024_bytes() -> &'static [u8] {
         .contents()
 }
 
-/// Export bundled `extensions/` and `plugins/` into the config directory,
+/// Export bundled `extensions/` into the config directory,
 /// only creating files that don't already exist (never touching the user's).
 pub fn bootstrap(paths: &Paths) -> Result<()> {
     export(paths, false)
 }
 
-/// Re-export bundled `extensions/` and `plugins/`, overwriting existing files.
+/// Re-export bundled `extensions/`, overwriting existing files.
 /// Backs the explicit "Re-Export Modules and Plugins" action.
 pub fn reexport(paths: &Paths) -> Result<()> {
     export(paths, true)
 }
 
 fn export(paths: &Paths, overwrite: bool) -> Result<()> {
-    for top in ["extensions", "plugins"] {
-        if let Some(dir) = RESOURCES.get_dir(top) {
-            export_dir(dir, &paths.base, overwrite)?;
-        }
+    if let Some(dir) = RESOURCES.get_dir("extensions") {
+        export_dir(dir, &paths.base, overwrite)?;
     }
     Ok(())
 }
@@ -88,7 +86,7 @@ fn export_dir(dir: &Dir, base: &Path, overwrite: bool) -> Result<()> {
             DirEntry::Dir(sub) => export_dir(sub, base, overwrite)?,
             DirEntry::File(file) => {
                 // `file.path()` is relative to the resources root, e.g.
-                // "extensions/amd.json" or "plugins/hypr-monctl.so".
+                // "extensions/default/amd.json".
                 let dest = base.join(file.path());
                 if let Some(parent) = dest.parent() {
                     std::fs::create_dir_all(parent)
@@ -98,12 +96,9 @@ fn export_dir(dir: &Dir, base: &Path, overwrite: bool) -> Result<()> {
                 if !overwrite && dest.exists() {
                     continue;
                 }
-                // Skip if unchanged, and never write in place: a bundled file
-                // (e.g. hypr-monctl.so) may be mmap'd by another process
-                // (Hyprland has the plugin dlopen'd). Truncating + rewriting the
-                // same inode corrupts that live mapping and crashes it. Writing a
-                // temp file + rename swaps the dir entry to a fresh inode, leaving
-                // the mapped one intact.
+                // Skip if unchanged, and never write in place: write a temp
+                // file + rename so the dir entry swaps to a fresh inode instead
+                // of truncating and rewriting the existing one.
                 if std::fs::read(&dest).is_ok_and(|cur| cur == file.contents()) {
                     continue;
                 }

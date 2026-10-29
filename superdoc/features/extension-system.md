@@ -163,7 +163,9 @@ merged.
 
 Optional top-level keys gate *whether a module loads at all*: `AppIds` restricts it to
 specific Steam AppIds (`crates/ritz-core/src/schema.rs:Extension::applies_to`), and
-`RequiresDesktop` restricts it to a named `$XDG_CURRENT_DESKTOP`.
+`RequiresDesktop` restricts it to a named `$XDG_CURRENT_DESKTOP` (e.g.
+`"RequiresDesktop": "Hyprland"`). No bundled module uses this gate today; it remains
+available to user modules.
 
 ## Options
 
@@ -173,7 +175,7 @@ Top-level JSON keys of one module file:
 | --- | --- |
 | `Extension` | Metadata: `Name`, `Author`, `Version`, optional `Description`, optional `ForkedFrom` (`crates/ritz-core/src/schema.rs:ExtensionMeta.forked_from`). Identity is `Author::Name::Version`. |
 | `AppIds` | Optional list of Steam AppIds; omit = applies to all games. |
-| `Backend` | Optional built-in backend, one of five values across two mechanisms: `lsfg-vk` / `hypr-monctl` route to a real runtime handler implementing `crates/ritz-app/src/backends/mod.rs:Backend` (see [runtime-backends.md](runtime-backends.md)); `custom-env` / `custom-game-env` / `custom-args` are *not* trait impls — they're a builder pre-pass that expands a `multi_string` list into env vars/args (see [launch-command-assembly.md](launch-command-assembly.md#backend-pre-pass)). |
+| `Backend` | Optional built-in backend, one of four values across two mechanisms: `lsfg-vk` routes to a real runtime handler implementing `crates/ritz-app/src/backends/mod.rs:Backend` (see [runtime-backends.md](runtime-backends.md)); `custom-env` / `custom-game-env` / `custom-args` are *not* trait impls — they're a builder pre-pass that expands a `multi_string` list into env vars/args (see [launch-command-assembly.md](launch-command-assembly.md#backend-pre-pass)). |
 | `RequiresDesktop` | Optional desktop gate matched against `$XDG_CURRENT_DESKTOP`. |
 | `UI` | Ordered sections → fields (`Type`, `Variable`, `Default`, `Options`, `Requires`, …). |
 | `ENV_VARS` | Whole-chain env vars, each a `Set`/`Append`/`Unset` builder. |

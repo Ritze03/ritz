@@ -18,8 +18,8 @@ sections below to find the doc you need.
 - [Hooks & Scripts](features/hooks-and-scripts.md) — lifecycle hooks and user scripts.
 - [Launch Command Assembly](features/launch-command-assembly.md) — `%command%` and launch block assembly.
 - [Bundled Modules](features/bundled-modules.md) — reference for modules shipped with Ritz.
-- [Runtime Backends](features/runtime-backends.md) — the LSFG-VK and Hypr-Monctl `Backend`-trait handlers (the list-backed `custom-env`/`custom-game-env`/`custom-args` `Backend` values are a builder pre-pass, documented in Launch Command Assembly instead).
-- [Resource Export](features/resource-export.md) — exporting embedded resources (e.g. bundled plugin binaries).
+- [Runtime Backends](features/runtime-backends.md) — the LSFG-VK `Backend`-trait handler (the list-backed `custom-env`/`custom-game-env`/`custom-args` `Backend` values are a builder pre-pass, documented in Launch Command Assembly instead).
+- [Resource Export](features/resource-export.md) — exporting embedded resources (bundled extension manifests).
 
 ## ui/ — interface conventions
 

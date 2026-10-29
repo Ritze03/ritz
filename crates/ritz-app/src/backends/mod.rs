@@ -2,10 +2,8 @@
 //! process lifecycle (apply / game-ready / live-reload / cleanup) rather than the
 //! JSON command builder.
 //!
-//! `lsfg-vk` is the reference backend (M5). `hypr-monctl` is a documented seam
-//! (M8).
+//! `lsfg-vk` is the reference backend (M5).
 
-pub mod hypr_monctl;
 pub mod lsfg;
 
 use anyhow::Result;
@@ -58,12 +56,9 @@ pub trait Backend: Send {
     }
 }
 
-/// All registered backends. `hypr_monctl` is registered but inert (deferred).
+/// All registered backends.
 pub fn registry() -> Vec<Box<dyn Backend>> {
-    vec![
-        Box::new(lsfg::LsfgBackend),
-        Box::new(hypr_monctl::HyprMonctlBackend),
-    ]
+    vec![Box::new(lsfg::LsfgBackend)]
 }
 
 /// Backends active for the given game.

@@ -72,7 +72,6 @@
     <div class="card mod-card"><div class="mod-target">backend</div><h3>Custom Env</h3><p>An uncapped list of free-form <code>NAME=VALUE</code> pairs, applied chain-wide.</p></div>
     <div class="card mod-card"><div class="mod-target">backend</div><h3>Custom Game Env</h3><p>Same shape as Custom Env, but game-only — emitted into <code>GAME_ENV_VARS</code> instead of <code>ENV_VARS</code>.</p></div>
     <div class="card mod-card"><div class="mod-target">backend</div><h3>LSFG-VK</h3><p>Lossless Scaling frame generation: enable, multiplier (2×–8×), flow scale, performance/HDR mode, present-mode override, activation delay.</p></div>
-    <div class="card mod-card"><div class="mod-target">backend · Hyprland only</div><h3>Hypr-Monctl</h3><p>Per-game display saturation, brightness, and temperature via a Hyprland plugin — only loads when <code>$XDG_CURRENT_DESKTOP</code> is Hyprland.</p></div>
   </div>
 
   <div class="note">Drop your own <code>.json</code> modules into
@@ -350,7 +349,6 @@ atom  := "!" atom | IDENT          // NOT also written "!"</code></pre>
     <tr><td><code>custom-env</code></td><td>Custom Env</td><td>Uncapped Name|Value list UI for chain-wide env vars.</td></tr>
     <tr><td><code>custom-game-env</code></td><td>Custom Game Env</td><td>Same as <code>custom-env</code>, but emitted into <code>GAME_ENV_VARS</code> (game-only).</td></tr>
     <tr><td><code>lsfg-vk</code></td><td>LSFG-VK</td><td>Writes <code>~/.config/lsfg-vk/conf.toml</code>, sets <code>LSFG_PROCESS</code>, supports an activation delay; live-reloadable.</td></tr>
-    <tr><td><code>hypr-monctl</code></td><td>Hypr-Monctl</td><td>Per-game display vibrance via a Hyprland plugin (<code>RequiresDesktop: "Hyprland"</code>).</td></tr>
   </table>
   </div>
 </section>

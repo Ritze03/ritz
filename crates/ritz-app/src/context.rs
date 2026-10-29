@@ -24,7 +24,7 @@ pub struct AppContext {
 impl AppContext {
     pub fn load() -> Result<Self> {
         let paths = Paths::discover();
-        // Export bundled extensions + plugin into the config dir (skips existing).
+        // Export bundled extensions into the config dir (skips existing).
         crate::resources::bootstrap(&paths).context("exporting bundled resources")?;
         let general = paths.load_general().context("loading general.json")?;
         let (extensions, extension_errors) = load_extensions(&paths)?;
@@ -278,7 +278,7 @@ pub(crate) fn collect_parent_presets(paths: &Paths, first_parent: &str) -> Vec<P
 }
 
 /// Load all extensions from disk, dropping those gated to a desktop we're not
-/// running (e.g. hypr-monctl off Hyprland) so they never appear in the GUI nor
+/// running (e.g. a `"RequiresDesktop": "Hyprland"` module off Hyprland) so they never appear in the GUI nor
 /// get resolved/applied. Shared by [`AppContext::load`] and the GUI's hot-reload.
 pub fn load_extensions(paths: &Paths) -> Result<(Vec<LoadedExtension>, Vec<ExtensionLoadError>)> {
     let dirs = extension_dirs(paths);

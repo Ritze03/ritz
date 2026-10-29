@@ -1,16 +1,15 @@
 # Resource Export — embedded assets and the first-run copy to config
 
 Ritz ships as one self-contained binary: fonts, the default/built-in extension
-manifests, and native plugin `.so` files are baked in at compile time and, for the
-extensions/plugins half, copied out to the user's config directory on first run so the
+manifests are baked in at compile time and, for the
+extensions half, copied out to the user's config directory on first run so the
 rest of the app can treat them as ordinary files on disk.
 
 ## How it works
 
 - `crates/ritz-app/src/resources.rs` embeds the whole `resources/` tree with
   `include_dir!("$CARGO_MANIFEST_DIR/../../resources")` into a `static RESOURCES: Dir`.
-  Everything under `resources/` (fonts in `assets/`, manifests in `extensions/`, native
-  backends in `plugins/`) is part of the binary; there is no runtime dependency on the
+  Everything under `resources/` (fonts in `assets/`, manifests in `extensions/`) is part of the binary; there is no runtime dependency on the
   source tree.
 - **Fonts and the logo are read straight from the embed for on-screen use.**
   `crates/ritz-app/src/resources.rs:mono_font_bytes` / `sans_font_bytes` /
@@ -25,15 +24,16 @@ rest of the app can treat them as ordinary files on disk.
   IO error just drops the icon, the notification still goes out. *Consequence of
   missing-only:* if the bundled logo changes, the on-disk `ritz-icon.png` is not
   refreshed automatically — delete it to force a re-export on the next notification.
-- **Extensions and plugins are exported to disk**, because
+- **Extensions are exported to disk**, because
   `crates/ritz-core/src/extension.rs:discover` reads `.json` manifests off a real
-  directory, and the shipped `.so` plugins have to exist as loadable files for their
-  native backends. `crates/ritz-app/src/resources.rs:bootstrap` is called once per
+  directory. `crates/ritz-app/src/resources.rs:bootstrap` is called once per
   process start from `crates/ritz-app/src/context.rs:AppContext::load`, before
-  extensions are loaded, and copies the `extensions/` and `plugins/` subtrees from the
+  extensions are loaded, and copies the `extensions/` subtree from the
   embed into `paths.base` (`~/.config/ritz`, or `$RITZ_CONFIG_DIR`) — landing at
-  `Paths::user_extensions` (`extensions/`) and `Paths::plugins_dir` (`plugins/`) in
-  `crates/ritz-core/src/config.rs`.
+  `Paths::user_extensions` (`extensions/`) in `crates/ritz-core/src/config.rs`.
+  The button label still says "Modules and Plugins" for historical reasons; there are
+  no bundled plugins any more (the only one, `hypr-monctl.so`, was removed on
+  2026-10-29 along with its module).
 - **Discovery reads only that one exported directory.** At runtime
   `crates/ritz-app/src/context.rs:extension_dirs` returns `vec![paths.user_extensions()]`
   (or a single `$RITZ_EXTENSIONS_DIR` override, used by tests) — there's no separate
@@ -53,12 +53,12 @@ rest of the app can treat them as ordinary files on disk.
 - **Bundled files are never written in place, even on overwrite.** When a destination
   differs from the embedded contents, `export_dir` writes to a `.tmp` sibling
   (`dest.with_extension("tmp")`) then `std::fs::rename`s it over the real path, instead
-  of truncating the existing file. *Why atomic `.so` writes:* a plugin like
-  `hypr-monctl.so` under `plugins/` may be `dlopen`'d and `mmap`'d live by Hyprland;
+  of truncating the existing file. *Why atomic writes:* this was introduced for the
+  bundled `hypr-monctl.so` plugin, which Hyprland `dlopen`'d and `mmap`'d live —
   truncating and rewriting the same inode would corrupt that mapping and crash the
   compositor. The temp-file-then-rename swaps the directory entry to a fresh inode and
-  leaves whatever's already mapped untouched. This applies to every exported file, not
-  just `.so`s, and `export_dir` also skips the write entirely when the on-disk bytes
+  leaves whatever's already mapped untouched. It is kept as the safe default for every
+  exported file (nothing else needs it today), and `export_dir` also skips the write entirely when the on-disk bytes
   already match the embed, so an unchanged file is never touched at all — not even via
   the atomic path.
 - **Overwriting still requires the user's explicit, confirmed consent.** Re-export is
@@ -74,12 +74,12 @@ rest of the app can treat them as ordinary files on disk.
 
 - **First run / every normal launch:** nothing to do — `AppContext::load` calls
   `bootstrap` automatically before extensions are loaded, so the config directory
-  always has every shipped module and plugin present, without touching anything a user
+  always has every shipped module present, without touching anything a user
   already customized.
 - **Settings → Maintenance Actions** (`crates/ritz-app/src/gui.rs`, around line 1800)
   exposes two destructive, confirmed actions:
   - **Re-Export Modules and Plugins** — re-runs export with `overwrite = true`, restoring
-    every shipped extension manifest and plugin `.so` to its bundled state, then calls
+    every shipped extension manifest to its bundled state, then calls
     `reload_extensions` so the running editor picks up the restored files immediately.
     Use this to recover from a manually broken shipped manifest or to pick up updated
     bundled defaults that `bootstrap` won't touch because a same-named file already
@@ -99,5 +99,5 @@ rest of the app can treat them as ordinary files on disk.
   parsed, resolved, and built into a launch command once they're on disk.
 - [Bundled Modules](bundled-modules.md) — the catalogue of shipped manifests under
   `resources/extensions/` that `bootstrap`/`reexport` copy out.
-- [runtime-backends.md](runtime-backends.md) — the native `.so` backends (e.g.
-  `hypr-monctl.so`) whose atomic-write handling is described here.
+- [runtime-backends.md](runtime-backends.md) — the native Rust backends for modules
+  that need a runtime handler.

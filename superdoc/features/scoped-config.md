@@ -121,14 +121,14 @@ The depth is computed from the profile's `Parent` links in `render_field` (`crat
 
 ## Export on startup: missing-only, never overwrite
 
-Bundled extensions and plugins are shipped into the config dir on startup, but user files are sacrosanct:
+Bundled extensions are shipped into the config dir on startup, but user files are sacrosanct:
 
 - `crates/ritz-app/src/resources.rs:bootstrap` calls `export(paths, false)` — it **creates only files that don't already exist** and leaves any existing file untouched.
 - `crates/ritz-app/src/resources.rs:reexport` (`export(paths, true)`) overwrites, and is reachable **only** through the explicit, confirmed "Re-Export Modules and Plugins" action (`ConfirmAction::ReExportResources` in `crates/ritz-app/src/gui.rs`).
 
 *Why export missing-only:* the launcher must ship working default modules on first run, but a user who has edited or added their own config must never have it silently clobbered on the next startup — so bootstrap is strictly additive.
 
-*Why never write a bundled file in place:* even `reexport` writes a temp file and renames it over the target rather than truncating the existing inode. A bundled `.so` (e.g. `hypr-monctl.so`) may be `mmap`'d live by Hyprland; rewriting its inode in place would corrupt that mapping and crash it. The rename swaps the directory entry to a fresh inode and leaves the mapped one intact (`export_dir` in `crates/ritz-app/src/resources.rs`).
+*Why never write a bundled file in place:* even `reexport` writes a temp file and renames it over the target rather than truncating the existing inode. This was introduced for the since-removed `hypr-monctl.so` plugin, which Hyprland had `mmap`'d live; rewriting its inode in place would corrupt that mapping and crash it. The rename swaps the directory entry to a fresh inode and leaves the mapped one intact (`export_dir` in `crates/ritz-app/src/resources.rs`).
 
 ## Related links
 

@@ -679,7 +679,7 @@ folders* (`crates/ritz-app/src/gui.rs:render_node`): a folder that only contains
 extension's manifest (a "folder extension", `is_folder_ext`) would otherwise show a
 redundant header wrapping a single row.
 
-Extensions whose manifest declares a `backend` (custom-env, custom-args, hypr-monctl,
+Extensions whose manifest declares a `backend` (custom-env, custom-args,
 lsfg-vk — see [bundled-modules.md](bundled-modules.md)) are pulled out of both grouping
 modes and shown under a trailing **Built-In** header.
 
@@ -826,11 +826,12 @@ returns `Some(secs)` only when the in-flight `Detect` targets *this* module and 
 `Detect::ext_id`/`var` matched against the rendering module's, plus `target`/`mode`
 matched against the live ones (`crate::gui::Detect::targets`). It used to ask nothing
 but "is some detection waiting, and is this variable called `window_class`". *Why that
-was worth fixing while still latent:* only `hypr-monctl` declares `window_class` among
-the shipped modules, so there is never a second field on screen to mis-render into —
-but a user's own module under `~/.config/ritz/extensions/` can declare it too, and then
-the countdown draws on the user's field while `poll_detect` writes the result to
-hypr-monctl. `target`/`mode` are in the comparison because Config mode and the IDE
+was worth fixing while still latent:* at the time only `hypr-monctl` declared
+`window_class` among the shipped modules (it has since been removed, so **no shipped
+module declares it now** — the Detect button only appears on user-authored modules),
+so there was never a second field on screen to mis-render into — but a user's own
+module under `~/.config/ritz/extensions/` can declare it too, and then the countdown
+draws on one module's field while `poll_detect` writes the result to another. `target`/`mode` are in the comparison because Config mode and the IDE
 preview draw the *same* module's fields and only those two axes tell them apart — see
 "Preview write guards" below and `cancel_stale_detect`.
 
@@ -1982,7 +1983,7 @@ What it shows (`GuiApp::inheritance_stages` → `inheritance_preview_body`):
   info glyph appears above the module settings ("Scaler is hidden until Gamescope Enabled
   is enabled." — `GuiApp::focus_note`, cleared by the next navigation or module change).
   With no shown gate at all the page scrolls to the top with a generic note. *Why:* most
-  Gamescope / Hypr-Monctl values in real profiles sit behind an `enabled` toggle, so a
+  Gamescope / LSFG-VK values in real profiles sit behind an `enabled` toggle, so a
   plain jump landed on a page that showed nothing of the clicked field. A **modal auto-closes** on click — it would
   cover the page it just opened; a **popped-out window stays open** (user request) and
   re-resolves from the new page. Clicking a **column header** switches to that layer's
@@ -2219,7 +2220,7 @@ reason issue #39 leaves the palette alone.
 **Why the dead-field half is suppressed for backend / hook / script modules**
 (`crate::gui::has_opaque_var_consumer`). Measured against the bundled set: with no
 suppression, that half fires on **six of thirteen** bundled manifests — `custom-args`,
-`custom-env`, `custom-game-env`, `hypr-monctl`, `lsfg-vk` and `scripts`. Every one is a
+`custom-env`, `custom-game-env`, `hypr-monctl` (since removed), `lsfg-vk` and `scripts`. Every one is a
 false positive, and they share a cause: their fields are consumed by a **Rust backend
 handler**, a **hook script**, or a **`ScriptBuilders` script** — none of which the walk can
 see, because none is expressed in the manifest. A lint wrong about half the project's own

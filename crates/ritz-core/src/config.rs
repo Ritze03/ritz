@@ -287,9 +287,6 @@ impl Paths {
     pub fn user_extensions(&self) -> PathBuf {
         self.base.join("extensions")
     }
-    pub fn plugins_dir(&self) -> PathBuf {
-        self.base.join("plugins")
-    }
 
     pub fn load_global_config(&self) -> Result<Preset> {
         let mut cfg: Preset = read_json_opt(&self.global_config())?.unwrap_or_default();

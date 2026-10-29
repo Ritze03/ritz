@@ -92,7 +92,7 @@ amend the entry here.
 - **Backend** — an extension's optional route to a built-in Rust runtime handler
   (rather than pure JSON-declared env/wrapper/arg blocks), named in the extension's
   `"Backend"` field (`crates/ritz-core/src/schema.rs:Extension.backend`), e.g.
-  `"lsfg-vk"`, `"hypr-monctl"`, `"custom-env"`, `"custom-args"` — see
+  `"lsfg-vk"`, `"custom-env"`, `"custom-args"` — see
   `resources/extensions/built-in/lsfg-vk/lsfg-vk.json`. Also used, unrelated, as a
   per-field option value inside the Gamescope module (`resources/extensions/default/gamescope.json`,
   the "Backend" UI field selecting gamescope's own SDL/wayland backend) — the two uses
@@ -128,5 +128,6 @@ amend the entry here.
   the whole extension to a named desktop session, matched against
   `$XDG_CURRENT_DESKTOP` (e.g. `"Hyprland"`); omitted means available everywhere.
   Field: `crates/ritz-core/src/schema.rs:Extension.requires_desktop`. Filtered at
-  load time in `AppContext::load` (see `project_requires_desktop.md` memory). Example:
-  `resources/extensions/built-in/hypr-monctl/hypr-monctl.json`.
+  load time in `AppContext::load`. Example: `"RequiresDesktop": "Hyprland"` makes the
+  module load only inside a Hyprland session. No bundled module uses it today; it stays
+  available for user modules.

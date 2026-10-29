@@ -115,7 +115,7 @@ behaviour. The escape hatch for logic JSON can't express is a named
 | `crates/ritz-app/src/gui.rs` | egui settings window: `run_manager` (all games) and `run` (one game). |
 | `crates/ritz-app/src/splash.rs` | Pre-launch countdown window + new-game picker + unknown-id guide. |
 | `crates/ritz-app/src/hooks.rs` | Lifecycle shell hooks (`run_stage`) and dynamic ScriptBuilders. |
-| `crates/ritz-app/src/backends/` | Runtime backends: `Backend` trait, `registry`, `active`; `lsfg.rs`, `hypr_monctl.rs`. |
+| `crates/ritz-app/src/backends/` | Runtime backends: `Backend` trait, `registry`, `active`; `lsfg.rs`. |
 | `crates/ritz-app/src/resources.rs` | Embedded assets; `bootstrap` copies them into the config dir on startup. |
 | `crates/ritz-app/src/theme.rs` | "Graphite" theme tokens + egui style — single source of colour truth. |
 | `crates/ritz-app/src/icon_center.rs` | `IconCenterCache` — measured ink-box centering for icon glyphs (`Galley::mesh_bounds`), so icon rows don't read ragged. |
@@ -144,7 +144,7 @@ Where to read about X. Every capability has its own page:
 | Shell hooks (PreLaunch/PostSpawn/OnGameReady/PostExit) and ScriptBuilders | [features/hooks-and-scripts.md](../features/hooks-and-scripts.md) |
 | The five assembly blocks and how the argv is built | [features/launch-command-assembly.md](../features/launch-command-assembly.md) |
 | The modules shipped out of the box | [features/bundled-modules.md](../features/bundled-modules.md) |
-| Stateful Rust handlers behind LSFG-VK and Hypr-Monctl | [features/runtime-backends.md](../features/runtime-backends.md) |
+| Stateful Rust handler behind LSFG-VK | [features/runtime-backends.md](../features/runtime-backends.md) |
 | Embedded assets and the first-run copy into the config dir | [features/resource-export.md](../features/resource-export.md) |
 
 ## Where to look for X

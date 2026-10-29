@@ -113,7 +113,6 @@ Functionality ships as JSON **modules** (extensions). The bundled set:
 | **Custom Game Env** | Free-form environment variables applied only to the game process (`GAME_ENV_VARS`). |
 | **Scripts** | Run your own commands at lifecycle points — pre-launch (blocks before the game starts, commands run in order), post-spawn (backgrounded, commands run in parallel), on-game-ready (fires once the real game process is detected), and post-exit (blocks after the game exits, commands run in order). The bundled module's UI wires pre-launch, post-spawn, and post-exit; on-game-ready is available to custom modules via the same `Hooks` block. |
 | **LSFG-VK** | Lossless Scaling frame generation backend (writes `conf.toml`, activation delay). |
-| **Hypr-Monctl** | Per-game display vibrance via a Hyprland plugin (only loads on Hyprland). |
 
 Drop your own `.json` modules into `~/.config/ritz/extensions/` — see the
 **[extension reference](https://ritze03.github.io/ritz/extensions.html)**.
@@ -148,10 +147,9 @@ global.json           # the 🔴 global scope (applies to every game)
 profiles/<name>.json  # 🟢 named profiles (reusable setting bundles)
 games/<appid>.json    # 🔵 per-game overrides (named after the SteamAppId)
 extensions/           # modules (bundled set exported here on first run, + your drop-ins)
-plugins/              # bundled plugins (e.g. hypr-monctl.so)
 ```
 
-Bundled resources (fonts, modules, plugins) are embedded in the binary. On startup Ritz
+Bundled resources (fonts, modules) are embedded in the binary. On startup Ritz
 exports any **missing** files into the config directory — it never overwrites ones you've
 edited. Use **Re-Export Modules** in General Settings to restore the shipped versions, and
 **Config Cleanup** to drop values for variables that no longer exist after a module update.

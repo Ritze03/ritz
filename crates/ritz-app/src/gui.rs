@@ -1376,10 +1376,10 @@ impl Detect {
     /// *Why the render site must ask this* (issue #2): the "Detecting… Ns"
     /// countdown that replaces the Detect button used to be gated on nothing but
     /// `field.variable == "window_class"` plus "some detection is in flight". Only
-    /// `hypr-monctl` declares `window_class` today, so there was never a second
-    /// field to mis-render into — but users drop their own modules into
-    /// `~/.config/ritz/extensions/`, and a second declarer would draw hypr-monctl's
-    /// countdown on *its* field while the result silently landed on hypr-monctl.
+    /// No bundled module declares `window_class` any more, but users drop their own
+    /// modules into `~/.config/ritz/extensions/`, and two declarers would draw one
+    /// module's countdown on the other's field while the result silently landed on
+    /// the first.
     ///
     /// `target`/`mode` are compared alongside `ext_id`/`var` because the same
     /// module's fields are drawn by two different surfaces — Config mode and the
@@ -1892,8 +1892,8 @@ impl GuiApp {
     /// see [`Detect::targets`]. The old inline form asked only whether *any*
     /// detection was waiting, so a second module declaring `window_class` — which
     /// any user can drop into `~/.config/ritz/extensions/` — would draw
-    /// hypr-monctl's countdown on its own field while the result landed on
-    /// hypr-monctl.
+    /// the first module's countdown on its own field while the result landed on
+    /// the first module.
     fn detect_countdown_secs(&self, ext_id: &str, var: &str) -> Option<u64> {
         let d = self
             .detect
@@ -6413,7 +6413,7 @@ fn join_names(names: &[String]) -> String {
 ///
 /// Measured against the bundled set (2026-07-19): with no suppression, the
 /// unreferenced-field half fires on **six of thirteen** bundled manifests —
-/// `custom-args`, `custom-env`, `custom-game-env`, `hypr-monctl`, `lsfg-vk` and
+/// `custom-args`, `custom-env`, `custom-game-env`, `hypr-monctl` (since removed), `lsfg-vk` and
 /// `scripts`. Every one is a false positive, and they share a cause: their
 /// fields are consumed by a **Rust backend handler**, a **hook script**, or a
 /// **`ScriptBuilders` script**, none of which this walk can see, because none of
@@ -10081,7 +10081,7 @@ fn inh_field_labels(spec: &Extension, fields: &[&UiField]) -> Vec<(String, Strin
 /// build-phase scope, not fields on this page, and names that are no UI field
 /// have nothing to scroll to.
 ///
-/// *Why:* most Gamescope / Hypr-Monctl values in real profiles sit behind an
+/// *Why:* most Gamescope / LSFG-VK values in real profiles sit behind an
 /// `enabled` toggle, so jumping straight to them landed on a page that did not
 /// show the field at all. The gate is the nearest thing the user can see.
 fn gating_field(
@@ -11633,7 +11633,7 @@ fn scope_checkbox(
 }
 
 /// Query the focused window's class via `hyprctl activewindow -j`. Prefers
-/// `initialClass` (what the hypr-monctl plugin matches on), falling back to `class`.
+/// `initialClass` (what Hyprland window rules match on), falling back to `class`.
 fn detect_active_window_class() -> Option<String> {
     let out = Command::new("hyprctl")
         .args(["activewindow", "-j"])
@@ -12980,8 +12980,8 @@ mod tests {
             result,
             start: Instant::now(),
             ext_id: ext_id.to_string(),
-            author: "Ritze".to_string(),
-            name: "HyprMonctl".to_string(),
+            author: "Someone".to_string(),
+            name: "WindowTools".to_string(),
             var: var.to_string(),
             nav,
             target,
@@ -12993,12 +12993,12 @@ mod tests {
     /// detection was actually started on — not to every field that happens to be
     /// named `window_class`.
     ///
-    /// *Why this is worth a test given only one shipped module declares
-    /// `window_class`:* the second declarer does not have to ship with ritz.
+    /// *Why this is worth a test given no shipped module declares
+    /// `window_class` any more:* a declarer never had to ship with ritz.
     /// Users drop their own modules into `~/.config/ritz/extensions/`, and the old
     /// gate ("some detection is waiting" AND "this variable is called
-    /// window_class") would then draw hypr-monctl's countdown on the user's field
-    /// while `poll_detect` wrote the detected value to hypr-monctl — the user
+    /// window_class") would then draw one module's countdown on the user's field
+    /// while `poll_detect` wrote the detected value to another — the user
     /// watches one module and a different one changes.
     #[test]
     fn detect_countdown_is_scoped_to_the_module_and_field_that_started_it() {
@@ -13006,7 +13006,7 @@ mod tests {
         let nav = app.nav_sel.clone();
         app.detect = Some(pending_detect(
             Arc::new(Mutex::new(DetectStatus::Waiting)),
-            "Ritze::HyprMonctl::1.0",
+            "Someone::WindowTools::1.0",
             "window_class",
             nav,
             WriteTarget::Scope,
@@ -13014,7 +13014,7 @@ mod tests {
         ));
 
         assert!(
-            app.detect_countdown_secs("Ritze::HyprMonctl::1.0", "window_class").is_some(),
+            app.detect_countdown_secs("Someone::WindowTools::1.0", "window_class").is_some(),
             "the field that started the detection lost its own countdown",
         );
         assert_eq!(
@@ -13023,7 +13023,7 @@ mod tests {
             "a second module declaring window_class drew another module's countdown",
         );
         assert_eq!(
-            app.detect_countdown_secs("Ritze::HyprMonctl::1.0", "some_other_var"),
+            app.detect_countdown_secs("Someone::WindowTools::1.0", "some_other_var"),
             None,
             "the countdown leaked onto a different field of the same module",
         );
@@ -13033,14 +13033,14 @@ mod tests {
         // preview's — `nav_sel` cannot, see `cancel_stale_detect`.
         app.write_target = WriteTarget::Preview;
         assert_eq!(
-            app.detect_countdown_secs("Ritze::HyprMonctl::1.0", "window_class"),
+            app.detect_countdown_secs("Someone::WindowTools::1.0", "window_class"),
             None,
             "a Config-mode detection drew its countdown in the IDE preview column",
         );
         app.write_target = WriteTarget::Scope;
         app.mode = Mode::Ide;
         assert_eq!(
-            app.detect_countdown_secs("Ritze::HyprMonctl::1.0", "window_class"),
+            app.detect_countdown_secs("Someone::WindowTools::1.0", "window_class"),
             None,
             "a detection started in Config mode drew its countdown under Mode::Ide",
         );
@@ -13075,7 +13075,7 @@ mod tests {
         let nav = app.nav_sel.clone();
         app.detect = Some(pending_detect(
             result,
-            "Ritze::HyprMonctl::1.0",
+            "Someone::WindowTools::1.0",
             "window_class",
             nav,
             WriteTarget::Scope,
@@ -13085,7 +13085,7 @@ mod tests {
         // Render-side read: back to the plain Detect button, not a countdown stuck
         // at 0 with no way out (the poisoned slot still literally holds `Waiting`).
         assert_eq!(
-            app.detect_countdown_secs("Ritze::HyprMonctl::1.0", "window_class"),
+            app.detect_countdown_secs("Someone::WindowTools::1.0", "window_class"),
             None,
         );
 
@@ -13094,7 +13094,7 @@ mod tests {
         assert!(!changed, "a poisoned detection reported a config change");
         assert!(app.detect.is_none(), "the poisoned detection was never cleared");
         assert_eq!(
-            app.game_config.get_value("Ritze", "HyprMonctl", "window_class"),
+            app.game_config.get_value("Someone", "WindowTools", "window_class"),
             None,
             "a poisoned detection wrote a value",
         );
@@ -14335,7 +14335,6 @@ mod tests {
             "default/vkd3d.json",
             "default/scripts/scripts.json",
             "built-in/lsfg-vk/lsfg-vk.json",
-            "built-in/hypr-monctl/hypr-monctl.json",
             "built-in/custom-env/custom-env.json",
             "built-in/custom-args/custom-args.json",
             "built-in/custom-game-env/custom-game-env.json",
@@ -15928,8 +15927,8 @@ mod tests {
     /// the design: the unreferenced-field half of `variable_reference_lints`
     /// fired on **six of thirteen** bundled modules before
     /// `has_opaque_var_consumer` was added (`custom-args`, `custom-env`,
-    /// `custom-game-env`, `hypr-monctl`, `lsfg-vk`, `scripts` — five backend
-    /// modules and one hook module, every one a false positive), which is what
+    /// `custom-game-env`, `hypr-monctl` (since removed), `lsfg-vk`,
+    /// `scripts` — five backend modules and one hook module, every one a false positive), which is what
     /// established that a module whose fields are read by Rust or by a shell
     /// script cannot be judged by walking its JSON.
     ///
@@ -15959,7 +15958,7 @@ mod tests {
             .map(|s| s.meta.name.as_str())
             .collect();
         assert!(
-            opaque.len() >= 6,
+            opaque.len() >= 5,
             "expected the backend/hook modules to be recognised as opaque, got: {opaque:?}"
         );
         // Each one really does declare fields — so the exemption is suppressing
