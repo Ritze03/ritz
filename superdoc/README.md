@@ -33,6 +33,7 @@ sections below to find the doc you need.
 ## claude-instructions/ — mandatory rules for agents
 
 - [Working with the Docs](claude-instructions/documentation.md) — doc-maintenance discipline: read before you touch, update after you change.
+- [Changelog Maintenance](claude-instructions/changelog.md) — every user-facing change adds a short plain-language dated entry to `CHANGELOG.md`.
 - [Documentation Version Policy](claude-instructions/documentation-version-policy.md) — how doc/version markers get bumped.
 
 ## meta/
